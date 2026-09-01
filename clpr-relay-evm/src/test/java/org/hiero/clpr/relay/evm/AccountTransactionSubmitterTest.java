@@ -105,11 +105,11 @@ class AccountTransactionSubmitterTest {
     }
 
     /** A unique 32-byte connection id from an integer index (supports up to 65536 connections). */
-    private static ClprConnection connectionWithIndex(final int index) {
+    private static ClprChannel connectionWithIndex(final int index) {
         final byte[] b = new byte[32];
         b[0] = (byte) (index >> 8);
         b[1] = (byte) index;
-        return ClprConnection.newBuilder().connectionId(Bytes.wrap(b)).build();
+        return ClprChannel.newBuilder().channelId(Bytes.wrap(b)).build();
     }
 
     /**

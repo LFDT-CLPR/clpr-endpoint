@@ -129,7 +129,7 @@ class AccountTransactionSubmitterIntegrationTest {
         final long before = latestNonce();
 
         for (int i = 0; i < connectionCount; i++) {
-            submitter.submit(TARGET, connection(connId(i)), bundle((byte) (i & 0xff), 2L, 1L));
+            submitter.submit(TARGET, channel(channelId(i)), bundle((byte) (i & 0xff), 2L, 1L));
         }
 
         // All 100 bundles must land as unique transactions — nonce advances by exactly 100.
@@ -144,8 +144,8 @@ class AccountTransactionSubmitterIntegrationTest {
         return rpc.ethGetTransactionCount(AnvilContainer.DEV_ADDRESS, "latest");
     }
 
-    /** A unique 32-byte connection id from an integer index (b[0]=high byte, b[1]=low byte). */
-    private static byte[] connId(final int index) {
+    /** A unique 32-byte channel id from an integer index (b[0]=high byte, b[1]=low byte). */
+    private static byte[] channelId(final int index) {
         final byte[] b = new byte[32];
         b[0] = (byte) (index >> 8);
         b[1] = (byte) index;
