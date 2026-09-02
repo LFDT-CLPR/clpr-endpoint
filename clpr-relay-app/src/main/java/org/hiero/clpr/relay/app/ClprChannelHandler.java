@@ -7,6 +7,7 @@ import com.swirlds.base.context.Context;
 import com.swirlds.logging.api.Logger;
 import com.swirlds.logging.api.Loggers;
 import com.swirlds.metrics.api.Metrics;
+import java.time.Duration;
 import java.util.function.UnaryOperator;
 import org.hiero.clpr.relay.core.BundleConstructor;
 import org.hiero.clpr.relay.core.BundlePayloadCodec;
@@ -22,11 +23,15 @@ import org.hiero.clpr.relay.core.RelayProtocol;
 import org.hiero.clpr.relay.core.TransactionSubmitter;
 import org.hiero.clpr.relay.core.metrics.LabeledCounter;
 import org.hiero.clpr.relay.evm.EthSigner;
+import org.hiero.clpr.relay.evm.EthereumPosBundleConstructor;
+import org.hiero.clpr.relay.evm.EthereumPosLedgerConfigurationProvider;
+import org.hiero.clpr.relay.evm.EthereumPosProofCodec;
 import org.hiero.clpr.relay.evm.EvmChannelStateChangeTask;
 import org.hiero.clpr.relay.evm.EvmContractStateReader;
 import org.hiero.clpr.relay.evm.EvmQbftLedgerConfigurationProvider;
 import org.hiero.clpr.relay.evm.QbftBundleConstructor;
 import org.hiero.clpr.relay.evm.QbftProofCodec;
+import org.hiero.clpr.relay.evm.beacon.BeaconApiClient;
 import org.hiero.clpr.relay.evm.model.Address;
 import org.hiero.clpr.relay.evm.sei.SeiBundleConstructor;
 import org.hiero.clpr.relay.evm.sei.SeiLedgerConfigurationProvider;
@@ -200,6 +205,20 @@ public final class ClprChannelHandler {
                         peerManifestVersions);
                 ledgerConfigProvider = new SeiLedgerConfigurationProvider(rpcClient, stateReader, cometBftRpcClient);
             }
+            case EthereumPOS -> {
+                final var beacon = network.config().beacon();
+                final var beaconClient = new BeaconApiClient(
+                        beacon.beaconApiUrl(), beacon.maxRetries(), Duration.ofMillis(beacon.requestTimeoutMs()));
+                bundleConstructor = new EthereumPosBundleConstructor(
+                        clprServiceAddress,
+                        beacon.maxMessagesPerBundle(),
+                        rpcClient,
+                        beaconClient,
+                        stateReader,
+                        peerManifestVersions);
+
+                ledgerConfigProvider = new EthereumPosLedgerConfigurationProvider(rpcClient, stateReader, beaconClient);
+            }
             default ->
                 throw new UnsupportedOperationException(
                         "Local network proof type " + network.proofType() + " is not supported");
@@ -327,6 +346,7 @@ public final class ClprChannelHandler {
             case QBFT -> new QbftProofCodec(channelId);
             case Hiero -> new HieroProofCodec();
             case CometBFT -> new SeiProofCodec(channelId);
+            case EthereumPOS -> new EthereumPosProofCodec();
         };
     }
 

@@ -59,7 +59,8 @@ class LocalNetworkAdapterTest {
                 new RelayConfig.CommonEvmParams(
                         "http://localhost:8545", 1L, Long.MAX_VALUE, 0L, 1.2, 1000L, 30_000L, 3),
                 null,
-                new RelayConfig.QbftConfig(30_000L, 5, 10));
+                new RelayConfig.QbftConfig(30_000L, 5, 10),
+                null);
     }
 
     private LocalNetworkAdapter adapter(final String networkId) {

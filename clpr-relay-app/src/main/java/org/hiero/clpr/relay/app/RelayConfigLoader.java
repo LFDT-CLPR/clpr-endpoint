@@ -7,6 +7,8 @@ import com.swirlds.config.api.Configuration;
 import com.swirlds.config.api.ConfigurationBuilder;
 import com.swirlds.config.extensions.sources.SimpleConfigSource;
 import com.swirlds.config.extensions.sources.SystemPropertiesConfigSource;
+import com.swirlds.logging.api.Logger;
+import com.swirlds.logging.api.Loggers;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -74,6 +76,8 @@ import org.jspecify.annotations.Nullable;
  * }</pre>
  */
 final class RelayConfigLoader {
+
+    private static final Logger log = Loggers.getLogger(RelayConfigLoader.class);
 
     /** System property naming the config file to load. */
     public static final String CONFIG_FILE_PROPERTY = "relay.configFile";
@@ -443,18 +447,29 @@ final class RelayConfigLoader {
                             proofType,
                             parseRequiredEvm(netMap, id),
                             null,
-                            parseQbftConfig(asMap(netMap.get("qbft"))));
+                            parseQbftConfig(asMap(netMap.get("qbft"))),
+                            null);
                 case CometBFT ->
                     new RelayConfig.LocalNetworkConfig(
                             id,
                             proofType,
                             parseRequiredEvm(netMap, id),
                             parseCometBftConfig(asMap(netMap.get("cometBft"))),
+                            null,
                             null);
+                case EthereumPOS ->
+                    new RelayConfig.LocalNetworkConfig(
+                            id,
+                            proofType,
+                            parseRequiredEvm(netMap, id),
+                            null,
+                            null,
+                            parseBeaconConfig(asMap(netMap.get("beacon"))));
                 case Hiero ->
-                    throw new IllegalArgumentException("localNetworks['" + id
-                            + "'].proofType=Hiero is not supported for a local network; the EVM relay only submits to"
-                            + " QBFT or CometBFT chains (Hiero may still be used as a channel's peerProofType)");
+                    throw new IllegalArgumentException(
+                            "localNetworks['" + id
+                                    + "'].proofType=Hiero is not supported for a local network; the EVM relay only submits to"
+                                    + " QBFT, CometBFT or EthereumPOS chains (Hiero may still be used as a channel's peerProofType)");
             };
         }
 
@@ -580,6 +595,19 @@ final class RelayConfigLoader {
                     maxPriorValidatorSetUpdates != null ? maxPriorValidatorSetUpdates : 10,
                     maxRetries != null ? maxRetries : 3,
                     requestTimeoutMs != null ? requestTimeoutMs : 5_000L);
+        }
+
+        private static RelayConfig.BeaconConfig parseBeaconConfig(@Nullable final Map<String, Object> beacon) {
+            final Map<String, Object> b = beacon != null ? beacon : Map.of();
+            final String beaconApiUrl = asString(b.get("beaconApiUrl"));
+            final Integer maxMessagesPerBundle = asInt(b.get("maxMessagesPerBundle"));
+            final Integer maxRetries = asInt(b.get("maxRetries"));
+            final Long requestTimeoutMs = asLong(b.get("requestTimeoutMs"));
+            return new RelayConfig.BeaconConfig(
+                    beaconApiUrl != null ? beaconApiUrl : "http://localhost:5052",
+                    maxMessagesPerBundle != null ? maxMessagesPerBundle : 10,
+                    maxRetries != null ? maxRetries : 3,
+                    requestTimeoutMs != null ? requestTimeoutMs : 30_000L);
         }
 
         /**

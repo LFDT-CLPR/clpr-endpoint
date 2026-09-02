@@ -31,6 +31,7 @@ The config is a three-tier hierarchy: `localNetworks[]` (a chain the relay talks
 | `localNetworks[].proofType`                     | — (**required**)  | `ProofType` discriminator: `QBFT` (Besu/QBFT) or `CometBFT` (Sei). Selects the `getLedgerConfiguration` payload and the inbound `BundlePayloadCodec`. `Hiero` is valid only as a resolved peer proof type, not for a local network.                                                                                                                         |
 | `localNetworks[].evm`                           | — (**required**)  | Common EVM connection parameters (see sub-table). Required for both `QBFT` and `CometBFT` networks.                                                                                                                                                                                                                                                         |
 | `localNetworks[].qbft`                          | defaults          | QBFT proof parameters (see sub-table). Applies to `QBFT` networks; omit to accept defaults.                                                                                                                                                                                                                                                                 |
+| `localNetworks[].beacon`                        | defaults          | Ethereum-PoS beacon (consensus-layer) proof parameters (see sub-table). Applies to `EthereumPOS` networks; omit to accept defaults.                                                                                                                                                                                                                         |
 | `localNetworks[].cometBft`                      | defaults          | CometBFT proof parameters (see sub-table). Applies to `CometBFT` networks; omit to accept defaults.                                                                                                                                                                                                                                                         |
 | `clprServices[].serviceAddress`                 | — (**required**)  | Checksummed hex address of the deployed `ClprService` contract. The default zero address is a non-functional placeholder. Multiple services may target the same `localNetwork`.                                                                                                                                                                             |
 | `clprServices[].localNetwork`                   | — (**required**)  | `id` of a `localNetworks[]` entry. The relay submits `submitBundle` transactions on this chain for the service's channels.                                                                                                                                                                                                                                  |
@@ -45,7 +46,7 @@ Channel-level settings are not per-channel config: the commitment level (`LATEST
 
 ### `localNetworks[].evm` sub-table
 
-Common EVM connection parameters (`CommonEvmParams`). Present on both `QBFT` and `CometBFT` networks — both run an EVM JSON-RPC and the `ClprService` contract.
+Common EVM connection parameters (`CommonEvmParams`). Present on  `QBFT`, `EthereumPOS` and `CometBFT` networks — both run an EVM JSON-RPC and the `ClprService` contract.
 
 |          Key          |         Default         |                                                                                 Notes                                                                                  |
 |-----------------------|-------------------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
@@ -79,6 +80,17 @@ CometBFT proof parameters (`CometBftConfig`). Applies to `CometBFT` networks; co
 | `maxPriorValidatorSetUpdates` | `10`                     | Maximum prior validator-set updates (trust-anchor rotations) to include in a single bundle when advancing a lagging peer across validator-set changes. |
 | `maxRetries`                  | `3`                      | Max retry attempts for a CometBFT RPC call on transient failure, beyond the initial attempt.                                                           |
 | `requestTimeoutMs`            | `5000`                   | Per-request CometBFT RPC response timeout (ms).                                                                                                        |
+
+### `localNetworks[].beacon` sub-table
+
+Ethereum-PoS beacon (consensus-layer) proof parameters (`BeaconConfig`). Applies to `EthereumPOS` networks; configures the beacon-node REST client used to fetch sync-committee light-client data (the EVM side — contract reads and `submitBundle` — is configured via the `evm` block).
+
+|          Key           |         Default         |                                                                   Notes                                                                   |
+|------------------------|-------------------------|-------------------------------------------------------------------------------------------------------------------------------------------|
+| `beaconApiUrl`         | `http://localhost:5052` | Beacon node REST API base URL for sync-committee light-client data (attested header, sync aggregate, execution payload header, branches). |
+| `maxMessagesPerBundle` | `10`                    | Maximum messages to include in an Ethereum-PoS bundle.                                                                                    |
+| `maxRetries`           | `3`                     | Max retry attempts for a beacon REST call on transient failure, beyond the initial attempt.                                               |
+| `requestTimeoutMs`     | `30000` (30 s)          | Per-request beacon REST response timeout (ms).                                                                                            |
 
 ## Running
 

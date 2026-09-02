@@ -179,7 +179,8 @@ public final class RelayTestSupport {
                         2000L,
                         1),
                 null,
-                new RelayConfig.QbftConfig(30_000L, 5, 10));
+                new RelayConfig.QbftConfig(30_000L, 5, 10),
+                null);
     }
 
     private static List<RelayConfig.ClprServiceConfig> channels(

@@ -237,6 +237,64 @@ class RelayConfigLoaderTest {
     }
 
     @Test
+    void ethereumPosLocalNetwork_parsedWithBeaconBlock(@TempDir final Path tmp) throws Exception {
+        final var yaml = tmp.resolve("ethereum-pos.yaml");
+        Files.writeString(yaml, """
+                signingPrivateKeyHex: "0xaabbccdd"
+                localNetworks:
+                  - id: ethereum-local
+                    proofType: EthereumPOS
+                    evm:
+                      jsonRpcUrl: "http://eth:8545"
+                      chainId: 1
+                    beacon:
+                      beaconApiUrl: "http://eth:5052"
+                      maxMessagesPerBundle: 7
+                      maxRetries: 9
+                      requestTimeoutMs: 12000
+                """);
+
+        final var config = RelayConfigLoader.load(yaml, new Properties());
+
+        final var net = config.localNetworks().getFirst();
+        assertThat(net.proofType()).isEqualTo(ProofType.EthereumPOS);
+        assertThat(net.evm()).isNotNull();
+        assertThat(net.evm().jsonRpcUrl()).isEqualTo("http://eth:8545");
+        assertThat(net.cometBft()).isNull();
+        assertThat(net.qbft()).isNull();
+        assertThat(net.beacon()).isNotNull();
+        assertThat(net.beacon().beaconApiUrl()).isEqualTo("http://eth:5052");
+        assertThat(net.beacon().maxMessagesPerBundle()).isEqualTo(7);
+        assertThat(net.beacon().maxRetries()).isEqualTo(9);
+        assertThat(net.beacon().requestTimeoutMs()).isEqualTo(12000L);
+    }
+
+    @Test
+    void ethereumPosLocalNetwork_beaconDefaultsWhenBlockAbsentAndProofTypeIsCaseInsensitive(@TempDir final Path tmp)
+            throws Exception {
+        final var yaml = tmp.resolve("ethereum-pos-defaults.yaml");
+        Files.writeString(yaml, """
+                signingPrivateKeyHex: "0xaabbccdd"
+                localNetworks:
+                  - id: ethereum-local
+                    proofType: ethereumpos
+                    evm:
+                      jsonRpcUrl: "http://eth:8545"
+                """);
+
+        final var config = RelayConfigLoader.load(yaml, new Properties());
+
+        final var net = config.localNetworks().getFirst();
+        assertThat(net.proofType()).isEqualTo(ProofType.EthereumPOS);
+        // A missing `beacon:` block yields an all-defaults BeaconConfig (never null for EthereumPOS).
+        assertThat(net.beacon()).isNotNull();
+        assertThat(net.beacon().beaconApiUrl()).isEqualTo("http://localhost:5052");
+        assertThat(net.beacon().maxMessagesPerBundle()).isEqualTo(10);
+        assertThat(net.beacon().maxRetries()).isEqualTo(3);
+        assertThat(net.beacon().requestTimeoutMs()).isEqualTo(30000L);
+    }
+
+    @Test
     void localNetwork_invalidProofType_failsFast(@TempDir final Path tmp) throws Exception {
         final var yaml = tmp.resolve("bad-proof-type.yaml");
         Files.writeString(yaml, """
@@ -357,6 +415,7 @@ class RelayConfigLoaderTest {
     void multipleServicesOnSameNetwork_isValid(@TempDir final Path tmp) throws Exception {
         final var yaml = tmp.resolve("two-services.yaml");
         Files.writeString(yaml, """
+                signingPrivateKeyHex: "0xaabbccdd"
                 localNetworks:
                   - id: chain-a
                     proofType: QBFT

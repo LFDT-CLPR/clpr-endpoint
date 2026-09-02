@@ -24,5 +24,13 @@ public enum ProofType {
      */
     QBFT,
     CometBFT,
-    Hiero
+    Hiero,
+    /**
+     * Ethereum mainnet (post-Merge, proof-of-stake) and L2s anchoring to it.
+     * {@code getLedgerConfiguration} returns an {@code EthereumPosLedgerConfigurationPayload} carrying
+     * the sync-committee light-client material; bundles are a nine-item RLP verified by the
+     * Hiero-native {@code EthereumSyncCommitteeProofVerifier} against a sync-committee BLS finality
+     * proof.
+     */
+    EthereumPOS
 }

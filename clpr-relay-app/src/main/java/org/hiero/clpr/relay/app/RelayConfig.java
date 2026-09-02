@@ -103,25 +103,29 @@ public record RelayConfig(
      *
      * <p>The {@code proofType} selects the correct {@code BundlePayloadCodec} for inbound sync payloads
      * and the {@code getLedgerConfiguration} payload type. The typed sub-blocks ({@code evm},
-     * {@code cometBft}, {@code qbft}) carry the network connection and proof parameters required to
-     * make RPC calls and build bundles.
+     * {@code cometBft}, {@code qbft}, {@code beacon}) carry the network connection and proof
+     * parameters required to make RPC calls and build bundles.
      *
      * @param id        unique identifier for this network (referenced by {@link ClprServiceConfig})
      * @param proofType proof format discriminator used to build the implementation bundle and to
      *                  select the {@code BundlePayloadCodec} for inbound bundles
      * @param evm       EVM network connection parameters; non-null when {@code proofType} is
-     *                  {@link ProofType#QBFT} or {@link ProofType#CometBFT}
+     *                  {@link ProofType#QBFT}, {@link ProofType#CometBFT}, or
+     *                  {@link ProofType#EthereumPOS}
      * @param cometBft  CometBFT proof parameters; non-null when {@code proofType} is
      *                  {@link ProofType#CometBFT}, otherwise {@code null}
      * @param qbft      QBFT proof parameters; non-null when {@code proofType} is
      *                  {@link ProofType#QBFT}, otherwise {@code null}
+     * @param beacon    Ethereum-PoS beacon (consensus-layer) proof parameters; non-null when
+     *                  {@code proofType} is {@link ProofType#EthereumPOS}, otherwise {@code null}
      */
     public record LocalNetworkConfig(
             String id,
             ProofType proofType,
             CommonEvmParams evm,
             @Nullable CometBftConfig cometBft,
-            @Nullable QbftConfig qbft) {}
+            @Nullable QbftConfig qbft,
+            @Nullable BeaconConfig beacon) {}
 
     /**
      * Common EVM network connection parameters. Present on {@link LocalNetworkConfig} entries whose
@@ -197,6 +201,21 @@ public record RelayConfig(
             int maxPriorValidatorSetUpdates,
             int maxRetries,
             long requestTimeoutMs) {}
+
+    /**
+     * Ethereum-PoS beacon (consensus-layer) configuration. Present on {@link LocalNetworkConfig}
+     * entries whose {@code proofType} is {@link ProofType#EthereumPOS}.
+     *
+     * @param beaconApiUrl         HTTP URL of the beacon node REST API
+     *                             (default: {@code http://localhost:5052})
+     * @param maxMessagesPerBundle maximum number of messages to include in a single bundle
+     *                             (default: {@code 10})
+     * @param maxRetries           maximum retry attempts for a beacon API call on a transient
+     *                             failure, in addition to the initial attempt (default: {@code 3})
+     * @param requestTimeoutMs     per-request beacon API response timeout in milliseconds
+     *                             (default: {@code 30000} = 30 s)
+     */
+    public record BeaconConfig(String beaconApiUrl, int maxMessagesPerBundle, int maxRetries, long requestTimeoutMs) {}
 
     /**
      * Shared gRPC settings: the max inbound message size applied symmetrically to every inbound

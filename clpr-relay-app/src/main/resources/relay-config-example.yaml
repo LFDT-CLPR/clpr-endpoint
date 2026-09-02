@@ -58,6 +58,8 @@ grpc:
 #              (epoch block header + EIP-1186 proofs).
 #   CometBFT — EVM chain using CometBFT consensus (Sei). getLedgerConfiguration returns a
 #              ClprSeiLedgerConfigurationPayload (validator set + ledger configuration).
+#   EthereumPOS — EVM chain using Ethereum POS consensus. getLedgerConfiguration returns a
+#               EthereumPosLedgerConfigurationPayload (light-client update + sync committee).
 #
 # (The Hiero proof type is valid only as a channel's peerProofType, not for a local network.)
 localNetworks:
@@ -121,6 +123,29 @@ localNetworks:
       maxRetries: 3
       # Per-request CometBFT RPC response timeout in ms (default: 5000).
       requestTimeoutMs: 5000
+
+  # ── Local Ethereum (PoS) chain ──
+  # Ethereum mainnet is EVM, so it reuses the evm: block for the EVM side (contract reads +
+  # submitBundle). The sync-committee light-client proof path is configured in the separate
+  # `beacon:` block, which points at a consensus-layer (beacon node) REST endpoint.
+  - id: ethereum-local
+    proofType: EthereumPOS
+    evm:
+      # Execution-layer JSON-RPC endpoint (contract reads + submitBundle transactions).
+      jsonRpcUrl: http://localhost:8545
+      # EIP-155 chain id (1 = Ethereum mainnet).
+      chainId: 1
+    # Ethereum-PoS beacon (consensus-layer) proof parameters (only used for EthereumPOS networks).
+    beacon:
+      # Beacon node REST API base URL for sync-committee light-client data — attested header,
+      # sync aggregate, execution payload header, and SSZ branches (default: http://localhost:5052).
+      beaconApiUrl: http://localhost:5052
+      # Maximum messages to include in an Ethereum-PoS bundle (default: 10).
+      maxMessagesPerBundle: 10
+      # Max retry attempts for a beacon REST call on transient failure (default: 3).
+      maxRetries: 3
+      # Per-request beacon REST response timeout in ms (default: 30000).
+      requestTimeoutMs: 30000
 
 # ClprService contract deployments the relay operates against. Each entry pins one on-chain
 # ClprService contract on one localNetwork, carries the signing key(s) for its channels, and
