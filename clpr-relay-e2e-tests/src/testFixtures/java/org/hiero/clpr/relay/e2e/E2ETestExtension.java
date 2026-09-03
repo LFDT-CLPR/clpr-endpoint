@@ -42,7 +42,7 @@ import org.testcontainers.DockerClientFactory;
  *       <em>method</em>-scoped store, so JUnit closes it after every test method. Per-method
  *       isolation is mandatory here: a channel whose backlog exceeded the relay's bundle batch is
  *       wedged for good, so a shared environment would let one test poison the rest.
- *   <li>{@link TestWatcher} — dump container logs and chain state on failure. Without that a red
+ *   <li>{@code TestWatcher} — dump container logs and chain state on failure. Without that a red
  *       E2E run is close to undiagnosable after the containers are gone.
  * </ul>
  */
@@ -245,13 +245,17 @@ public final class E2ETestExtension
             write(
                     dir.resolve("endpoint-" + endpoint.id() + ".log"),
                     endpoint.logs().text());
-            write(dir.resolve("endpoint-" + endpoint.id() + "-config.yaml"), endpoint.renderConfig());
+            try {
+                write(dir.resolve("endpoint-" + endpoint.id() + "-config.yaml"), endpoint.renderConfig());
+            } catch (final RuntimeException e) {
+                writeUnavailable(dir.resolve("endpoint-" + endpoint.id() + "-config.yaml"), e);
+            }
             try {
                 write(
                         dir.resolve("endpoint-" + endpoint.id() + "-metrics.txt"),
                         endpoint.metrics().raw());
             } catch (final RuntimeException e) {
-                write(dir.resolve("endpoint-" + endpoint.id() + "-metrics.txt"), "unavailable: " + e);
+                writeUnavailable(dir.resolve("endpoint-" + endpoint.id() + "-metrics.txt"), e);
             }
         }
 
@@ -273,7 +277,16 @@ public final class E2ETestExtension
                         .append('\n'));
                 write(dir.resolve("chain-" + network.id() + ".txt"), chain.toString());
             } catch (final RuntimeException e) {
-                write(dir.resolve("chain-" + network.id() + ".txt"), "unavailable: " + e);
+                writeUnavailable(dir.resolve("chain-" + network.id() + ".txt"), e);
+            }
+            // Mined-block history says nothing about a transaction the pool is holding but never
+            // included, which is exactly the state a wedged wiring transaction leaves behind.
+            try {
+                write(
+                        dir.resolve("txpool-" + network.id() + ".json"),
+                        network.rawRpc().call("txpool_content").toPrettyString());
+            } catch (final RuntimeException e) {
+                writeUnavailable(dir.resolve("txpool-" + network.id() + ".json"), e);
             }
         }
         System.err.println("[e2e] diagnostics written to " + dir.toAbsolutePath());
@@ -303,5 +316,19 @@ public final class E2ETestExtension
         } catch (final IOException e) {
             throw new UncheckedIOException("failed to write " + target, e);
         }
+    }
+
+    // Writes the "unavailable: <exception>" placeholder to the artifact AND surfaces the same
+    // failure on stderr with a stack trace, so a reviewer inspecting a failed run sees the
+    // diagnostic-collection bug (not just its silent placeholder in the artifact bundle).
+    private static void writeUnavailable(final Path target, final Throwable cause) {
+        final StringBuilder body =
+                new StringBuilder("unavailable: ").append(cause).append('\n');
+        for (final StackTraceElement frame : cause.getStackTrace()) {
+            body.append("\tat ").append(frame).append('\n');
+        }
+        write(target, body.toString());
+        System.err.println("[e2e] diagnostic collection failed for " + target.getFileName() + ": " + cause);
+        cause.printStackTrace(System.err);
     }
 }

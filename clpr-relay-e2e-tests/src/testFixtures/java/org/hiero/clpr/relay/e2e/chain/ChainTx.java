@@ -3,6 +3,7 @@ package org.hiero.clpr.relay.e2e.chain;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import java.math.BigInteger;
+import java.time.Duration;
 import org.hiero.clpr.relay.evm.AbiCodec;
 import org.hiero.clpr.relay.evm.jsonrpc.EvmJsonRpcClient;
 import org.hiero.clpr.relay.test.harness.ChainTxSubmitter;
@@ -25,13 +26,36 @@ public final class ChainTx {
      * Osaka off precisely because inbound bundles can exceed it, but nothing the framework itself sends
      * (registrations, deploys, sends, transfers) comes close, and the relay's own {@code submitBundle}
      * goes through its own submitter rather than this class.
+     *
+     * <p>Sized further below EIP-7825 than a lone-call budget would need. Besu's EIP-1559 admission
+     * check reserves {@code gasLimit × maxFeePerGas} against the sender's balance at pool-entry
+     * ({@code 4M × 100 gwei = 0.4 ETH} per pending tx against a genesis-funded 8-ETH account), and
+     * many-channel wiring drives dozens of sequential framework calls through the same account. A
+     * 12M limit here made single pending txs sit in the pool while Besu produced empty blocks
+     * ("1 pending / 0 gas") long past any receipt-wait budget; 4M cleared it while still comfortably
+     * covering the largest observed call at ~1.2M actual gas.
      */
-    public static final long DEFAULT_GAS_LIMIT = 12_000_000L;
+    public static final long DEFAULT_GAS_LIMIT = 4_000_000L;
+
+    /**
+     * Gas limit for a plain ETH transfer ({@link #fund}). A transfer carries no calldata, so it only
+     * ever runs the recipient's {@code receive()}; even a nontrivial one comfortably fits under 100k,
+     * a small fraction of {@link #DEFAULT_GAS_LIMIT}. Observed necessary: a 12,000,000 declared gas
+     * limit on a transaction that only ever spends ~21-22k left it accepted into the pool (a hash
+     * comes back) but never selected into a block by Besu's QBFT block-transaction-selector, even
+     * across 100+ subsequent one-second blocks with nothing else contending for space — a right-sized
+     * limit clears it.
+     */
+    public static final long PLAIN_TRANSFER_GAS_LIMIT = 100_000L;
 
     /** Receipt polling: 240 x 250 ms = 60 s, comfortably above the 1 s block period. */
     public static final int RECEIPT_POLL_ATTEMPTS = 240;
 
     public static final long RECEIPT_POLL_INTERVAL_MS = 250L;
+
+    /** Default receipt-wait budget: {@link #RECEIPT_POLL_ATTEMPTS} x {@link #RECEIPT_POLL_INTERVAL_MS}. */
+    public static final Duration DEFAULT_RECEIPT_TIMEOUT =
+            Duration.ofMillis(RECEIPT_POLL_ATTEMPTS * RECEIPT_POLL_INTERVAL_MS);
 
     /**
      * Largest value a single transaction can carry.
@@ -63,7 +87,27 @@ public final class ChainTx {
             final byte[] callData,
             final BigInteger valueWei,
             final String what) {
-        return sendAndAwait(rpc, null, submitter, to, callData, valueWei, what);
+        return sendAndAwait(rpc, null, submitter, to, callData, valueWei, what, DEFAULT_RECEIPT_TIMEOUT);
+    }
+
+    /**
+     * Send a contract call and wait for it to succeed, with a caller-supplied receipt-wait budget.
+     *
+     * <p>For callers issuing many sequential transactions back-to-back (e.g. wiring dozens of
+     * channels) where a transient stall on the chain or host can push a single receipt past the
+     * default 60s comfortably-above-block-period budget without anything actually being wrong.
+     *
+     * @param timeout how long to wait for a receipt before giving up
+     */
+    public static JsonNode sendAndAwait(
+            final EvmJsonRpcClient rpc,
+            final ChainTxSubmitter submitter,
+            final String to,
+            final byte[] callData,
+            final BigInteger valueWei,
+            final String what,
+            final Duration timeout) {
+        return sendAndAwait(rpc, null, submitter, to, callData, valueWei, what, timeout);
     }
 
     /**
@@ -91,22 +135,81 @@ public final class ChainTx {
             final byte[] callData,
             final BigInteger valueWei,
             final String what) {
-        final String txHash = submitter.sendRawTx(to, callData, requireTransferable(valueWei, what), DEFAULT_GAS_LIMIT);
-        for (int attempt = 0; attempt < RECEIPT_POLL_ATTEMPTS; attempt++) {
+        return sendAndAwait(rpc, raw, submitter, to, callData, valueWei, what, DEFAULT_RECEIPT_TIMEOUT);
+    }
+
+    /**
+     * Send a contract call and wait for it to succeed, replaying a revert to recover its reason, with
+     * a caller-supplied receipt-wait budget. See {@link #sendAndAwait(EvmJsonRpcClient,
+     * ChainTxSubmitter, String, byte[], BigInteger, String, Duration)} for why a caller would want one.
+     *
+     * @param timeout how long to wait for a receipt before giving up
+     */
+    public static JsonNode sendAndAwait(
+            final EvmJsonRpcClient rpc,
+            @Nullable final RawJsonRpc raw,
+            final ChainTxSubmitter submitter,
+            final String to,
+            final byte[] callData,
+            final BigInteger valueWei,
+            final String what,
+            final Duration timeout) {
+        return sendAndAwait(rpc, raw, submitter, to, callData, valueWei, what, timeout, DEFAULT_GAS_LIMIT);
+    }
+
+    /**
+     * Send a raw transaction and wait for it to succeed, with a caller-supplied gas limit.
+     *
+     * <p>Every other overload hands this {@link #DEFAULT_GAS_LIMIT}, generous headroom for a contract
+     * call. {@link #fund} hands it {@link #PLAIN_TRANSFER_GAS_LIMIT} instead — see that constant's
+     * javadoc for why an oversized declared limit on a plain transfer is not merely wasteful but can
+     * leave the transaction accepted into the pool and never selected into a block.
+     *
+     * @param gasLimit the transaction's declared gas limit
+     */
+    private static JsonNode sendAndAwait(
+            final EvmJsonRpcClient rpc,
+            @Nullable final RawJsonRpc raw,
+            final ChainTxSubmitter submitter,
+            final String to,
+            final byte[] callData,
+            final BigInteger valueWei,
+            final String what,
+            final Duration timeout,
+            final long gasLimit) {
+        final String txHash = submitter.sendRawTx(to, callData, requireTransferable(valueWei, what), gasLimit);
+        final JsonNode receipt = awaitReceipt(rpc, txHash, what, timeout);
+        final JsonNode status = receipt.get("status");
+        final String value = status == null || status.isNull() ? "0x0" : status.asText();
+        if ("0x1".equalsIgnoreCase(value)) {
+            return receipt;
+        }
+        throw new IllegalStateException(what + " reverted (tx " + txHash + ")"
+                + replayReason(raw, receipt, submitter.address(), to, callData) + ", receipt=" + receipt);
+    }
+
+    /**
+     * Poll {@code eth_getTransactionReceipt} until a non-null receipt appears or the {@code timeout}
+     * elapses. Status/reverted handling is left to the caller — this only owns the "wait for the
+     * receipt to become visible" step, since {@link #sendAndAwait} and
+     * {@code awaitContractAddress} both need it but diverge on what they read out
+     * of the receipt afterwards.
+     */
+    static JsonNode awaitReceipt(
+            final EvmJsonRpcClient rpc, final String txHash, final String what, final Duration timeout) {
+        // Math.max guards against sub-interval timeouts silently degrading to zero polls; at least
+        // one lookup is always attempted so the failure message reflects an actual node round-trip
+        // rather than an off-by-truncation "0s" report.
+        final int attempts = Math.max(1, (int) (timeout.toMillis() / RECEIPT_POLL_INTERVAL_MS));
+        for (int attempt = 0; attempt < attempts; attempt++) {
             final JsonNode receipt = rpc.ethGetTransactionReceipt(txHash);
             if (receipt != null && !receipt.isNull()) {
-                final JsonNode status = receipt.get("status");
-                final String value = status == null || status.isNull() ? "0x0" : status.asText();
-                if ("0x1".equalsIgnoreCase(value)) {
-                    return receipt;
-                }
-                throw new IllegalStateException(what + " reverted (tx " + txHash + ")"
-                        + replayReason(raw, receipt, submitter.address(), to, callData) + ", receipt=" + receipt);
+                return receipt;
             }
             sleep();
         }
-        throw new IllegalStateException("no receipt for " + what + " (tx " + txHash + ") after "
-                + (RECEIPT_POLL_ATTEMPTS * RECEIPT_POLL_INTERVAL_MS / 1000) + "s");
+        throw new IllegalStateException(
+                "no receipt for " + what + " (tx " + txHash + ") after " + timeout.toSeconds() + "s");
     }
 
     /**
@@ -191,7 +294,22 @@ public final class ChainTx {
             final String to,
             final BigInteger valueWei,
             final String what) {
-        return sendAndAwait(rpc, submitter, to, new byte[0], valueWei, what);
+        return fund(rpc, submitter, to, valueWei, what, DEFAULT_RECEIPT_TIMEOUT);
+    }
+
+    /**
+     * Transfer ETH and wait for the transfer to succeed, with a caller-supplied receipt-wait budget.
+     *
+     * @param timeout how long to wait for a receipt before giving up
+     */
+    public static JsonNode fund(
+            final EvmJsonRpcClient rpc,
+            final ChainTxSubmitter submitter,
+            final String to,
+            final BigInteger valueWei,
+            final String what,
+            final Duration timeout) {
+        return sendAndAwait(rpc, null, submitter, to, new byte[0], valueWei, what, timeout, PLAIN_TRANSFER_GAS_LIMIT);
     }
 
     /**

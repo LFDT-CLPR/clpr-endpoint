@@ -3,6 +3,7 @@ package org.hiero.clpr.relay.e2e.channel;
 
 import java.math.BigInteger;
 import java.security.SecureRandom;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.IdentityHashMap;
 import java.util.LinkedHashMap;
@@ -39,9 +40,27 @@ public final class Channels {
     private final List<Channel> channels = new ArrayList<>();
     private final Set<Channel> wired = java.util.Collections.newSetFromMap(new IdentityHashMap<>());
     private final Accounts accounts;
+    private Duration wiringReceiptTimeout = ChainTx.DEFAULT_RECEIPT_TIMEOUT;
 
     public Channels(final Accounts accounts) {
         this.accounts = accounts;
+    }
+
+    /**
+     * Override the receipt-wait budget used for every on-chain wiring transaction.
+     *
+     * <p>Wiring many channels means many sequential transactions on the same chain, each still bound
+     * by the same fixed budget as a lone call — {@link ChainTx#DEFAULT_RECEIPT_TIMEOUT} is generous
+     * for one transaction but a single transient stall late in a long sequential run can exceed it
+     * even though the chain isn't actually stuck. Tests wiring at scale should raise this.
+     *
+     * @param timeout the new receipt-wait budget for subsequent {@link #wireAll()} /
+     *     {@link #wireForDiscovery} / {@link #registerFreshConnector} calls
+     * @return this, for chaining before {@code createMany}/{@code startAll()}
+     */
+    public Channels withWiringReceiptTimeout(final Duration timeout) {
+        this.wiringReceiptTimeout = timeout;
+        return this;
     }
 
     /**
@@ -220,7 +239,8 @@ public final class Channels {
                     net.contracts().clprService(),
                     ClprAbi.registerChannel(channelId, commitment),
                     BigInteger.ZERO,
-                    "registerChannel on " + net.id());
+                    "registerChannel on " + net.id(),
+                    wiringReceiptTimeout);
         }
 
         // Cross-wired proofs: each side is completed with a proof of the OTHER chain's state.
@@ -244,7 +264,8 @@ public final class Channels {
                 ClprAbi.completeChannel(
                         channelId, operator.publicKey64(), sigA, salt, verifierA, proofOfB, manifestOfB),
                 BigInteger.ZERO,
-                "completeChannel on " + netA.id());
+                "completeChannel on " + netA.id(),
+                wiringReceiptTimeout);
         ChainTx.sendAndAwait(
                 netB.rpc(),
                 netB.rawRpc(),
@@ -253,7 +274,8 @@ public final class Channels {
                 ClprAbi.completeChannel(
                         channelId, operator.publicKey64(), sigB, salt, verifierB, proofOfA, manifestOfA),
                 BigInteger.ZERO,
-                "completeChannel on " + netB.id());
+                "completeChannel on " + netB.id(),
+                wiringReceiptTimeout);
 
         // completeChannel succeeding already proves the manifest proof passed the inner verifier;
         // this confirms the channel actually carries a peer manifest rather than the version-0
@@ -313,7 +335,8 @@ public final class Channels {
                 net.contracts().clprService(),
                 ClprAbi.registerConnector(ClprIds.connectorCommitment(connectorId, operator.publicKey64())),
                 BigInteger.ZERO,
-                "registerConnector on " + net.id());
+                "registerConnector on " + net.id(),
+                wiringReceiptTimeout);
 
         final byte[] sig = new EthSigner(operator.privateKeyHex())
                 .signMessage(ClprIds.revealDigest(connectorId, net.contracts().clprService()));
@@ -331,9 +354,10 @@ public final class Channels {
                         connectorContract,
                         operator.address()),
                 stakeWei,
-                "completeConnector on " + net.id());
+                "completeConnector on " + net.id(),
+                wiringReceiptTimeout);
 
-        final Connector connector = new Connector(net, connectorId, connectorContract);
+        final Connector connector = new Connector(net, connectorId, connectorContract, wiringReceiptTimeout);
         // The stake is locked in the service; this is the separate prepaid budget the connector
         // contract spends on inbound message execution. Zero is a legitimate request — it is how the
         // underfunded-connector scenario is set up — so skip the transfer rather than sending nothing.
@@ -354,7 +378,8 @@ public final class Channels {
                 verifier,
                 ClprAbi.setSeedEndpoints(endpoints),
                 BigInteger.ZERO,
-                "setSeedEndpoints on " + net.id());
+                "setSeedEndpoints on " + net.id(),
+                wiringReceiptTimeout);
     }
 
     private void requirePeerManifest(final BesuNetwork net, final byte[] channelId) {
@@ -386,11 +411,11 @@ public final class Channels {
     }
 
     private String deploy(final BesuNetwork net, final String innerVerifier) {
-        return net.deployer().deployChannelVerifier(innerVerifier);
+        return net.deployer().deployChannelVerifier(innerVerifier, wiringReceiptTimeout);
     }
 
     private String deployConnector(final BesuNetwork net) {
-        return net.deployer().deployConnector();
+        return net.deployer().deployConnector(wiringReceiptTimeout);
     }
 
     /**

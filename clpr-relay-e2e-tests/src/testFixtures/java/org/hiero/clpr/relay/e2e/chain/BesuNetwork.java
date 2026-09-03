@@ -5,6 +5,7 @@ import java.nio.file.Path;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.function.IntFunction;
 import org.hiero.clpr.relay.evm.AbiCodec;
 import org.hiero.clpr.relay.evm.EthSigner;
@@ -100,7 +101,14 @@ public final class BesuNetwork {
         // sequences on one address surface as `nonce too low`, which is indistinguishable from the
         // relay-side submission bug this suite exists to catch.
         this.deployerAccount = accounts.allocate(spec.id() + " deployer");
-        this.genesis = new BesuQbftGenesis(spec, validatorKeys, accounts.all());
+        // Give the deployer a much larger genesis balance than the other accounts. It funds every
+        // per-channel connector top-up ({@link ChannelSpec#DEFAULT_CONNECTOR_FUNDING_WEI}, 1 ETH),
+        // so at ten channels the total outflow already exceeds a default-balance account.
+        this.genesis = new BesuQbftGenesis(
+                spec,
+                validatorKeys,
+                accounts.all(),
+                Map.of(deployerAccount.address(), BesuQbftGenesis.DEPLOYER_BALANCE_WEI));
 
         for (int i = 0; i < spec.nodeCount(); i++) {
             final boolean isValidator = i < spec.validatorCount();

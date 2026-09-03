@@ -2,6 +2,7 @@
 package org.hiero.clpr.relay.e2e.chain;
 
 import com.fasterxml.jackson.databind.JsonNode;
+import java.time.Duration;
 import org.hiero.clpr.relay.evm.AbiCodec;
 import org.hiero.clpr.relay.evm.jsonrpc.EvmJsonRpcClient;
 import org.hiero.clpr.relay.integration.AnvilTxSubmitter;
@@ -34,6 +35,21 @@ public final class E2eContractDeployer {
      */
     public static final int REQUIRED_COMMITTED_SEALS = 1;
 
+    /**
+     * Gas limit for the small contract creates this class issues (per-chain {@code QBFTVerifier} +
+     * {@code E2EApplication}; per-channel {@code QbftE2EVerifier} + {@code MockClprConnector}).
+     *
+     * <p>All four observed at ~1.1M–2.2M actual gas, so 4M is a comfortable buffer. Kept well
+     * below {@link ChainTx#DEFAULT_GAS_LIMIT} on purpose: Besu's EIP-1559 balance check reserves
+     * {@code gasLimit × maxFeePerGas} at admission ({@code 12M × 100 gwei = 1.2 ETH} per pending
+     * tx against a genesis-funded 8-ETH deployer), and at scale that reservation starves the pool
+     * long before the deployer's actual balance runs out — the failing "pending / 0 gas" empty
+     * blocks in the many-channel wiring path traced back to exactly this. A right-sized limit here
+     * mirrors {@link ChainTx#PLAIN_TRANSFER_GAS_LIMIT}'s reasoning: don't declare gas you can't
+     * plausibly spend.
+     */
+    private static final long DEPLOY_GAS_LIMIT = 4_000_000L;
+
     private final EvmJsonRpcClient rpc;
     private final AnvilTxSubmitter txSubmitter;
 
@@ -64,8 +80,9 @@ public final class E2eContractDeployer {
         } catch (final Exception e) {
             throw new IllegalStateException("failed to deploy the CLPR core on " + caip2ChainId, e);
         }
-        final String qbftVerifier = deploy("QBFTVerifier", AbiCodec.encodeUint(REQUIRED_COMMITTED_SEALS));
-        final String application = deploy("E2EApplication", new byte[0]);
+        final String qbftVerifier =
+                deploy("QBFTVerifier", AbiCodec.encodeUint(REQUIRED_COMMITTED_SEALS), ChainTx.DEFAULT_RECEIPT_TIMEOUT);
+        final String application = deploy("E2EApplication", new byte[0], ChainTx.DEFAULT_RECEIPT_TIMEOUT);
         return new E2eContracts(core, qbftVerifier, application);
     }
 
@@ -78,24 +95,29 @@ public final class E2eContractDeployer {
      * otherwise leave empty, leaving the relay with no sync target.
      *
      * @param innerVerifier the chain's {@code QBFTVerifier} address
+     * @param receiptTimeout how long to wait for the deploy receipt; wiring at scale can push a
+     *     single deploy past the default budget even when nothing is actually stuck
      * @return the wrapper address
      * @throws IllegalStateException on any deployment failure
      */
-    public String deployChannelVerifier(final String innerVerifier) {
-        return deploy("QbftE2EVerifier", AbiCodec.encodeAddress(innerVerifier));
+    public String deployChannelVerifier(final String innerVerifier, final Duration receiptTimeout) {
+        return deploy("QbftE2EVerifier", AbiCodec.encodeAddress(innerVerifier), receiptTimeout);
     }
 
     /**
      * Deploy a {@code MockClprConnector}, the stakeable adapter a channel routes messages through.
      *
+     * @param receiptTimeout how long to wait for the deploy receipt; wiring at scale can push a
+     *     single deploy past the default budget even when nothing is actually stuck
      * @return the connector contract address
      * @throws IllegalStateException on any deployment failure
      */
-    public String deployConnector() {
-        return deploy("MockClprConnector", new byte[0]);
+    public String deployConnector(final Duration receiptTimeout) {
+        return deploy("MockClprConnector", new byte[0], receiptTimeout);
     }
 
-    private String deploy(final String contractName, final byte[] abiEncodedConstructorArgs) {
+    private String deploy(
+            final String contractName, final byte[] abiEncodedConstructorArgs, final Duration receiptTimeout) {
         final ContractArtifact artifact;
         try {
             artifact = ContractArtifact.loadByName(contractName);
@@ -108,34 +130,24 @@ public final class E2eContractDeployer {
         final String bytecode =
                 artifact.bytecode().startsWith("0x") ? artifact.bytecode().substring(2) : artifact.bytecode();
         final byte[] callData = AbiCodec.fromHex("0x" + bytecode + AbiCodec.toHexNoPrefix(abiEncodedConstructorArgs));
-        final String txHash = txSubmitter.sendRawTx(null, callData, 0L, ChainTx.DEFAULT_GAS_LIMIT);
-        return awaitContractAddress(contractName, txHash);
+        final String txHash = txSubmitter.sendRawTx(null, callData, 0L, DEPLOY_GAS_LIMIT);
+        return awaitContractAddress(contractName, txHash, receiptTimeout);
     }
 
-    private String awaitContractAddress(final String contractName, final String txHash) {
-        for (int attempt = 0; attempt < ChainTx.RECEIPT_POLL_ATTEMPTS; attempt++) {
-            final JsonNode receipt = rpc.ethGetTransactionReceipt(txHash);
-            if (receipt != null && !receipt.isNull()) {
-                final JsonNode status = receipt.get("status");
-                if (status != null && !status.isNull() && !"0x1".equalsIgnoreCase(status.asText())) {
-                    // A reverted deployment can still report a contractAddress, so the status has to
-                    // be checked first or callers would happily use an address with no code at it.
-                    throw new IllegalStateException(
-                            contractName + " deployment reverted (tx " + txHash + "), receipt=" + receipt);
-                }
-                final JsonNode address = receipt.get("contractAddress");
-                if (address != null && !address.isNull() && !address.asText().isBlank()) {
-                    return address.asText();
-                }
-            }
-            try {
-                Thread.sleep(ChainTx.RECEIPT_POLL_INTERVAL_MS);
-            } catch (final InterruptedException e) {
-                Thread.currentThread().interrupt();
-                throw new IllegalStateException("interrupted while awaiting the " + contractName + " receipt", e);
-            }
+    private String awaitContractAddress(final String contractName, final String txHash, final Duration receiptTimeout) {
+        final JsonNode receipt = ChainTx.awaitReceipt(rpc, txHash, contractName + " deployment", receiptTimeout);
+        final JsonNode status = receipt.get("status");
+        if (status != null && !status.isNull() && !"0x1".equalsIgnoreCase(status.asText())) {
+            // A reverted deployment can still report a contractAddress, so the status has to be
+            // checked first or callers would happily use an address with no code at it.
+            throw new IllegalStateException(
+                    contractName + " deployment reverted (tx " + txHash + "), receipt=" + receipt);
         }
-        throw new IllegalStateException("no receipt for " + contractName + " deployment (tx " + txHash + ") after "
-                + (ChainTx.RECEIPT_POLL_ATTEMPTS * ChainTx.RECEIPT_POLL_INTERVAL_MS / 1000) + "s");
+        final JsonNode address = receipt.get("contractAddress");
+        if (address == null || address.isNull() || address.asText().isBlank()) {
+            throw new IllegalStateException(
+                    contractName + " deployment produced no contractAddress (tx " + txHash + "), receipt=" + receipt);
+        }
+        return address.asText();
     }
 }

@@ -4,6 +4,7 @@ package org.hiero.clpr.relay.e2e.tests;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import java.time.Duration;
+import java.util.Map;
 import org.hiero.clpr.relay.e2e.E2EEnvironment;
 import org.hiero.clpr.relay.e2e.E2ETest;
 import org.hiero.clpr.relay.e2e.chain.BesuNetwork;
@@ -30,7 +31,7 @@ import org.hiero.clpr.relay.e2e.load.MessageShape;
  * sending on one channel does <b>not</b> move the other channel's watermark, which the isolation claim
  * actually depends on.
  */
-class MultiChannelIsolationE2ETest {
+class TwoChannelIsolationE2ETest {
 
     @E2ETest(timeoutSeconds = 900)
     void channels_deliver_independently_with_no_cross_talk(final E2EEnvironment env) {
@@ -55,10 +56,10 @@ class MultiChannelIsolationE2ETest {
         assertThat(channelX.idHex()).as("the two channels have distinct ids").isNotEqualTo(channelY.idHex());
 
         for (final EvmEndpoint endpoint : new EvmEndpoint[] {epAX, epBX}) {
-            env.await().channelLive(endpoint, channelX.metricLabel(), Duration.ofMinutes(3));
+            env.await().channelLive(endpoint, channelX.metricLabel(), Duration.ofMinutes(5));
         }
         for (final EvmEndpoint endpoint : new EvmEndpoint[] {epAY, epBY}) {
-            env.await().channelLive(endpoint, channelY.metricLabel(), Duration.ofMinutes(3));
+            env.await().channelLive(endpoint, channelY.metricLabel(), Duration.ofMinutes(5));
         }
 
         // Channel X only: channel Y's watermark must stay untouched by traffic that never named it.
@@ -99,6 +100,23 @@ class MultiChannelIsolationE2ETest {
         assertThat(channelY.b().state().receivedMessageId())
                 .as("channel Y kept advancing during the concurrent burst")
                 .isGreaterThan(yBeforeBurst);
+
+        // Per-endpoint attribution: the wrong endpoint must not have submitted anything for a channel
+        // it was never wired to. Stricter than the watermark cross-talk check above — that one proves
+        // the peer chain never saw stray traffic; this one proves the misrouted endpoint never even
+        // tried, which would catch a per-channel routing bug at the source rather than after the fact.
+        final Map<String, String> xLabel = Map.of("channel_id", channelX.metricLabel());
+        final Map<String, String> yLabel = Map.of("channel_id", channelY.metricLabel());
+        for (final EvmEndpoint endpoint : new EvmEndpoint[] {epAY, epBY}) {
+            assertThat(endpoint.metrics().counter("clpr_sync_bundle_messages_submitted", xLabel))
+                    .as("%s never submitted for channel X", endpoint.id())
+                    .isZero();
+        }
+        for (final EvmEndpoint endpoint : new EvmEndpoint[] {epAX, epBX}) {
+            assertThat(endpoint.metrics().counter("clpr_sync_bundle_messages_submitted", yLabel))
+                    .as("%s never submitted for channel Y", endpoint.id())
+                    .isZero();
+        }
 
         for (final BesuNetwork network : env.besuNetworks().all()) {
             assertThat(network.inspect()

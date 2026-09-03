@@ -1207,6 +1207,55 @@ public final class ContractInteractor {
     }
 
     /**
+     * Build a {@code CLPRSTUB}-prefixed bundle carrying a single DATA message that, applied
+     * against a channel with the supplied local queue state, satisfies §4.2 replay and
+     * running-hash checks and would advance the channel's {@code receivedMessageId} by 1.
+     * Returns the raw payload bytes; the caller submits via {@link #submitBundle(byte[], byte[])}.
+     *
+     * <p>The local state is passed explicitly (not read from chain) so a bundle crafted to be
+     * valid against channel A's state can then be submitted under channel B's id — the
+     * mismatch is what {@code SubmitBundleChannelMismatchTest} asserts the contract must catch.
+     *
+     * @param localState        the destination channel's current queue state as it should be
+     *                          reflected in the bundle metadata (used to satisfy §4.2 checks)
+     * @param connectorSource   DATA-message source connector id
+     * @param targetApplication DATA-message destination application address
+     * @param sender            DATA-message source sender address
+     * @param messageData       DATA-message opaque payload
+     */
+    public byte[] craftDataBundleBytes(
+            final ChannelState localState,
+            final byte[] connectorSource,
+            final byte[] targetApplication,
+            final byte[] sender,
+            final byte[] messageData) {
+        final byte[] payload = encodeDataMessagePayload(connectorSource, targetApplication, sender, messageData);
+        final byte[] newRunningHash = runningHashStep(localState.receivedRunningHash(), payload);
+
+        final ClprQueueMetadata metadata = ClprQueueMetadata.newBuilder()
+                .nextMessageId(localState.receivedMessageId() + 2L) // one new inbound message above receivedMessageId
+                .sentRunningHash(Bytes.wrap(newRunningHash))
+                .receivedMessageId(localState.ackedMessageId()) // no new acks
+                .receivedRunningHash(Bytes.wrap(localState.sentRunningHash()))
+                .status(ClprChannelStatus.ACTIVE)
+                .build();
+
+        final ClprMessagePayload msg;
+        try {
+            msg = ClprMessagePayload.PROTOBUF.parse(Bytes.wrap(payload));
+        } catch (final com.hedera.pbj.runtime.ParseException e) {
+            throw new IllegalStateException("Failed to round-trip ClprMessagePayload", e);
+        }
+        final ClprBundleContent content = ClprBundleContent.newBuilder()
+                .metadata(metadata)
+                .messages(List.of(msg))
+                .build();
+        final byte[] contentBytes = ClprBundleContent.PROTOBUF.toBytes(content).toByteArray();
+        final byte[] stubPrefix = "CLPRSTUB".getBytes(StandardCharsets.US_ASCII);
+        return AbiCodec.concat(stubPrefix, contentBytes);
+    }
+
+    /**
      * Build a {@code CLPRSTUB}-prefixed bundle whose single message is a REPLY with an
      * out-of-order {@code message_id}, and submit it via {@link #submitBundle}. Synthesises the
      * metadata to satisfy replay defense, running-hash continuity, and ack monotonicity so
