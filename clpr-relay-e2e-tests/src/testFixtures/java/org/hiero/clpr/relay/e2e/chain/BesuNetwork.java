@@ -331,7 +331,21 @@ public final class BesuNetwork {
         interactor.bootstrapDefaults(AbiCodec.fromHex(contracts.clprService()));
     }
 
-    /** Stop every node. Host data directories survive, so the chain can be restarted. */
+    /**
+     * Stop every node and delete its data volume. Terminal — for environment teardown only.
+     *
+     * <p>Separate from {@link #stop()} because that one is a restart point: a test may stop a chain
+     * and bring it back up expecting its state. Deleting the volumes there would silently turn every
+     * such restart into a reset to genesis.
+     */
+    public void destroy() {
+        stop();
+        for (final BesuNode node : nodes) {
+            node.discardState();
+        }
+    }
+
+    /** Stop every node. The data volumes survive, so the chain can be restarted. */
     public void stop() {
         if (rawRpc != null) {
             try {

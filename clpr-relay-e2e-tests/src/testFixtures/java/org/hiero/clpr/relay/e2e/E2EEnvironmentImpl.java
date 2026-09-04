@@ -236,7 +236,10 @@ final class E2EEnvironmentImpl implements E2EEnvironment {
             // best-effort
         }
         try {
-            besuNetworks.stopAll();
+            // destroyAll, not stopAll: this is the end of the environment, and the nodes' data
+            // volumes are not reclaimed by anything else (Ryuk is disabled), so a stop here would
+            // leak one volume per node per test.
+            besuNetworks.destroyAll();
         } catch (final RuntimeException e) {
             // best-effort
         }

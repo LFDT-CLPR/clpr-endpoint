@@ -89,7 +89,9 @@ class BacklogDrainE2ETest {
      * as a normal assertion rather than an inverted "assert it stays stuck": inverting it would make the
      * test pass forever and quietly stop tracking anything, so its red-to-green transition is the
      * evidence that a fix works. Re-enable by removing the {@code @Disabled} annotation once the relay
-     * drains backlogs deeper than {@code maxMessagesPerBundle}.
+     * drains backlogs deeper than {@code maxMessagesPerBundle}. The suite now gates every PR as a
+     * required check, so leaving this one red would additionally mask the next real regression instead
+     * of reporting this one.
      */
     @Disabled("Known red — tracks clpr-hiero#171. Re-enable when the relay drains backlogs > maxMessagesPerBundle.")
     @E2ETest(timeoutSeconds = 1200, requires = Capability.DESTRUCTIVE)
