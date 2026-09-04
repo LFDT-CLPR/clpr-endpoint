@@ -255,26 +255,33 @@ public class EvmJsonRpcClient {
         final var fullTxs = false;
         final String body = buildRequest("eth_getBlockByNumber", blockTag, fullTxs);
         final var blockResp = send(body);
+        // eth_getBlockByNumber returns JSON null when the block is not available (unknown tag,
+        // node still syncing, requested number beyond head). Surface it as a retryable
+        // JSON-RPC error with the tag included, so the caller's backoff loop shows *which*
+        // read failed instead of an unqualified NPE deep in blockHeaderFromJson.
+        if (blockResp.isNull()) {
+            throw new JsonRpcException(-32000, "eth_getBlockByNumber returned null for blockTag=" + blockTag);
+        }
         return blockHeaderFromJson(blockResp);
     }
 
     public static BlockHeader blockHeaderFromJson(final JsonNode block) {
         return new BlockHeader(
-                fromPrefixedHex(block.get("parentHash").asText()),
-                fromPrefixedHex(block.get("sha3Uncles").asText()),
-                Address.fromHexString(block.get("miner").asText()),
-                fromPrefixedHex(block.get("stateRoot").asText()),
-                fromPrefixedHex(block.get("transactionsRoot").asText()),
-                fromPrefixedHex(block.get("receiptsRoot").asText()),
-                fromPrefixedHex(block.get("logsBloom").asText()),
-                parseHexBigInteger(block.get("difficulty").asText()),
-                parseHexBigInteger(block.get("number").asText()),
-                parseHexBigInteger(block.get("gasLimit").asText()),
-                parseHexBigInteger(block.get("gasUsed").asText()),
-                parseHexBigInteger(block.get("timestamp").asText()),
-                fromPrefixedHex(block.get("extraData").asText()),
-                fromPrefixedHex(block.get("mixHash").asText()),
-                fromPrefixedHex(block.get("nonce").asText()),
+                requiredBytes(block, "parentHash"),
+                requiredBytes(block, "sha3Uncles"),
+                Address.fromHexString(requiredString(block, "miner")),
+                requiredBytes(block, "stateRoot"),
+                requiredBytes(block, "transactionsRoot"),
+                requiredBytes(block, "receiptsRoot"),
+                requiredBytes(block, "logsBloom"),
+                requiredBigInteger(block, "difficulty"),
+                requiredBigInteger(block, "number"),
+                requiredBigInteger(block, "gasLimit"),
+                requiredBigInteger(block, "gasUsed"),
+                requiredBigInteger(block, "timestamp"),
+                requiredBytes(block, "extraData"),
+                requiredBytes(block, "mixHash"),
+                requiredBytes(block, "nonce"),
                 hexBigIntegerOrNull(block, "baseFeePerGas"),
                 bytesOrNull(block, "withdrawalsRoot"),
                 // EIP-4844 blob fields and EIP-4788 parentBeaconBlockRoot must be parsed in
@@ -284,7 +291,23 @@ public class EvmJsonRpcClient {
                 hexBigIntegerOrNull(block, "excessBlobGas"),
                 bytesOrNull(block, "parentBeaconBlockRoot"),
                 bytesOrNull(block, "requestsHash"),
-                fromPrefixedHex(block.get("hash").asText()));
+                requiredBytes(block, "hash"));
+    }
+
+    private static String requiredString(final JsonNode node, final String field) {
+        final JsonNode child = node.get(field);
+        if (child == null || child.isNull()) {
+            throw new JsonRpcException(-32000, "block header missing required field '" + field + "'");
+        }
+        return child.asText();
+    }
+
+    private static Bytes requiredBytes(final JsonNode node, final String field) {
+        return fromPrefixedHex(requiredString(node, field));
+    }
+
+    private static BigInteger requiredBigInteger(final JsonNode node, final String field) {
+        return parseHexBigInteger(requiredString(node, field));
     }
 
     private static BigInteger parseHexBigInteger(final String hex) {

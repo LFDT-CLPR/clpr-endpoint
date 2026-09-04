@@ -2,6 +2,7 @@
 package org.hiero.clpr.relay.evm.jsonrpc;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.hiero.clpr.relay.evm.ByteUtils.fromPrefixedHex;
 
 import com.fasterxml.jackson.databind.JsonNode;
@@ -177,6 +178,26 @@ class EvmJsonRpcClientTest {
                             .extraData()
                             .toByteArray())
                     .isEmpty();
+        }
+
+        @Test
+        void missingMandatoryFieldNamesTheFieldInError() throws Exception {
+            final ObjectNode block = (ObjectNode) minimalBlock("0x");
+            block.remove("stateRoot");
+
+            assertThatThrownBy(() -> EvmJsonRpcClient.blockHeaderFromJson(block))
+                    .isInstanceOf(JsonRpcException.class)
+                    .hasMessageContaining("stateRoot");
+        }
+
+        @Test
+        void nullMandatoryFieldNamesTheFieldInError() throws Exception {
+            final ObjectNode block = (ObjectNode) minimalBlock("0x");
+            block.putNull("parentHash");
+
+            assertThatThrownBy(() -> EvmJsonRpcClient.blockHeaderFromJson(block))
+                    .isInstanceOf(JsonRpcException.class)
+                    .hasMessageContaining("parentHash");
         }
     }
 
