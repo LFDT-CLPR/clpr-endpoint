@@ -16,8 +16,10 @@ import org.hiero.clpr.relay.e2e.chain.QbftConfigProofBuilder;
 import org.hiero.clpr.relay.e2e.chain.TestAccount;
 import org.hiero.clpr.relay.e2e.endpoint.EvmEndpoint;
 import org.hiero.clpr.relay.e2e.endpoint.EvmEndpointSpec;
+import org.hiero.clpr.relay.e2e.fault.PeerNetworkShim;
 import org.hiero.clpr.relay.evm.AbiCodec;
 import org.hiero.clpr.relay.evm.EthSigner;
+import org.jspecify.annotations.Nullable;
 
 /**
  * The channels declared by one test, and the on-chain wiring that brings them up.
@@ -42,6 +44,10 @@ public final class Channels {
     private final Accounts accounts;
     private Duration wiringReceiptTimeout = ChainTx.DEFAULT_RECEIPT_TIMEOUT;
 
+    /** Optional Toxiproxy shim. When set, seed_endpoints publish the shim address, not the endpoint's own. */
+    @Nullable
+    private PeerNetworkShim peerNetworkShim;
+
     public Channels(final Accounts accounts) {
         this.accounts = accounts;
     }
@@ -61,6 +67,19 @@ public final class Channels {
     public Channels withWiringReceiptTimeout(final Duration timeout) {
         this.wiringReceiptTimeout = timeout;
         return this;
+    }
+
+    /**
+     * Route every seed endpoint published from this point onward through {@code shim}.
+     *
+     * <p>Call before {@code startAll()}, before {@link #wireAll()} runs. Wiring a channel writes the
+     * dial address on chain, and the address is immutable afterwards — installing the shim later
+     * would leave the roster pointing at the endpoint directly and the shim would never see traffic.
+     *
+     * @param shim the (already-started) shim
+     */
+    public void useShim(final PeerNetworkShim shim) {
+        this.peerNetworkShim = shim;
     }
 
     /**
@@ -368,9 +387,8 @@ public final class Channels {
     }
 
     private void setSeedEndpoints(final BesuNetwork net, final String verifier, final List<EvmEndpoint> peers) {
-        final List<ClprAbi.Endpoint> endpoints = peers.stream()
-                .map(e -> ClprAbi.Endpoint.of(e.containerIp(), PEER_SYNC_PORT))
-                .toList();
+        final List<ClprAbi.Endpoint> endpoints =
+                peers.stream().map(this::dialAddressFor).toList();
         ChainTx.sendAndAwait(
                 net.rpc(),
                 net.rawRpc(),
@@ -400,6 +418,20 @@ public final class Channels {
                     + " after completeChannel, expected >= 1. The relay reads this manifest to find its peer,"
                     + " so a version-0 sentinel means the channel would never sync.");
         }
+    }
+
+    /**
+     * The dial address to publish in {@code endpoint}'s peer roster: the endpoint's own IP by default,
+     * or a Toxiproxy proxy address when the shim is active. Registering with the shim is idempotent, so
+     * calling this for the same endpoint from both sides' wiring returns the same address.
+     */
+    private ClprAbi.Endpoint dialAddressFor(final EvmEndpoint endpoint) {
+        final PeerNetworkShim shim = peerNetworkShim;
+        if (shim == null) {
+            return ClprAbi.Endpoint.of(endpoint.containerIp(), PEER_SYNC_PORT);
+        }
+        final PeerNetworkShim.ProxyAddress proxy = shim.registerPeerProxy(endpoint);
+        return ClprAbi.Endpoint.of(proxy.host(), proxy.port());
     }
 
     /** Admit an account as an endpoint on {@code net}. Idempotent. */

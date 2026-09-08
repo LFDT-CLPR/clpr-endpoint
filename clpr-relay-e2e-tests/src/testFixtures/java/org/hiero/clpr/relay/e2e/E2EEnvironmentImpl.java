@@ -13,8 +13,10 @@ import org.hiero.clpr.relay.e2e.chain.BesuNetworks;
 import org.hiero.clpr.relay.e2e.channel.Channels;
 import org.hiero.clpr.relay.e2e.endpoint.EvmEndpoints;
 import org.hiero.clpr.relay.e2e.fault.Faults;
+import org.hiero.clpr.relay.e2e.fault.PeerNetworkShim;
 import org.hiero.clpr.relay.e2e.internal.E2ESubnets;
 import org.hiero.clpr.relay.e2e.load.MessageInjector;
+import org.jspecify.annotations.Nullable;
 import org.testcontainers.containers.Network;
 
 /**
@@ -44,6 +46,10 @@ final class E2EEnvironmentImpl implements E2EEnvironment {
     private final MessageInjector messages;
     private final Awaiter awaiter;
     private final Faults faults;
+
+    /** Toxiproxy sidecar for peer traffic. Present only after {@link #enablePeerNetworkShim()}. */
+    @Nullable
+    private PeerNetworkShim peerNetworkShim;
 
     private boolean started;
     private boolean closed;
@@ -76,7 +82,7 @@ final class E2EEnvironmentImpl implements E2EEnvironment {
             this.channels = new Channels(accounts);
             this.messages = new MessageInjector(accounts);
             this.awaiter = new Awaiter(() -> endpoints.all());
-            this.faults = new Faults(dockerNetwork);
+            this.faults = new Faults(dockerNetwork, () -> peerNetworkShim);
         } catch (final RuntimeException e) {
             try {
                 dockerNetwork.close();
@@ -202,11 +208,29 @@ final class E2EEnvironmentImpl implements E2EEnvironment {
     }
 
     @Override
+    public void enablePeerNetworkShim() {
+        if (started) {
+            throw new IllegalStateException("enablePeerNetworkShim() must be called before startAll();"
+                    + " the on-chain peer roster is written during channel wiring and cannot be re-routed later");
+        }
+        if (peerNetworkShim != null) {
+            return;
+        }
+        // Infrastructure slot 0 → .2 on the /24, reserved for Toxiproxy per E2ESubnets.
+        this.peerNetworkShim = new PeerNetworkShim(dockerNetwork, subnet.infrastructureHost(0));
+        channels.useShim(peerNetworkShim);
+    }
+
+    @Override
     public void startAll() {
         if (started) {
             return;
         }
         started = true;
+        // The shim must be up before wiring runs so it can hand out proxy addresses to publish on chain.
+        if (peerNetworkShim != null) {
+            peerNetworkShim.start();
+        }
         besuNetworks.startAll();
         besuNetworks.deployAll();
         // Channels before endpoints: ClprChannelHandler performs blocking on-chain reads at startup
@@ -242,6 +266,15 @@ final class E2EEnvironmentImpl implements E2EEnvironment {
             besuNetworks.destroyAll();
         } catch (final RuntimeException e) {
             // best-effort
+        }
+        // Toxiproxy after the endpoints and chains: they might otherwise sit in a half-connected state
+        // that trips their own shutdown paths.
+        if (peerNetworkShim != null) {
+            try {
+                peerNetworkShim.close();
+            } catch (final RuntimeException e) {
+                // best-effort
+            }
         }
         try {
             dockerNetwork.close();

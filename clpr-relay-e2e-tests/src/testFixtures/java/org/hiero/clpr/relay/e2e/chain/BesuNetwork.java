@@ -124,7 +124,8 @@ public final class BesuNetwork {
                     hostAddresses.apply(NODE_HOST_BASE + networkIndex * NODE_HOSTS_PER_NETWORK + i),
                     dockerNetwork,
                     workDir.resolve(nodeId),
-                    heapMb));
+                    heapMb,
+                    this::refreshHostClientsIfPrimaryUp));
         }
     }
 
@@ -241,9 +242,8 @@ public final class BesuNetwork {
             }
         }
 
-        this.rpc = new TestEvmJsonRpcClient(primaryNode().jsonRpcUrl());
-        this.rawRpc = new RawJsonRpc(primaryNode().jsonRpcUrl());
-        this.inspector = new ChainInspector(rawRpc);
+        // rpc/rawRpc/inspector were already built by the per-node onStarted callback that fired
+        // from BesuNode.start() as each node came up — no explicit construction needed here.
 
         TestConditions.awaitCondition(Duration.ofMinutes(2), Duration.ofMillis(500), () -> {
             try {
@@ -332,6 +332,18 @@ public final class BesuNetwork {
     }
 
     /**
+     * Callback fired from each {@link BesuNode}'s {@code start()}. Skips the refresh when the
+     * primary node is not running — that happens when a non-primary node is restarted while the
+     * primary is still down, and there is nothing meaningful to rebuild a client against.
+     */
+    private void refreshHostClientsIfPrimaryUp() {
+        if (!primaryNode().isRunning()) {
+            return;
+        }
+        refreshHostClients();
+    }
+
+    /**
      * Stop every node and delete its data volume. Terminal — for environment teardown only.
      *
      * <p>Separate from {@link #stop()} because that one is a restart point: a test may stop a chain
@@ -345,7 +357,43 @@ public final class BesuNetwork {
         }
     }
 
-    /** Stop every node. The data volumes survive, so the chain can be restarted. */
+    /**
+     * Rebuild every host-JVM-facing client so it points at the primary node's current mapped port.
+     *
+     * <p>Testcontainers assigns a fresh host port whenever a container is recreated (which is what
+     * {@link BesuNode#stop()} + {@link BesuNode#start()} does — the underlying {@code GenericContainer}
+     * is destroyed and rebuilt). The relay itself is unaffected because it dials the chain over the
+     * Docker network alias ({@code besu-N-M:8545}), which is stable across restarts. The test JVM
+     * dials the host-mapped port, so its cached {@link EvmJsonRpcClient}, {@link RawJsonRpc},
+     * {@link ChainInspector}, deployer, submitter, and {@link ContractInteractor} all point at a
+     * port that no longer exists. Runs after every node start so helpers reached through
+     * {@link #rpc()}/{@link #inspect()}/{@link #interactor()} pick up the new client.
+     *
+     * <p>Callers that captured a client or interactor reference before the restart (e.g. through
+     * {@link #interactorFor(TestAccount)}) must re-request theirs; callers that resolve those on
+     * each use pick up the refreshed clients automatically.
+     */
+    private void refreshHostClients() {
+        if (rawRpc != null) {
+            try {
+                rawRpc.close();
+            } catch (final RuntimeException ignored) {
+                // best-effort
+            }
+        }
+        this.rpc = new TestEvmJsonRpcClient(primaryNode().jsonRpcUrl());
+        this.rawRpc = new RawJsonRpc(primaryNode().jsonRpcUrl());
+        this.inspector = new ChainInspector(rawRpc);
+        if (deployerAccount != null && contracts != null) {
+            final EthSigner signer = new EthSigner(deployerAccount.privateKeyHex());
+            this.deployerSubmitter = new AnvilTxSubmitter(rpc, signer, spec.chainId());
+            this.deployer = new E2eContractDeployer(rpc, deployerSubmitter);
+            this.interactor = new ContractInteractor(
+                    rpc, deployerSubmitter, signer, deployerAccount.publicKey64(), contracts.core());
+        }
+    }
+
+    /** Stop every node. Host data directories survive, so the chain can be restarted. */
     public void stop() {
         if (rawRpc != null) {
             try {

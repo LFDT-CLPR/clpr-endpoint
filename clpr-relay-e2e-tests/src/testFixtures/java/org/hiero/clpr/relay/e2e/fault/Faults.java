@@ -4,12 +4,14 @@ package org.hiero.clpr.relay.e2e.fault;
 import com.github.dockerjava.api.DockerClient;
 import com.github.dockerjava.api.model.ContainerNetwork;
 import java.math.BigInteger;
+import java.util.function.Supplier;
 import org.hiero.clpr.relay.e2e.chain.BesuNetwork;
 import org.hiero.clpr.relay.e2e.chain.BesuNode;
 import org.hiero.clpr.relay.e2e.chain.ChainTx;
 import org.hiero.clpr.relay.e2e.channel.ChannelSide;
 import org.hiero.clpr.relay.e2e.endpoint.EvmEndpoint;
 import org.hiero.clpr.relay.evm.AbiCodec;
+import org.jspecify.annotations.Nullable;
 import org.testcontainers.DockerClientFactory;
 import org.testcontainers.containers.Network;
 
@@ -26,8 +28,12 @@ public final class Faults {
 
     private final Network dockerNetwork;
 
-    public Faults(final Network dockerNetwork) {
+    /** Supplier so the shim can be installed after Faults is constructed but before the tests run. */
+    private final Supplier<@Nullable PeerNetworkShim> shimSupplier;
+
+    public Faults(final Network dockerNetwork, final Supplier<@Nullable PeerNetworkShim> shimSupplier) {
         this.dockerNetwork = dockerNetwork;
+        this.shimSupplier = shimSupplier;
     }
 
     // ── chain faults ──────────────────────────────────────────────────────────
@@ -136,6 +142,55 @@ public final class Faults {
                         .withIpamConfig(new ContainerNetwork.Ipam().withIpv4Address(endpoint.containerIp()))
                         .withAliases(endpoint.id()))
                 .exec();
+    }
+
+    /**
+     * Cut the peer-to-peer sync link between two endpoints, bidirectionally, without touching their
+     * chain connectivity.
+     *
+     * <p>Different from {@link #partition(EvmEndpoint)} in two ways. That one detaches an endpoint
+     * from the whole Docker network, so the endpoint also loses its EVM node — two failures at once,
+     * hard to attribute. This one only disables the Toxiproxy proxies that front each endpoint's
+     * inbound peer port, so chain traffic (JSON-RPC and receipt polls) keeps flowing. It also drops
+     * live gRPC streams cleanly, so the sync loop sees a real "connection reset" rather than
+     * hanging on TCP keepalive.
+     *
+     * <p>Requires the environment's peer network shim to be enabled before {@code startAll()} —
+     * otherwise there are no proxies to disable. See {@code E2EEnvironment#enablePeerNetworkShim()}.
+     *
+     * <p>In the current two-endpoint topologies this is exactly A↔B, since disabling one endpoint's
+     * proxy blocks every peer's inbound to it. A three-endpoint test that needed to isolate one pair
+     * without affecting the third peer would need per-source proxies — not implemented yet.
+     *
+     * @param a one endpoint
+     * @param b the other
+     */
+    public void disconnectPeers(final EvmEndpoint a, final EvmEndpoint b) {
+        final PeerNetworkShim shim = requireShim();
+        shim.setEnabled(a, false);
+        shim.setEnabled(b, false);
+    }
+
+    /**
+     * Restore the peer-to-peer sync link between two endpoints previously cut with
+     * {@link #disconnectPeers(EvmEndpoint, EvmEndpoint)}.
+     *
+     * @param a one endpoint
+     * @param b the other
+     */
+    public void reconnectPeers(final EvmEndpoint a, final EvmEndpoint b) {
+        final PeerNetworkShim shim = requireShim();
+        shim.setEnabled(a, true);
+        shim.setEnabled(b, true);
+    }
+
+    private PeerNetworkShim requireShim() {
+        final PeerNetworkShim shim = shimSupplier.get();
+        if (shim == null) {
+            throw new IllegalStateException("peer network shim is not enabled; call"
+                    + " env.enablePeerNetworkShim() before startAll() to opt this test in");
+        }
+        return shim;
     }
 
     /**

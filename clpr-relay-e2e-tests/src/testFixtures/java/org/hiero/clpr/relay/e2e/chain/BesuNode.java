@@ -64,6 +64,13 @@ public final class BesuNode {
     private final String dataVolume;
     private final int heapMb;
 
+    /**
+     * Runs after every successful {@link #start()}. Testcontainers reassigns the host-mapped RPC
+     * port on each start, so anyone caching host-facing clients (test JVM's
+     * {@code EvmJsonRpcClient} et al.) rebuilds them here.
+     */
+    private final Runnable onStarted;
+
     private final LogStream logStream;
 
     @Nullable
@@ -77,7 +84,8 @@ public final class BesuNode {
             final String staticIp,
             final Network network,
             final Path nodeDir,
-            final int heapMb) {
+            final int heapMb,
+            final Runnable onStarted) {
         this.id = id;
         this.spec = spec;
         this.nodeKey = nodeKey;
@@ -92,6 +100,7 @@ public final class BesuNode {
         this.dataVolume = "clpr-testing-" + id.replaceAll("[^a-zA-Z0-9_.-]", "-") + "-"
                 + UUID.randomUUID().toString().substring(0, 8);
         this.heapMb = heapMb;
+        this.onStarted = onStarted;
         this.logStream = new LogStream(id);
         try {
             // Host-side staging only: these directories are read by the test JVM to build the tar it
@@ -205,6 +214,11 @@ public final class BesuNode {
         spec.extraEnv().forEach(c::withEnv);
         c.start();
         this.container = c;
+        // Fresh mapped port needs fresh host-facing clients. Fires on every start (initial and
+        // restart); the initial firing during BesuNetwork bring-up is redundant with the client
+        // construction the network does itself, but building a few small objects an extra time is
+        // cheaper than requiring every future caller of stop()+start() to remember the refresh.
+        onStarted.run();
     }
 
     private String[] commandArgs() {

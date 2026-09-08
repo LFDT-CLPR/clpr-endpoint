@@ -130,6 +130,17 @@ tasks.withType<Test>().configureEach {
             .getOrElse("false"),
     )
 
+    // Artifact-retention policy: `failure` (default), `always`, or `never`. Forwarded so a run can
+    // be triggered with `-Pclpr.e2e.keepArtifacts=always` from the command line, or preset in
+    // gradle.properties. Set from an IDE via -Dclpr.e2e.keepArtifacts=always.
+    systemProperty(
+        "clpr.e2e.keepArtifacts",
+        providers
+            .gradleProperty("clpr.e2e.keepArtifacts")
+            .orElse(providers.systemProperty("clpr.e2e.keepArtifacts"))
+            .getOrElse("failure"),
+    )
+
     testLogging {
         showStandardStreams = true
         events("passed", "skipped", "failed")

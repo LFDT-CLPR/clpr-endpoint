@@ -15,6 +15,7 @@ import org.hiero.clpr.relay.e2e.chain.BesuNetwork;
 import org.hiero.clpr.relay.e2e.chain.BesuNode;
 import org.hiero.clpr.relay.e2e.endpoint.EvmEndpoint;
 import org.jspecify.annotations.Nullable;
+import org.junit.jupiter.api.extension.AfterTestExecutionCallback;
 import org.junit.jupiter.api.extension.ConditionEvaluationResult;
 import org.junit.jupiter.api.extension.ExecutionCondition;
 import org.junit.jupiter.api.extension.Extension;
@@ -50,7 +51,8 @@ public final class E2ETestExtension
         implements ExecutionCondition,
                 ParameterResolver,
                 TestTemplateInvocationContextProvider,
-                TestExecutionExceptionHandler {
+                TestExecutionExceptionHandler,
+                AfterTestExecutionCallback {
 
     /** Environment variable gating the whole suite. */
     public static final String ENABLE_ENV_VAR = "RUN_E2E_TESTS";
@@ -70,6 +72,17 @@ public final class E2ETestExtension
 
     /** System property holding the root output directory. */
     public static final String OUTPUT_DIR_PROPERTY = "clpr.e2e.outputDir";
+
+    /**
+     * System property choosing when to persist container logs, metrics scrapes and chain dumps.
+     * One of {@code failure} (default), {@code always}, {@code never}.
+     *
+     * <p>{@code always} is useful when a test <em>appears</em> to pass but a channel silently
+     * skipped a message, or when comparing runs to catch flakes — the artifacts are the only way
+     * to see what actually happened, and the containers are gone by the time you look. Costs disk
+     * (few MB per test) so it stays opt-in.
+     */
+    public static final String KEEP_ARTIFACTS_PROPERTY = "clpr.e2e.keepArtifacts";
 
     private static final ExtensionContext.Namespace NAMESPACE =
             ExtensionContext.Namespace.create(E2ETestExtension.class);
@@ -111,6 +124,25 @@ public final class E2ETestExtension
     /** @return {@code true} if either opt-in switch is set. */
     private static boolean isEnabled() {
         return System.getenv(ENABLE_ENV_VAR) != null || Boolean.parseBoolean(System.getProperty(ENABLE_PROPERTY));
+    }
+
+    /** When to write per-test artifacts (endpoint logs, metrics, chain dumps). */
+    private enum KeepArtifacts {
+        NEVER,
+        FAILURE,
+        ALWAYS;
+
+        static KeepArtifacts active() {
+            final String raw = System.getProperty(KEEP_ARTIFACTS_PROPERTY, "failure");
+            return switch (raw.toLowerCase(Locale.ROOT)) {
+                case "always" -> ALWAYS;
+                case "never" -> NEVER;
+                case "failure", "" -> FAILURE;
+                default ->
+                    throw new IllegalArgumentException("unknown " + KEEP_ARTIFACTS_PROPERTY + " value '" + raw
+                            + "': expected one of always, failure, never");
+            };
+        }
     }
 
     // ── TestTemplateInvocationContextProvider ─────────────────────────────────
@@ -165,16 +197,50 @@ public final class E2ETestExtension
     @Override
     public void handleTestExecutionException(final ExtensionContext context, final Throwable throwable)
             throws Throwable {
-        final E2EEnvironment environment = existingEnvironment(context);
-        if (environment != null) {
-            try {
-                dumpDiagnostics(environment, context, throwable);
-            } catch (final RuntimeException e) {
-                // Diagnostics are an aid; failing to write them must not replace the real cause.
-                System.err.println("[e2e] failed to write diagnostics: " + e);
+        final KeepArtifacts policy = KeepArtifacts.active();
+        if (policy != KeepArtifacts.NEVER) {
+            final E2EEnvironment environment = existingEnvironment(context);
+            if (environment != null) {
+                try {
+                    dumpDiagnostics(environment, context, throwable);
+                } catch (final RuntimeException e) {
+                    // Diagnostics are an aid; failing to write them must not replace the real cause.
+                    System.err.println("[e2e] failed to write diagnostics: " + e);
+                }
             }
         }
         throw throwable;
+    }
+
+    // ── success artifact capture ──────────────────────────────────────────────
+
+    /**
+     * Dump diagnostics on a passing test when the {@code clpr.e2e.keepArtifacts=always} switch is on.
+     *
+     * <p>{@code AfterTestExecutionCallback} rather than {@code TestWatcher.testSuccessful} for the
+     * same reason {@link #handleTestExecutionException} is used on failure: the method-scoped store
+     * (which owns and closes the environment, stopping the containers) has not been torn down yet
+     * at this point, so metrics scrapes and healthy-side reads still work.
+     */
+    @Override
+    public void afterTestExecution(final ExtensionContext context) {
+        if (KeepArtifacts.active() != KeepArtifacts.ALWAYS) {
+            return;
+        }
+        // A test that threw already had its diagnostics captured in handleTestExecutionException; a
+        // second dump here would overwrite the failure record with a nominally-successful one.
+        if (context.getExecutionException().isPresent()) {
+            return;
+        }
+        final E2EEnvironment environment = existingEnvironment(context);
+        if (environment == null) {
+            return;
+        }
+        try {
+            dumpDiagnostics(environment, context, null);
+        } catch (final RuntimeException e) {
+            System.err.println("[e2e] failed to write success diagnostics: " + e);
+        }
     }
 
     // ── internals ─────────────────────────────────────────────────────────────
@@ -235,9 +301,12 @@ public final class E2ETestExtension
     }
 
     private static void dumpDiagnostics(
-            final E2EEnvironment environment, final ExtensionContext context, final Throwable cause) {
+            final E2EEnvironment environment, final ExtensionContext context, @Nullable final Throwable cause) {
         final Path dir = environment.outputDirectory();
-        write(dir.resolve("failure.txt"), renderFailure(context, cause));
+        // Different filenames so a mixed run leaves an unambiguous trace: failure.txt means the test
+        // threw, success.txt means it passed and artifacts were kept because keepArtifacts=always.
+        final String summaryFile = cause == null ? "success.txt" : "failure.txt";
+        write(dir.resolve(summaryFile), renderSummary(context, cause));
 
         // Endpoint logs and the final scrape first: for a black-box SUT these are the primary
         // evidence, and a failing wait for a metric is unreadable without them.
@@ -292,7 +361,7 @@ public final class E2ETestExtension
         System.err.println("[e2e] diagnostics written to " + dir.toAbsolutePath());
     }
 
-    private static String renderFailure(final ExtensionContext context, final Throwable cause) {
+    private static String renderSummary(final ExtensionContext context, @Nullable final Throwable cause) {
         final StringBuilder out = new StringBuilder();
         out.append("test=")
                 .append(context.getTestClass().map(Class::getName).orElse("?"))
@@ -302,9 +371,12 @@ public final class E2ETestExtension
         out.append("profile=")
                 .append(E2EProfile.active().name().toLowerCase(Locale.ROOT))
                 .append('\n');
-        out.append("cause=").append(cause).append("\n\n");
-        for (final StackTraceElement frame : cause.getStackTrace()) {
-            out.append("\tat ").append(frame).append('\n');
+        out.append("outcome=").append(cause == null ? "passed" : "failed").append('\n');
+        if (cause != null) {
+            out.append("cause=").append(cause).append("\n\n");
+            for (final StackTraceElement frame : cause.getStackTrace()) {
+                out.append("\tat ").append(frame).append('\n');
+            }
         }
         return out.toString();
     }

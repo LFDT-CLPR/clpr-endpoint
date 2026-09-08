@@ -8,12 +8,9 @@ import java.util.Map;
 import org.hiero.clpr.relay.e2e.Capability;
 import org.hiero.clpr.relay.e2e.E2EEnvironment;
 import org.hiero.clpr.relay.e2e.E2ETest;
+import org.hiero.clpr.relay.e2e.TwoChainOneChannel;
 import org.hiero.clpr.relay.e2e.chain.BesuNetwork;
-import org.hiero.clpr.relay.e2e.chain.BesuNetworkSpec;
-import org.hiero.clpr.relay.e2e.channel.Channel;
-import org.hiero.clpr.relay.e2e.channel.ChannelSpec;
 import org.hiero.clpr.relay.e2e.endpoint.EvmEndpoint;
-import org.hiero.clpr.relay.e2e.endpoint.EvmEndpointSpec;
 import org.hiero.clpr.relay.e2e.load.InjectionRun;
 import org.hiero.clpr.relay.e2e.load.MessageShape;
 import org.junit.jupiter.api.Disabled;
@@ -37,14 +34,14 @@ class BacklogDrainE2ETest {
 
     @E2ETest(timeoutSeconds = 900)
     void drains_a_sub_batch_backlog_after_the_endpoints_start(final E2EEnvironment env) {
-        final Fixture fixture = Fixture.create(env);
+        final TwoChainOneChannel fixture = TwoChainOneChannel.declare(env);
         env.startAll();
 
         // Stop the relays and let the queue build with nobody draining it. This is the scenario the
         // test exists for: the backlog must be present before anything starts consuming it.
         env.endpoints().stopAll();
 
-        final InjectionRun run = env.messages().enqueue(fixture.channel.a(), SUB_BATCH_BACKLOG, MessageShape.small());
+        final InjectionRun run = env.messages().enqueue(fixture.channel().a(), SUB_BATCH_BACKLOG, MessageShape.small());
         run.awaitAllConfirmed(Duration.ofMinutes(3));
 
         assertThat(run.errorHistogram())
@@ -56,7 +53,7 @@ class BacklogDrainE2ETest {
                 .as("every send reported its assigned id via MessageQueued")
                 .hasSize(SUB_BATCH_BACKLOG);
 
-        assertThat(fixture.channel.a().queueDepth())
+        assertThat(fixture.channel().a().queueDepth())
                 .as("the whole backlog is queued while the relays are down")
                 .isEqualTo(SUB_BATCH_BACKLOG);
 
@@ -64,10 +61,10 @@ class BacklogDrainE2ETest {
 
         // The peer's received watermark is the oracle: it advances only after a message is processed
         // and is monotonic, so reaching N proves 1..N were handled in order.
-        env.await().peerReceivedAll(fixture.channel.a(), run.messageIds(), Duration.ofMinutes(5));
-        env.await().queueDrained(fixture.channel.a(), Duration.ofMinutes(5));
+        env.await().peerReceivedAll(fixture.channel().a(), run.messageIds(), Duration.ofMinutes(5));
+        env.await().queueDrained(fixture.channel().a(), Duration.ofMinutes(5));
 
-        assertThat(fixture.channel.b().state().receivedMessageId())
+        assertThat(fixture.channel().b().state().receivedMessageId())
                 .as("side B processed every queued message")
                 .isEqualTo(SUB_BATCH_BACKLOG);
 
@@ -96,12 +93,12 @@ class BacklogDrainE2ETest {
     @Disabled("Known red — tracks clpr-hiero#171. Re-enable when the relay drains backlogs > maxMessagesPerBundle.")
     @E2ETest(timeoutSeconds = 1200, requires = Capability.DESTRUCTIVE)
     void drains_a_backlog_larger_than_the_bundle_batch(final E2EEnvironment env) {
-        final Fixture fixture = Fixture.create(env);
+        final TwoChainOneChannel fixture = TwoChainOneChannel.declare(env);
         env.startAll();
         env.endpoints().stopAll();
 
         final int backlog = 25; // > maxMessagesPerBundle (10)
-        final InjectionRun run = env.messages().enqueue(fixture.channel.a(), backlog, MessageShape.small());
+        final InjectionRun run = env.messages().enqueue(fixture.channel().a(), backlog, MessageShape.small());
         run.awaitAllConfirmed(Duration.ofMinutes(3));
 
         // The send side must be healthy, so a failure here is unambiguously about the send path and
@@ -109,25 +106,25 @@ class BacklogDrainE2ETest {
         assertThat(run.errorHistogram()).isEmpty();
         assertThat(run.reverted()).isZero();
         assertThat(run.confirmed()).isEqualTo(backlog);
-        assertThat(fixture.channel.a().queueDepth()).isEqualTo(backlog);
+        assertThat(fixture.channel().a().queueDepth()).isEqualTo(backlog);
 
         env.endpoints().startAll();
 
         // The relay assertion. Fails today: the peer rejects every bundle and the watermark stays at 0.
-        env.await().peerReceivedAll(fixture.channel.a(), run.messageIds(), Duration.ofMinutes(8));
-        env.await().queueDrained(fixture.channel.a(), Duration.ofMinutes(2));
+        env.await().peerReceivedAll(fixture.channel().a(), run.messageIds(), Duration.ofMinutes(8));
+        env.await().queueDrained(fixture.channel().a(), Duration.ofMinutes(2));
     }
 
     @E2ETest(timeoutSeconds = 1200)
     void survives_rolling_restarts_under_load(final E2EEnvironment env) {
-        final Fixture fixture = Fixture.create(env);
+        final TwoChainOneChannel fixture = TwoChainOneChannel.declare(env);
         env.startAll();
 
         // Backpressure keeps the in-flight window below the bundle batch, so no backlog can form and
         // the run measures restart resilience rather than re-testing clpr-hiero#171.
         final int total = 40;
         final InjectionRun run = env.messages()
-                .enqueueWithBackpressure(fixture.channel.a(), total, 6, Duration.ofMinutes(8), MessageShape.small());
+                .enqueueWithBackpressure(fixture.channel().a(), total, 6, Duration.ofMinutes(8), MessageShape.small());
         run.awaitAllConfirmed(Duration.ofMinutes(3));
 
         assertThat(run.confirmed()).isEqualTo(total);
@@ -136,10 +133,10 @@ class BacklogDrainE2ETest {
         // Restart mid-flight. The relay keeps no local state, so it has to resume from chain alone.
         env.endpoints().rollingRestart(Duration.ofSeconds(5));
 
-        env.await().peerReceivedAll(fixture.channel.a(), run.messageIds(), Duration.ofMinutes(6));
-        env.await().queueDrained(fixture.channel.a(), Duration.ofMinutes(3));
+        env.await().peerReceivedAll(fixture.channel().a(), run.messageIds(), Duration.ofMinutes(6));
+        env.await().queueDrained(fixture.channel().a(), Duration.ofMinutes(3));
 
-        assertThat(fixture.channel.b().state().receivedMessageId())
+        assertThat(fixture.channel().b().state().receivedMessageId())
                 .as("every message survived the restarts")
                 .isEqualTo(total);
 
@@ -157,8 +154,9 @@ class BacklogDrainE2ETest {
     }
 
     /** No relay-side submission may have reverted, been dropped, or been rejected on preview. */
-    private static void assertNoRelaySubmissionFailures(final Fixture fixture, final E2EEnvironment env) {
-        final Map<String, String> byChannel = Map.of("channel_id", fixture.channel.metricLabel());
+    private static void assertNoRelaySubmissionFailures(final TwoChainOneChannel fixture, final E2EEnvironment env) {
+        final Map<String, String> byChannel =
+                Map.of("channel_id", fixture.channel().metricLabel());
         for (final EvmEndpoint endpoint : env.endpoints().all()) {
             assertThat(endpoint.metrics().counter("clpr_evm_tx_reverts", byChannel))
                     .as(endpoint.id() + " landed no reverted transaction")
@@ -175,22 +173,6 @@ class BacklogDrainE2ETest {
                             .revertedTransactions(0, network.inspect().headBlockNumber()))
                     .as("no reverted transactions on " + network.id())
                     .isEmpty();
-        }
-    }
-
-    /** The topology every test here uses: two chains, two endpoints, one channel. */
-    private record Fixture(BesuNetwork besuA, BesuNetwork besuB, EvmEndpoint epA, EvmEndpoint epB, Channel channel) {
-
-        static Fixture create(final E2EEnvironment env) {
-            final BesuNetwork besuA = env.besuNetworks().add(BesuNetworkSpec.singleNode());
-            final BesuNetwork besuB = env.besuNetworks().add(BesuNetworkSpec.singleNode());
-            final EvmEndpoint epA =
-                    env.endpoints().add(EvmEndpointSpec.defaults().withId("ep-a"));
-            final EvmEndpoint epB =
-                    env.endpoints().add(EvmEndpointSpec.defaults().withId("ep-b"));
-            final Channel channel =
-                    env.channels().create(ChannelSpec.between(besuA, besuB).endpoints(epA, epB));
-            return new Fixture(besuA, besuB, epA, epB, channel);
         }
     }
 }
