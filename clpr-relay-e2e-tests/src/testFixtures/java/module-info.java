@@ -15,6 +15,8 @@ module org.hiero.clpr.relay.e2e.test.fixtures {
     // Internal only.
     // Reached through the integration/harness types the channel-state reads decode.
     // ChannelSide.status() returns ClprChannelStatus, a PBJ type from the proto module.
+    // EvmRpcFilterProxyApp: single-file HTTP proxy shipped as a slim runnable jar into the RPC
+    // filter container. Uses com.sun.net.httpserver.HttpServer, exported from jdk.httpserver.
     requires transitive org.hiero.clpr.relay.evm;
     requires transitive org.hiero.clpr.relay.integration.tests;
     requires transitive org.hiero.clpr.relay.proto;
@@ -27,6 +29,7 @@ module org.hiero.clpr.relay.e2e.test.fixtures {
     requires com.fasterxml.jackson.core;
     requires com.github.dockerjava.api;
     requires java.net.http;
+    requires jdk.httpserver;
     requires org.junit.jupiter.params;
     requires static org.jspecify;
 

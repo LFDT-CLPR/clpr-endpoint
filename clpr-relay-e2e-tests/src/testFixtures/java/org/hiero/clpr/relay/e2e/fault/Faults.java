@@ -6,6 +6,7 @@ import com.github.dockerjava.api.model.ContainerNetwork;
 import java.math.BigInteger;
 import java.util.function.Supplier;
 import org.hiero.clpr.relay.e2e.chain.BesuNetwork;
+import org.hiero.clpr.relay.e2e.chain.BesuNetworkSpec;
 import org.hiero.clpr.relay.e2e.chain.BesuNode;
 import org.hiero.clpr.relay.e2e.chain.ChainTx;
 import org.hiero.clpr.relay.e2e.channel.ChannelSide;
@@ -77,6 +78,70 @@ public final class Faults {
      */
     public void unpauseNode(final BesuNode node) {
         node.unpause();
+    }
+
+    // ── chain-RPC method-level faults ─────────────────────────────────────────
+
+    /**
+     * Block a specific set of JSON-RPC methods on a chain's filter proxy while every other method
+     * keeps flowing untouched.
+     *
+     * <p>Requires the network to have opted in via {@link BesuNetworkSpec#withRpcFilterProxy()} —
+     * we fail loudly rather than pretending to inject a fault the fixture can't deliver, since a
+     * silent no-op would let the test's recovery assertion pass for the wrong reason.
+     *
+     * @param network the chain whose proxy to program
+     * @param methods JSON-RPC method names to reject, e.g. {@code "eth_sendRawTransaction"}
+     */
+    public void blockRpcMethods(final BesuNetwork network, final String... methods) {
+        requireRpcFilterProxy(network).block(methods);
+    }
+
+    /**
+     * Restore a specific set of JSON-RPC methods on a chain's filter proxy. Idempotent: a method
+     * that was not blocked stays unblocked.
+     *
+     * @param network the chain whose proxy to program
+     * @param methods method names to restore
+     */
+    public void restoreRpcMethods(final BesuNetwork network, final String... methods) {
+        requireRpcFilterProxy(network).unblock(methods);
+    }
+
+    /**
+     * Reject writes on a chain — the transaction submitter path — while leaving reads
+     * ({@code eth_call}, {@code eth_getBalance}, {@code eth_getBlockByNumber}, ...) working. This
+     * is the isolate-the-submitter fault that {@code docker pause} cannot express: pausing a
+     * container freezes every RPC method at once and the failure surfaces at the earliest caller
+     * (state read), never reaching the submitter.
+     *
+     * <p>Blocks both {@code eth_sendRawTransaction} (the write itself) and
+     * {@code eth_getTransactionReceipt} (the receipt-poll loop that would otherwise re-classify a
+     * timed-out send as "assume submitted"). Together they match the shape of a real "chain can't
+     * accept my writes" outage.
+     *
+     * @param network the chain whose writes to break
+     */
+    public void breakSubmitRpc(final BesuNetwork network) {
+        blockRpcMethods(network, "eth_sendRawTransaction", "eth_getTransactionReceipt");
+    }
+
+    /**
+     * Restore writes on a chain previously broken with {@link #breakSubmitRpc(BesuNetwork)}.
+     *
+     * @param network the chain whose writes to restore
+     */
+    public void restoreSubmitRpc(final BesuNetwork network) {
+        restoreRpcMethods(network, "eth_sendRawTransaction", "eth_getTransactionReceipt");
+    }
+
+    private static EvmRpcFilterProxy requireRpcFilterProxy(final BesuNetwork network) {
+        final EvmRpcFilterProxy proxy = network.rpcFilterProxy();
+        if (proxy == null) {
+            throw new IllegalStateException("network " + network.id() + " was not started with a filter proxy; call"
+                    + " BesuNetworkSpec.withRpcFilterProxy() before startAll() to opt this test in");
+        }
+        return proxy;
     }
 
     // ── endpoint faults ───────────────────────────────────────────────────────

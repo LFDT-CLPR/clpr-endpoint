@@ -9,8 +9,13 @@ import org.hiero.clpr.relay.e2e.E2EEnvironment;
 import org.hiero.clpr.relay.e2e.E2ETest;
 import org.hiero.clpr.relay.e2e.E2ETiming;
 import org.hiero.clpr.relay.e2e.TwoChainOneChannel;
+import org.hiero.clpr.relay.e2e.chain.BesuNetwork;
+import org.hiero.clpr.relay.e2e.chain.BesuNetworkSpec;
 import org.hiero.clpr.relay.e2e.chain.BesuNode;
+import org.hiero.clpr.relay.e2e.channel.Channel;
+import org.hiero.clpr.relay.e2e.channel.ChannelSpec;
 import org.hiero.clpr.relay.e2e.endpoint.EvmEndpoint;
+import org.hiero.clpr.relay.e2e.endpoint.EvmEndpointSpec;
 import org.hiero.clpr.relay.e2e.load.InjectionRun;
 import org.hiero.clpr.relay.e2e.load.MessageShape;
 import org.hiero.clpr.relay.integration.TestConditions;
@@ -104,6 +109,111 @@ class RpcConnectivityE2ETest {
         sendAndAwait(env, fixture, 1, "MSG-AFTER-STOP");
         assertRecovered(fixture, receivedBefore + 1);
         assertFailureGaugesCleared(fixture);
+    }
+
+    /**
+     * Isolates the transaction submitter's RPC-outage recovery path from the state-listener and
+     * sync-loop paths the sibling tests already cover. Uses the E2E filter proxy to block only
+     * {@code eth_sendRawTransaction} and {@code eth_getTransactionReceipt} on chain B while every
+     * read method ({@code eth_call}, {@code eth_getBalance}, etc.) keeps flowing untouched.
+     *
+     * <p>The submitter path was invisible to the {@code docker pause} sibling test: pausing the
+     * whole container freezes every RPC method at once, so ep-b's inbound gRPC handler bails at
+     * its state-read {@code eth_call} before ever reaching {@code TransactionSubmitter.submitBundle}
+     * and {@code clpr_evm_tx_failures} never moves. This variant keeps state reads alive, so the
+     * handler proceeds all the way to the submitter and the submitter is where the outage lands —
+     * exactly the surface issue #327 asks us to cover.
+     *
+     * <p>Chain A is unaffected throughout, so {@code sendMessage} keeps queueing on A during the
+     * outage and the relay's queue must drain end-to-end once the writes are restored. The load-
+     * bearing assertion is that {@code clpr_evm_tx_failures} on ep-b grows during the outage —
+     * without that, the recovery claim could pass for the wrong reason (peer never routed anything
+     * to the submitter).
+     */
+    @E2ETest(timeoutSeconds = 900)
+    void submitter_recovers_when_send_rpc_is_blocked(final E2EEnvironment env) {
+        // Inline topology: chain B opts into the filter proxy. TwoChainOneChannel does not because
+        // proxy startup is opt-in per network — the only test that needs it is this one.
+        final BesuNetwork besuA = env.besuNetworks().add(BesuNetworkSpec.singleNode());
+        final BesuNetwork besuB =
+                env.besuNetworks().add(BesuNetworkSpec.singleNode().withRpcFilterProxy());
+        final EvmEndpoint epA = env.endpoints().add(EvmEndpointSpec.defaults().withId("ep-a"));
+        final EvmEndpoint epB = env.endpoints().add(EvmEndpointSpec.defaults().withId("ep-b"));
+        final Channel channel =
+                env.channels().create(ChannelSpec.between(besuA, besuB).endpoints(epA, epB));
+        env.startAll();
+
+        // Sanity: clean bring-up delivers before we break anything, so a post-heal failure is
+        // attributable to the outage rather than a broken topology.
+        sendAndAwaitOnChannel(env, channel, 1, "MSG-BEFORE");
+        final long receivedBefore = channel.b().state().receivedMessageId();
+        // Baseline for the submitter-side counter. Subsequent growth is the evidence the submitter
+        // actually attempted a submitBundle while the write RPC was blocked.
+        final long submitterFailuresBefore = epB.metrics().counterSum("clpr_evm_tx_failures");
+
+        final int pending = 3;
+        final InjectionRun run;
+        env.faults().breakSubmitRpc(besuB);
+        try {
+            // Chain A is up and chain B's reads still work, so both connectors are healthy and the
+            // sendMessage txs land on A immediately. Relay A picks them up via its state listener
+            // and syncs them to ep-b; ep-b's ClprSyncHandler now runs all the way down to the
+            // submitter (state reads succeed) and only there hits the blocked write RPC.
+            run = env.messages().enqueue(channel.a(), pending, MessageShape.small());
+            run.awaitAllConfirmed(Duration.ofMinutes(2));
+            assertThat(run.errorHistogram())
+                    .as("no send error while queueing during the outage")
+                    .isEmpty();
+            assertThat(run.confirmed())
+                    .as("every send made it into A's queue during the outage")
+                    .isEqualTo(pending);
+
+            E2ETiming.pause(OUTAGE_WINDOW, "eth_sendRawTransaction blocked on chain B");
+
+            // Queue-side sanity: A's queue only drains once B has acked delivery, which requires
+            // B's submitter to land the bundle on chain B. A drained queue here would mean the
+            // outage never held anything up.
+            assertThat(channel.a().queueDepth())
+                    .as("A's queue must not drain while ep-b cannot land writes on chain B")
+                    .isPositive();
+            // The load-bearing assertion for this test's scope: the submitter got called and its
+            // write-RPC failed. Uses counterSum across the reason label because both preverify (if
+            // it also depended on the receipt call) and rpc_error paths are legal.
+            assertThat(epB.metrics().counterSum("clpr_evm_tx_failures"))
+                    .as("ep-b's transaction submitter must attempt submitBundle and fail against the"
+                            + " blocked write RPC")
+                    .isGreaterThan(submitterFailuresBefore);
+        } finally {
+            env.faults().restoreSubmitRpc(besuB);
+        }
+
+        // Recovery: the pending queue must drain end-to-end. Without a working submitter retry,
+        // either the queue would stall or a restart would be needed — which we deliberately do not
+        // do. No listener/sync gauge assertions here: eth_call stayed alive throughout, so those
+        // gauges are expected to be zero the whole time. The submitter-counter growth above is
+        // this test's oracle.
+        env.await().peerReceivedAll(channel.a(), run.messageIds(), Duration.ofMinutes(3));
+        env.await().queueDrained(channel.a(), Duration.ofMinutes(2));
+        assertThat(channel.b().state().receivedMessageId())
+                .as("watermark on B advanced by exactly the pending count after the write RPC was restored")
+                .isEqualTo(receivedBefore + pending);
+        assertThat(channel.a().queueDepth())
+                .as("A's queue drained after the write RPC was restored")
+                .isZero();
+    }
+
+    /**
+     * Channel-flavored variant of {@link #sendAndAwait} for tests that declare their topology
+     * inline rather than through {@link TwoChainOneChannel}.
+     */
+    private static void sendAndAwaitOnChannel(
+            final E2EEnvironment env, final Channel channel, final int count, final String label) {
+        final InjectionRun run = env.messages().enqueue(channel.a(), count, MessageShape.small());
+        run.awaitAllConfirmed(Duration.ofMinutes(2));
+        env.await().peerReceivedAll(channel.a(), run.messageIds(), Duration.ofMinutes(3));
+        env.await().queueDrained(channel.a(), Duration.ofMinutes(2));
+        assertThat(run.errorHistogram()).as("no send error for " + label).isEmpty();
+        assertThat(run.confirmed()).as(label + " confirmed count").isEqualTo(count);
     }
 
     /**

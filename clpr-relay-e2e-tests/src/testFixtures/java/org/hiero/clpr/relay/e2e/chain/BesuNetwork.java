@@ -7,6 +7,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.function.IntFunction;
+import org.hiero.clpr.relay.e2e.fault.EvmRpcFilterProxy;
 import org.hiero.clpr.relay.evm.AbiCodec;
 import org.hiero.clpr.relay.evm.EthSigner;
 import org.hiero.clpr.relay.evm.jsonrpc.EvmJsonRpcClient;
@@ -70,6 +71,14 @@ public final class BesuNetwork {
 
     @Nullable
     private ContractInteractor interactor;
+
+    /**
+     * Method-aware JSON-RPC proxy in front of the primary node, when the spec opts in. Endpoints
+     * dial this instead of the node directly, so a test can block specific methods without
+     * freezing the whole chain.
+     */
+    @Nullable
+    private EvmRpcFilterProxy rpcFilterProxy;
 
     BesuNetwork(
             final BesuNetworkSpec spec,
@@ -194,6 +203,25 @@ public final class BesuNetwork {
         return primaryNode().internalJsonRpcUrl();
     }
 
+    /**
+     * URL an endpoint container should dial for this chain. Points at the filter proxy when the
+     * spec enabled it, otherwise at the primary node. Kept separate from {@link #internalJsonRpcUrl}
+     * so the test JVM's own clients (which always want to hit the real node, not the proxy) are
+     * unaffected by opting the endpoint side into filtering.
+     */
+    public String endpointRpcUrl() {
+        return rpcFilterProxy != null ? rpcFilterProxy.internalRpcUrl() : internalJsonRpcUrl();
+    }
+
+    /**
+     * @return the filter proxy for fault injection, or {@code null} if the spec did not opt in via
+     *     {@link BesuNetworkSpec#withRpcFilterProxy()}.
+     */
+    @Nullable
+    public EvmRpcFilterProxy rpcFilterProxy() {
+        return rpcFilterProxy;
+    }
+
     /** @return the relay's JSON-RPC client, pointed at the primary node. */
     public EvmJsonRpcClient rpc() {
         return requireStarted(rpc, "rpc()");
@@ -252,6 +280,29 @@ public final class BesuNetwork {
                 return false; // node still coming up
             }
         });
+
+        // Start the RPC filter proxy after the primary node is up: the proxy's upstream is the
+        // node's docker-alias URL, which does not resolve until the node's container is running.
+        // Roll back the started nodes on proxy failure — otherwise a proxy that fails to come up
+        // leaves the whole chain running for the rest of the suite when the caller's teardown is
+        // not reached.
+        if (spec.rpcFilterProxy()) {
+            final EvmRpcFilterProxy proxy = new EvmRpcFilterProxy(
+                    spec.id() + "-rpc-filter", primaryNode().id(), BesuNode.RPC_PORT, dockerNetwork);
+            try {
+                proxy.start();
+            } catch (final RuntimeException e) {
+                for (final BesuNode node : nodes) {
+                    try {
+                        node.stop();
+                    } catch (final RuntimeException ignored) {
+                        // best-effort
+                    }
+                }
+                throw e;
+            }
+            this.rpcFilterProxy = proxy;
+        }
     }
 
     /** @return the account that deploys contracts and performs on-chain administration. */
@@ -403,6 +454,16 @@ public final class BesuNetwork {
             }
             rawRpc = null;
             inspector = null;
+        }
+        // Stop the filter proxy before its upstream so its outstanding forwards don't retry against
+        // a node that is already tearing down.
+        if (rpcFilterProxy != null) {
+            try {
+                rpcFilterProxy.stop();
+            } catch (final RuntimeException e) {
+                // best-effort teardown
+            }
+            rpcFilterProxy = null;
         }
         for (final BesuNode node : nodes) {
             try {

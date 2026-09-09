@@ -178,7 +178,9 @@ public final class EvmEndpoint {
                         local.id(),
                         local.chainId(),
                         // The in-network URL: the relay dials the node from inside the Docker network.
-                        local.internalJsonRpcUrl(),
+                        // Resolves to the RPC filter proxy's alias when the spec opted in, so a test can
+                        // block specific methods without freezing the whole chain.
+                        local.endpointRpcUrl(),
                         spec.pollInterval().toMillis(),
                         spec.requestTimeoutMs(),
                         spec.maxRpcRetries(),
