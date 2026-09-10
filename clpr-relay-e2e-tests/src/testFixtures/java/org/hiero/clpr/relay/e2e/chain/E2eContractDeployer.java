@@ -36,19 +36,32 @@ public final class E2eContractDeployer {
     public static final int REQUIRED_COMMITTED_SEALS = 1;
 
     /**
-     * Gas limit for the small contract creates this class issues (per-chain {@code QBFTVerifier} +
+     * Gas limit for the contract creates this class issues (per-chain {@code QBFTVerifier} +
      * {@code E2EApplication}; per-channel {@code QbftE2EVerifier} + {@code MockClprConnector}).
      *
-     * <p>All four observed at ~1.1M–2.2M actual gas, so 4M is a comfortable buffer. Kept well
-     * below {@link ChainTx#DEFAULT_GAS_LIMIT} on purpose: Besu's EIP-1559 balance check reserves
-     * {@code gasLimit × maxFeePerGas} at admission ({@code 12M × 100 gwei = 1.2 ETH} per pending
-     * tx against a genesis-funded 8-ETH deployer), and at scale that reservation starves the pool
-     * long before the deployer's actual balance runs out — the failing "pending / 0 gas" empty
-     * blocks in the many-channel wiring path traced back to exactly this. A right-sized limit here
-     * mirrors {@link ChainTx#PLAIN_TRANSFER_GAS_LIMIT}'s reasoning: don't declare gas you can't
-     * plausibly spend.
+     * <p>{@code QBFTVerifier}'s constructor spawns a nested {@code new QbftContractModeVerifier()}
+     * inline, so its deploy is effectively two contracts stacked into one transaction. Runtime
+     * code-deposit alone is ~6.67M gas (outer 16545 bytes + inner 16799 bytes, each at 200 gas/byte),
+     * plus constructor execution and CREATE overhead observed at roughly 1M–2M — so the true gas
+     * floor is ~8M. 10M gives a ~25% buffer.
+     *
+     * <p>The ceiling is coupled to the deployer's balance and the submitter's fee cap and can't
+     * move alone. Besu's EIP-1559 admission check reserves {@code gasLimit × maxFeePerGas} per
+     * pending tx against the sender's balance at pool-entry, so the invariant is:
+     * {@code DEPLOY_GAS_LIMIT × Eip1559TxSubmitter.MAX_FEE_PER_GAS × N ≤
+     * BesuQbftGenesis.DEFAULT_BALANCE_WEI}, where {@code N} is the largest number of concurrently
+     * pending deploys any workload holds against a single deployer account. At the current values
+     * ({@code 10M × 100 gwei = 1 ETH} against 8 ETH) that ceiling is ~8. Workloads that wire many
+     * channels in parallel are the ones that approach the bound; when it is exceeded the pool
+     * wedges as "1 pending / 0 gas" empty blocks with a stuck tx.
+     *
+     * <p>If {@code QBFTVerifier} grows again and this ceiling has to rise, raise
+     * {@code BesuQbftGenesis.DEFAULT_BALANCE_WEI} in the same change — or drop
+     * {@code Eip1559TxSubmitter.MAX_FEE_PER_GAS} (100 gwei today, well above the ~2 gwei this
+     * dev chain settles at) — or lower the largest workload's concurrent-pending-deploy count.
+     * Do not push this constant upward alone.
      */
-    private static final long DEPLOY_GAS_LIMIT = 4_000_000L;
+    private static final long DEPLOY_GAS_LIMIT = 10_000_000L;
 
     private final EvmJsonRpcClient rpc;
     private final AnvilTxSubmitter txSubmitter;
