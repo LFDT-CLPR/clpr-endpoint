@@ -99,6 +99,10 @@ localNetworks:
       # Maximum messages to include in a single bundle (default: 10).
       maxMessagesPerBundle: 10
 
+      # Maximum assembled bundle-proof size in bytes; a larger bundle is not emitted, guarding
+      # against a gas/size blowup on the peer's submitBundle (default: 1048576 = 1 MiB).
+      maxBundleSize: 1048576
+
   # ── Local Sei (CometBFT) chain ──
   # Sei is EVM-compatible, so it reuses the evm: block for the EVM side (contract reads + submitBundle).
   # The CometBFT proof path is configured in the separate `cometBft:` block below.
@@ -123,6 +127,9 @@ localNetworks:
       maxRetries: 3
       # Per-request CometBFT RPC response timeout in ms (default: 5000).
       requestTimeoutMs: 5000
+      # Maximum assembled bundle-proof size in bytes; a larger bundle is not emitted, guarding
+      # against a gas/size blowup on the peer's submitBundle (default: 1048576 = 1 MiB).
+      maxBundleSize: 1048576
 
   # ── Local Ethereum (PoS) chain ──
   # Ethereum mainnet is EVM, so it reuses the evm: block for the EVM side (contract reads +

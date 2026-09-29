@@ -173,8 +173,20 @@ public record RelayConfig(
      *                                      (default: {@code 5})
      * @param maxMessagesPerBundle          maximum number of messages to include in a single bundle
      *                                      (default: {@code 10})
+     * @param maxBundleSize                 maximum assembled bundle-proof size, in bytes; a bundle
+     *                                      exceeding it is not emitted (defence-in-depth against a
+     *                                      gas/size blowup on the peer's {@code submitBundle}), on top
+     *                                      of {@code maxMessagesPerBundle} (default: {@code 1048576})
      */
-    public record QbftConfig(long epochLength, int maxEpochBlockHeadersPerBundle, int maxMessagesPerBundle) {}
+    public record QbftConfig(
+            long epochLength, int maxEpochBlockHeadersPerBundle, int maxMessagesPerBundle, long maxBundleSize) {
+
+        public QbftConfig {
+            if (maxBundleSize < 1) {
+                throw new IllegalArgumentException("qbft.maxBundleSize must be at least 1 byte");
+            }
+        }
+    }
 
     /**
      * CometBFT proof parameters. Present on {@link LocalNetworkConfig} entries whose
@@ -194,13 +206,25 @@ public record RelayConfig(
      *                             failure, in addition to the initial attempt (default: 3)
      * @param requestTimeoutMs     per-request CometBFT RPC response timeout, in milliseconds
      *                             (default: 5000)
+     * @param maxBundleSize        maximum assembled bundle-proof size, in bytes; a bundle exceeding it
+     *                             is not emitted (defence-in-depth against a gas/size blowup on the
+     *                             peer's {@code submitBundle}), on top of {@code maxMessagesPerBundle}
+     *                             (default: {@code 1048576})
      */
     public record CometBftConfig(
             String cometBftRpcUrl,
             int maxMessagesPerBundle,
             int maxPriorValidatorSetUpdates,
             int maxRetries,
-            long requestTimeoutMs) {}
+            long requestTimeoutMs,
+            long maxBundleSize) {
+
+        public CometBftConfig {
+            if (maxBundleSize < 1) {
+                throw new IllegalArgumentException("cometBft.maxBundleSize must be at least 1 byte");
+            }
+        }
+    }
 
     /**
      * Ethereum-PoS beacon (consensus-layer) configuration. Present on {@link LocalNetworkConfig}

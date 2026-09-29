@@ -67,6 +67,9 @@ public final class SeiBundleConstructor implements BundleConstructor {
 
     private static final int ENCODED_TRUST_ANCHOR_ID_LENGTH = VALIDATORS_HASH_LENGTH + Long.BYTES;
 
+    /** Default assembled bundle-proof size ceiling (bytes) when none is configured; matches gRPC 1 MiB. */
+    public static final long DEFAULT_MAX_BUNDLE_SIZE = 1_048_576L;
+
     /** Cache of the latest bundle proof per channel ID. */
     private final ConcurrentHashMap<Bytes, Bytes> bundleProofCache = new ConcurrentHashMap<>();
 
@@ -74,6 +77,7 @@ public final class SeiBundleConstructor implements BundleConstructor {
     private final CometBftRpcClient cometBftRpcClient;
     private final int maxMessagesPerBundle;
     private final int maxPriorValidatorSetUpdates;
+    private final long maxBundleSize;
 
     /** Reader for the local endpoint manifest; {@code null} disables manifest proofs. */
     @Nullable
@@ -101,6 +105,24 @@ public final class SeiBundleConstructor implements BundleConstructor {
             final CometBftRpcClient cometBftRpcClient,
             @Nullable final ContractStateReader stateReader,
             @Nullable final PeerManifestVersionCache peerManifestVersions) {
+        this(
+                clprServiceAddress,
+                maxMessagesPerBundle,
+                maxPriorValidatorSetUpdates,
+                cometBftRpcClient,
+                stateReader,
+                peerManifestVersions,
+                DEFAULT_MAX_BUNDLE_SIZE);
+    }
+
+    public SeiBundleConstructor(
+            final Address clprServiceAddress,
+            final int maxMessagesPerBundle,
+            final int maxPriorValidatorSetUpdates,
+            final CometBftRpcClient cometBftRpcClient,
+            @Nullable final ContractStateReader stateReader,
+            @Nullable final PeerManifestVersionCache peerManifestVersions,
+            final long maxBundleSize) {
         this.clprServiceAddress = clprServiceAddress;
         this.cometBftRpcClient = cometBftRpcClient;
         this.stateReader = stateReader;
@@ -115,6 +137,11 @@ public final class SeiBundleConstructor implements BundleConstructor {
             throw new IllegalArgumentException("maxPriorValidatorSetUpdates must be at least 1");
         }
         this.maxPriorValidatorSetUpdates = maxPriorValidatorSetUpdates;
+
+        if (maxBundleSize < 1) {
+            throw new IllegalArgumentException("maxBundleSize must be at least 1 byte");
+        }
+        this.maxBundleSize = maxBundleSize;
     }
 
     @Override
@@ -240,6 +267,16 @@ public final class SeiBundleConstructor implements BundleConstructor {
 
         if (bundlePayload != null) {
             final Bytes payloadBytes = ClprSeiBundlePayload.PROTOBUF.toBytes(bundlePayload);
+            if (payloadBytes.length() > maxBundleSize) {
+                log.warn(
+                        "[Sei] Assembled bundle proof for channel {} is {} bytes, over the configured maxBundleSize"
+                                + " of {} bytes; not emitting it (a peer submitting it would risk a gas/size blowup)."
+                                + " Lower maxMessagesPerBundle or raise maxBundleSize.",
+                        channelId,
+                        payloadBytes.length(),
+                        maxBundleSize);
+                return;
+            }
             bundleProofCache.put(channelId, payloadBytes);
         }
     }

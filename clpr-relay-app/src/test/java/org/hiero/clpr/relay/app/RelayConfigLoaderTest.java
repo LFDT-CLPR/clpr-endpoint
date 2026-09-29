@@ -572,6 +572,35 @@ class RelayConfigLoaderTest {
         assertThat(config.peerProofTypes()).containsExactly(entry("eip155:9999", ProofType.CometBFT));
     }
 
+    @Test
+    void peerProofTypes_notAMap_failsFast(@TempDir final Path tmp) throws Exception {
+        // A scalar where a chainId -> proofType map is expected must fail startup with a clear message.
+        final var yaml = tmp.resolve("bad-peer-proof-types.yaml");
+        Files.writeString(yaml, """
+                peerProofTypes: "not-a-map"
+                """);
+
+        assertThatThrownBy(() -> RelayConfigLoader.load(yaml, new Properties()))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("Invalid relay config file")
+                .hasMessageContaining("not-a-map");
+    }
+
+    @Test
+    void peerProofTypes_valueNotAProofTypeString_failsFast(@TempDir final Path tmp) throws Exception {
+        // A nested object where a proof-type string is expected must fail startup.
+        final var yaml = tmp.resolve("bad-peer-proof-value.yaml");
+        Files.writeString(yaml, """
+                peerProofTypes:
+                  "eip155:1":
+                    nested: value
+                """);
+
+        assertThatThrownBy(() -> RelayConfigLoader.load(yaml, new Properties()))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("Invalid relay config file");
+    }
+
     // -------------------------------------------------------------------------
     // Signing-key validation
     // -------------------------------------------------------------------------
@@ -789,5 +818,34 @@ class RelayConfigLoaderTest {
         assertThat(config.sync().port()).isEqualTo(9600);
         assertThat(config.sync().tlsEnabled()).isTrue();
         assertThat(config.sync().tlsKeyPath()).isEqualTo(key.toString());
+    }
+
+    @Test
+    void maxBundleSize_defaultsAndParsesFromYaml(@TempDir final Path tmp) throws Exception {
+        final var yaml = tmp.resolve("maxbundle.yaml");
+        Files.writeString(yaml, """
+                localNetworks:
+                  - id: besu1
+                    proofType: QBFT
+                    evm: {}
+                  - id: sei1
+                    proofType: CometBFT
+                    evm: {}
+                    cometBft:
+                      maxBundleSize: 2048
+                """);
+
+        final var config = RelayConfigLoader.load(yaml, new Properties());
+
+        final var qbft = config.localNetworks().stream()
+                .filter(n -> n.proofType() == ProofType.QBFT)
+                .findFirst()
+                .orElseThrow();
+        final var cometBft = config.localNetworks().stream()
+                .filter(n -> n.proofType() == ProofType.CometBFT)
+                .findFirst()
+                .orElseThrow();
+        assertThat(qbft.qbft().maxBundleSize()).isEqualTo(1_048_576L); // default when omitted
+        assertThat(cometBft.cometBft().maxBundleSize()).isEqualTo(2_048L); // from yaml
     }
 }

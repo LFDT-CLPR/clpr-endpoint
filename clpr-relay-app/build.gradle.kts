@@ -29,7 +29,11 @@ mainModuleInfo {
     runtimeOnly("org.apache.logging.log4j.slf4j2.impl")
 }
 
-testModuleInfo { requires("org.hiero.clpr.relay.core.test.fixtures") }
+testModuleInfo {
+    requires("org.hiero.clpr.relay.core.test.fixtures")
+    // java.net.http: MetricsHttpServerTest scrapes the /metrics + /healthz endpoints it serves.
+    requires("java.net.http")
+}
 
 // Run from the repo root so the relay picks up log.properties from the
 // conventional working directory. Gradle would otherwise default

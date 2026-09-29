@@ -83,4 +83,23 @@ class PeerSelectorTest {
             assertThat(selected.get()).isEqualTo(peer2);
         }
     }
+
+    @Test
+    void allPeersBackedOff_fallsBackToUniformSelection() {
+        cache.replaceAll(List.of(peer1, peer2));
+
+        // Back off every known peer.
+        for (int i = 0; i < 5; i++) {
+            selector.recordFailure(peer1);
+            selector.recordFailure(peer2);
+        }
+
+        // The eligible list is empty, so the selector must fall back to uniform random over the full
+        // list and still return *some* peer rather than empty.
+        for (int i = 0; i < 20; i++) {
+            var selected = selector.selectPeer();
+            assertThat(selected).isPresent();
+            assertThat(selected.get()).isIn(peer1, peer2);
+        }
+    }
 }

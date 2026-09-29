@@ -572,10 +572,12 @@ final class RelayConfigLoader {
             final Long epochLength = asLong(q.get("epochLength"));
             final Integer maxEpochBlockHeadersPerBundle = asInt(q.get("maxEpochBlockHeadersPerBundle"));
             final Integer maxMessagesPerBundle = asInt(q.get("maxMessagesPerBundle"));
+            final Long maxBundleSize = asLong(q.get("maxBundleSize"));
             return new RelayConfig.QbftConfig(
                     epochLength != null ? epochLength : 30_000L,
                     maxEpochBlockHeadersPerBundle != null ? maxEpochBlockHeadersPerBundle : 5,
-                    maxMessagesPerBundle != null ? maxMessagesPerBundle : 10);
+                    maxMessagesPerBundle != null ? maxMessagesPerBundle : 10,
+                    maxBundleSize != null ? maxBundleSize : 1_048_576L);
         }
 
         /**
@@ -589,12 +591,14 @@ final class RelayConfigLoader {
             final Integer maxPriorValidatorSetUpdates = asInt(c.get("maxPriorValidatorSetUpdates"));
             final Integer maxRetries = asInt(c.get("maxRetries"));
             final Long requestTimeoutMs = asLong(c.get("requestTimeoutMs"));
+            final Long maxBundleSize = asLong(c.get("maxBundleSize"));
             return new RelayConfig.CometBftConfig(
                     cometBftRpcUrl != null ? cometBftRpcUrl : "http://localhost:26657",
                     maxMessagesPerBundle != null ? maxMessagesPerBundle : 10,
                     maxPriorValidatorSetUpdates != null ? maxPriorValidatorSetUpdates : 10,
                     maxRetries != null ? maxRetries : 3,
-                    requestTimeoutMs != null ? requestTimeoutMs : 5_000L);
+                    requestTimeoutMs != null ? requestTimeoutMs : 5_000L,
+                    maxBundleSize != null ? maxBundleSize : 1_048_576L);
         }
 
         private static RelayConfig.BeaconConfig parseBeaconConfig(@Nullable final Map<String, Object> beacon) {

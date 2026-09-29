@@ -13,6 +13,7 @@ import java.util.Arrays;
 import java.util.List;
 import java.util.Optional;
 import org.hiero.clpr.relay.core.BundleConstructor;
+import org.hiero.clpr.relay.core.BundlePayloadCodec;
 import org.hiero.clpr.relay.core.CommitmentLevel;
 import org.hiero.clpr.relay.core.ContractStateReader;
 import org.hiero.clpr.relay.core.ParsedBundle;
@@ -233,5 +234,100 @@ class ClprSyncHandlerTest {
         assertThat(submitter.called).isFalse();
         assertThat(response.channelId()).isEqualTo(CHANNEL_ID);
         assertThat(response.bundlePayload()).isNotEqualTo(Bytes.EMPTY); // our cached proof is still returned
+    }
+
+    @Test
+    void handleSync_noChannelRecord_returnsEmptyProof() {
+        // No on-chain Channel record (PENDING commit-only or never registered) → empty-proof reply.
+        final var handler = new ClprSyncHandler(
+                id -> proofParser,
+                new FixedBundleConstructor(),
+                submitter,
+                id -> new ThrottleEnforcer(Long.MAX_VALUE, Integer.MAX_VALUE, Integer.MAX_VALUE),
+                new StubStateReader(ClprChannelStatus.ACTIVE) {
+                    @Override
+                    public Optional<ClprChannel> readChannelState(Bytes channelId, String blockTag) {
+                        return Optional.empty();
+                    }
+                },
+                new PeerManifestVersionCache(),
+                new SimpleMetrics(),
+                "");
+
+        final var response = handler.handleSync(syncPayload(BUNDLE_PAYLOAD), null);
+
+        assertThat(response.bundlePayload()).isEqualTo(Bytes.EMPTY);
+        assertThat(response.channelId()).isEqualTo(CHANNEL_ID);
+        assertThat(submitter.called).isFalse();
+        assertThat(proofParser.isParseCalled()).isFalse();
+    }
+
+    @Test
+    void handleSync_pendingChannel_returnsEmptyProof() {
+        // PENDING → the channel is not yet usable; reply empty-proof and skip parse/submit.
+        final var handler = buildHandler(ClprChannelStatus.PENDING);
+
+        final var response = handler.handleSync(syncPayload(BUNDLE_PAYLOAD), null);
+
+        assertThat(response.bundlePayload()).isEqualTo(Bytes.EMPTY);
+        assertThat(submitter.called).isFalse();
+        assertThat(proofParser.isParseCalled()).isFalse();
+    }
+
+    @Test
+    void handleSync_parseFailure_stillRepliesWithoutSubmitting() {
+        // A codec that throws while parsing the peer bundle → parse_error is trapped; submission is
+        // skipped (parsed == null) but we still return our latest cached proof.
+        final BundlePayloadCodec throwingCodec = new BundlePayloadCodec() {
+            @Override
+            public ParsedBundle decodeBundle(Bytes proofBytes) {
+                throw new IllegalStateException("malformed peer proof");
+            }
+
+            @Override
+            public ParsedBundle parseBundle(Bytes proofBytes, long receivedMessageId) {
+                throw new IllegalStateException("malformed peer proof");
+            }
+        };
+        final var handler = new ClprSyncHandler(
+                id -> throwingCodec,
+                new FixedBundleConstructor(),
+                submitter,
+                id -> new ThrottleEnforcer(Long.MAX_VALUE, Integer.MAX_VALUE, Integer.MAX_VALUE),
+                new StubStateReader(ClprChannelStatus.ACTIVE),
+                new PeerManifestVersionCache(),
+                new SimpleMetrics(),
+                "");
+
+        final var response = handler.handleSync(syncPayload(BUNDLE_PAYLOAD), null);
+
+        assertThat(submitter.called).isFalse();
+        assertThat(response.bundlePayload()).isNotEqualTo(Bytes.EMPTY);
+        assertThat(response.channelId()).isEqualTo(CHANNEL_ID);
+    }
+
+    @Test
+    void handleSync_submitFailure_stillReplies() {
+        // The submitter throwing must be trapped (submit_error) so the peer still receives our proof.
+        final TransactionSubmitter throwingSubmitter = new TransactionSubmitter() {
+            @Override
+            public void submitBundle(@NonNull ClprChannel channel, @NonNull ParsedBundle bundle) {
+                throw new IllegalStateException("submit blew up");
+            }
+        };
+        final var handler = new ClprSyncHandler(
+                id -> proofParser,
+                new FixedBundleConstructor(),
+                throwingSubmitter,
+                id -> new ThrottleEnforcer(Long.MAX_VALUE, Integer.MAX_VALUE, Integer.MAX_VALUE),
+                new StubStateReader(ClprChannelStatus.ACTIVE),
+                new PeerManifestVersionCache(),
+                new SimpleMetrics(),
+                "");
+
+        final var response = handler.handleSync(syncPayload(BUNDLE_PAYLOAD), null);
+
+        assertThat(response.bundlePayload()).isNotEqualTo(Bytes.EMPTY);
+        assertThat(response.channelId()).isEqualTo(CHANNEL_ID);
     }
 }

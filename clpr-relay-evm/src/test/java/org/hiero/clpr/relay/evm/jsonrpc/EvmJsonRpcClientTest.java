@@ -9,12 +9,21 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.hedera.pbj.runtime.io.buffer.Bytes;
+import com.sun.net.httpserver.HttpServer;
+import java.io.IOException;
 import java.math.BigInteger;
+import java.net.InetSocketAddress;
+import java.net.ServerSocket;
+import java.nio.charset.StandardCharsets;
+import java.time.Duration;
+import java.util.ArrayDeque;
 import java.util.List;
+import java.util.Queue;
 import org.hiero.clpr.relay.evm.JsonRpcException;
 import org.hiero.clpr.relay.evm.QbftBundleConstructor;
 import org.hiero.clpr.relay.evm.model.BlockHeader;
 import org.hiero.clpr.relay.evm.model.ProofResponse;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 
@@ -316,6 +325,208 @@ class EvmJsonRpcClientTest {
             final var ids = EvmJsonRpcClient.decodeChannelCompletedChannelIds(EvmJsonRpcClient.logsFromJson(result));
 
             assertThat(ids).containsExactly(fromPrefixedHex(ONE_HASH));
+        }
+    }
+
+    // ── send() retry + parseResponse() error decoding ─────────────────────────
+    //
+    // These drive the real HTTP transport against a loopback com.sun.net.httpserver
+    // instance so the retry state machine (429/503 retry-then-fail, IOException retry)
+    // and the JSON-RPC error-response decoding run end to end — no mocking.
+
+    @Nested
+    class SendRetryAndParse {
+
+        private static final String RESULT_0X10 = "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":\"0x10\"}";
+
+        private HttpServer server;
+
+        @AfterEach
+        void stopServer() {
+            if (server != null) {
+                server.stop(0);
+                server = null;
+            }
+        }
+
+        /** A single canned HTTP response: status line + JSON body. */
+        private record Canned(int status, String body) {}
+
+        /** Start a loopback server that serves {@code responses} in order (200/result once drained). */
+        private int startServer(final Canned... responses) throws IOException {
+            final Queue<Canned> queue = new ArrayDeque<>(List.of(responses));
+            server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+            server.createContext("/", exchange -> {
+                exchange.getRequestBody().readAllBytes();
+                final Canned c = queue.poll();
+                final Canned resp = c != null ? c : new Canned(200, RESULT_0X10);
+                final byte[] body = resp.body().getBytes(StandardCharsets.UTF_8);
+                exchange.getResponseHeaders().add("Content-Type", "application/json");
+                exchange.sendResponseHeaders(resp.status(), body.length);
+                try (var os = exchange.getResponseBody()) {
+                    os.write(body);
+                }
+            });
+            server.start();
+            return server.getAddress().getPort();
+        }
+
+        private EvmJsonRpcClient clientFor(final int port, final int maxRetries) {
+            return new EvmJsonRpcClient("http://127.0.0.1:" + port, maxRetries, Duration.ofSeconds(5));
+        }
+
+        @Test
+        void send_nonRetryableHttpError_throws() throws IOException {
+            final int port = startServer(new Canned(400, "{}"));
+            assertThatThrownBy(() -> clientFor(port, 0).ethBlockNumber())
+                    .isInstanceOf(JsonRpcException.class)
+                    .hasMessageContaining("HTTP error 400");
+        }
+
+        @Test
+        void send_rateLimitedThenSucceeds_returnsResult() throws IOException {
+            // First attempt gets 429 (retryable), second attempt gets the real result.
+            final int port = startServer(new Canned(429, "{}"), new Canned(200, RESULT_0X10));
+            assertThat(clientFor(port, 2).ethBlockNumber()).isEqualTo(16L);
+        }
+
+        @Test
+        void send_serviceUnavailable_exhaustsRetries_throws() throws IOException {
+            final int port = startServer(new Canned(503, "{}"), new Canned(503, "{}"));
+            assertThatThrownBy(() -> clientFor(port, 1).ethBlockNumber())
+                    .isInstanceOf(JsonRpcException.class)
+                    .hasMessageContaining("HTTP 503 after 1 retries");
+        }
+
+        @Test
+        void send_connectionRefused_exhaustsRetries_throws() throws IOException {
+            // Grab a free port, then close it so connections are refused.
+            final int deadPort;
+            try (ServerSocket s = new ServerSocket(0)) {
+                deadPort = s.getLocalPort();
+            }
+            assertThatThrownBy(() -> clientFor(deadPort, 1).ethBlockNumber())
+                    .isInstanceOf(JsonRpcException.class)
+                    .hasMessageContaining("Channel failed after 1 retries");
+        }
+
+        @Test
+        void parseResponse_invalidJson_throws() throws IOException {
+            final int port = startServer(new Canned(200, "{\"oops\""));
+            assertThatThrownBy(() -> clientFor(port, 0).ethBlockNumber())
+                    .isInstanceOf(JsonRpcException.class)
+                    .hasMessageContaining("-32700")
+                    .hasMessageContaining("Invalid JSON in response");
+        }
+
+        @Test
+        void parseResponse_errorNode_throwsWithCodeMessageAndData() throws IOException {
+            final int port = startServer(new Canned(
+                    200,
+                    "{\"jsonrpc\":\"2.0\",\"id\":1,\"error\":"
+                            + "{\"code\":-32000,\"message\":\"execution reverted\",\"data\":\"0xdead\"}}"));
+            assertThatThrownBy(() -> clientFor(port, 0).ethBlockNumber())
+                    .isInstanceOf(JsonRpcException.class)
+                    .hasMessageContaining("-32000")
+                    .hasMessageContaining("execution reverted")
+                    .hasMessageContaining("0xdead");
+        }
+
+        @Test
+        void parseResponse_errorNode_usesDefaultsWhenFieldsMissing() throws IOException {
+            final int port = startServer(new Canned(200, "{\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{}}"));
+            assertThatThrownBy(() -> clientFor(port, 0).ethBlockNumber())
+                    .isInstanceOf(JsonRpcException.class)
+                    .hasMessageContaining("-32000")
+                    .hasMessageContaining("unknown error");
+        }
+
+        @Test
+        void parseResponse_neitherResultNorError_throws() throws IOException {
+            final int port = startServer(new Canned(200, "{\"jsonrpc\":\"2.0\",\"id\":1}"));
+            assertThatThrownBy(() -> clientFor(port, 0).ethBlockNumber())
+                    .isInstanceOf(JsonRpcException.class)
+                    .hasMessageContaining("-32603")
+                    .hasMessageContaining("neither 'result' nor 'error'");
+        }
+
+        // ---- public read/write methods driven through the real transport ----
+
+        private String resultBody(final String resultJson) {
+            return "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":" + resultJson + "}";
+        }
+
+        @Test
+        void ethCall_returnsResultString() throws IOException {
+            final int port = startServer(new Canned(200, resultBody("\"0xabcd\"")));
+            assertThat(clientFor(port, 0).ethCall("0xto", "0xdata", "latest")).isEqualTo("0xabcd");
+        }
+
+        @Test
+        void ethCallFrom_returnsResultString() throws IOException {
+            final int port = startServer(new Canned(200, resultBody("\"0xbeef\"")));
+            assertThat(clientFor(port, 0).ethCallFrom("0xfrom", "0xto", "0xdata", "latest"))
+                    .isEqualTo("0xbeef");
+        }
+
+        @Test
+        void ethSendRawTransaction_returnsTxHash() throws IOException {
+            final int port = startServer(new Canned(200, resultBody("\"0xdeadbeef\"")));
+            assertThat(clientFor(port, 0).ethSendRawTransaction("0xf86b")).isEqualTo("0xdeadbeef");
+        }
+
+        @Test
+        void ethGetTransactionCount_parsesHexLong() throws IOException {
+            final int port = startServer(new Canned(200, resultBody("\"0x5\"")));
+            assertThat(clientFor(port, 0).ethGetTransactionCount("0xaddr", "pending"))
+                    .isEqualTo(5L);
+        }
+
+        @Test
+        void ethGetBalance_parsesHexBigInteger() throws IOException {
+            final int port = startServer(new Canned(200, resultBody("\"0x64\"")));
+            assertThat(clientFor(port, 0).ethGetBalance("0xaddr", "latest")).isEqualTo(BigInteger.valueOf(100));
+        }
+
+        @Test
+        void ethGetTransactionReceipt_minedTx_returnsNode() throws IOException {
+            final int port = startServer(new Canned(200, resultBody("{\"status\":\"0x1\"}")));
+            final var receipt = clientFor(port, 0).ethGetTransactionReceipt("0xhash");
+            assertThat(receipt).isNotNull();
+            assertThat(receipt.get("status").asText()).isEqualTo("0x1");
+        }
+
+        @Test
+        void ethGetTransactionReceipt_unminedTx_returnsNull() throws IOException {
+            final int port = startServer(new Canned(200, resultBody("null")));
+            assertThat(clientFor(port, 0).ethGetTransactionReceipt("0xhash")).isNull();
+        }
+
+        @Test
+        void ethGetBlockHeaderByNumber_decodesHeader() throws Exception {
+            final int port = startServer(new Canned(200, resultBody(MAPPER.writeValueAsString(minimalBlock("0x")))));
+            final BlockHeader header = clientFor(port, 0).ethGetBlockHeaderByNumber("latest");
+            assertThat(header.number()).isEqualTo(BigInteger.ONE);
+            assertThat(header.baseFeePerGas()).isEqualTo(BigInteger.valueOf(7));
+        }
+
+        @Test
+        void ethGetProof_decodesAccountAndStorageProofs() throws Exception {
+            final int port =
+                    startServer(new Canned(200, resultBody(MAPPER.writeValueAsString(minimalProof("0xabcd")))));
+            final ProofResponse proof = clientFor(port, 0).ethGetProof("0xaddr", new String[] {}, "latest");
+            assertThat(proof.accountProof()).hasSize(2);
+            assertThat(proof.storageProof()).hasSize(5);
+        }
+
+        @Test
+        void ethGetLogs_decodesLogEntries() throws IOException {
+            final String logsArray = "[{\"topics\":[\"0x01\"],\"data\":\"0x1234\",\"blockNumber\":\"0x10\"}]";
+            final int port = startServer(new Canned(200, resultBody(logsArray)));
+            final var logs = clientFor(port, 0).ethGetLogs("0xaddr", null, 1L, 2L);
+            assertThat(logs).hasSize(1);
+            assertThat(logs.get(0).blockNumber()).isEqualTo(16L);
+            assertThat(logs.get(0).data()).isEqualTo("0x1234");
         }
     }
 

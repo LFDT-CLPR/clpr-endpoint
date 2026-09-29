@@ -15,6 +15,9 @@ dependencies {
 
 testModuleInfo {
     requires("org.hiero.clpr.relay.evm.test.fixtures")
+    // jdk.httpserver: loopback HTTP server used by EvmJsonRpcClientTest to exercise the
+    // real send()/parseResponse() retry + error-decoding state machine without mocking.
+    requires("jdk.httpserver")
     requires("org.junit.jupiter.params")
     runtimeOnly("com.swirlds.config.impl")
 }

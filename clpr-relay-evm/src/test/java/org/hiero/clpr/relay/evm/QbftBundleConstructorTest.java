@@ -269,6 +269,19 @@ class QbftBundleConstructorTest {
         }
 
         @Test
+        void bundleExceedingMaxBundleSizeIsNotEmitted() throws Exception {
+            rpcClient.setBlockResponse(minimalBlockHeader("0x"));
+            rpcClient.setProofResponse(minimalProof5("0xCAFE"));
+            // maxBundleSize = 1 byte → any assembled proof exceeds it, so nothing is cached or emitted.
+            final var guarded = new QbftBundleConstructor(
+                    Address.fromHexString(CONTRACT), 30_000L, 10, 10, rpcClient, null, null, 1L);
+
+            guarded.onStateChanged(BigInteger.ONE, CHANNEL_ID, channelWithReceivedMessage(), List.of());
+
+            assertThat(guarded.getLatestBundlePayload(CHANNEL_ID)).isEmpty();
+        }
+
+        @Test
         void closingStatusWithFrozenCountersCachesStatusOnlyBundle() throws Exception {
             rpcClient.setBlockResponse(minimalBlockHeader("0x"));
             rpcClient.setProofResponse(minimalProof5("0xCAFE"));

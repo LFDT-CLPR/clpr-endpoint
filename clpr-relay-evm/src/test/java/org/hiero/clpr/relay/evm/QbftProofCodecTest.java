@@ -95,6 +95,20 @@ class QbftProofCodecTest {
                 .hasMessageContaining("QBFT bundle");
     }
 
+    @Test
+    void rejectsMalformedBundleContentElement() {
+        // Right tuple shape, but the 5th element is not a valid ClprBundleContent protobuf.
+        final byte[] proof = AbiCodec.rlpList(
+                AbiCodec.rlpList(),
+                AbiCodec.rlpList(),
+                AbiCodec.rlpList(),
+                AbiCodec.rlpList(),
+                AbiCodec.rlpBytes(new byte[] {(byte) 0xff, (byte) 0xff, (byte) 0xff}));
+        assertThatThrownBy(() -> codec.decodeBundle(Bytes.wrap(proof)))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("Failed to parse QBFT bundle proof");
+    }
+
     /** Build a QBFT-shaped proof with manifest proof elements (7-element tuple). */
     private static Bytes qbftProofWithManifest(final ClprBundleContent content) {
         final byte[] contentBytes = ClprBundleContent.PROTOBUF.toBytes(content).toByteArray();

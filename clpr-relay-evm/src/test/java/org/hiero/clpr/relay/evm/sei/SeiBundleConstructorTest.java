@@ -121,6 +121,17 @@ class SeiBundleConstructorTest {
     }
 
     @Test
+    void onStateChanged_bundleExceedsMaxBundleSize_notEmitted() {
+        final var cometBftRpcClient = stubNoRotation();
+        // maxBundleSize = 1 byte → any assembled proof exceeds it, so nothing is cached or emitted.
+        final var constructor = new SeiBundleConstructor(ADDR, 10, 10, cometBftRpcClient, null, null, 1L);
+
+        constructor.onStateChanged(STATE_HEIGHT, CONN_ID, channel(5L), List.of());
+
+        assertThat(constructor.getLatestBundlePayload(CONN_ID)).isEmpty();
+    }
+
+    @Test
     void onStateChanged_rotation_includesNextValidatorSet() throws Exception {
         final var cometBftRpcClient = stubNoRotation();
         // next_validators_hash != validators_hash → rotation required.

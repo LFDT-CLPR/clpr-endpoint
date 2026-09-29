@@ -64,6 +64,9 @@ public final class QbftBundleConstructor implements BundleConstructor {
             @Nullable QbftStorageProofEntry manifestStorageProof,
             @Nullable Bytes serializedEndpointManifest) {}
 
+    /** Default assembled bundle-proof size ceiling (bytes) when none is configured; matches gRPC 1 MiB. */
+    public static final long DEFAULT_MAX_BUNDLE_SIZE = 1_048_576L;
+
     /** Cache of the latest bundle proof per channel ID. */
     private final ConcurrentHashMap<Bytes, Bytes> bundleProofCache = new ConcurrentHashMap<>();
 
@@ -72,6 +75,7 @@ public final class QbftBundleConstructor implements BundleConstructor {
     private final long epochLength;
     private final int maxEpochBlockHeadersPerBundle;
     private final int maxMessagesPerBundle;
+    private final long maxBundleSize;
     /** Reader for the local endpoint manifest; {@code null} disables manifest proofs. */
     @Nullable
     private final ContractStateReader stateReader;
@@ -118,6 +122,26 @@ public final class QbftBundleConstructor implements BundleConstructor {
             EvmJsonRpcClient rpcClient,
             @Nullable ContractStateReader stateReader,
             @Nullable PeerManifestVersionCache peerManifestVersions) {
+        this(
+                clprServiceAddress,
+                epochLength,
+                maxEpochBlockHeadersPerBundle,
+                maxMessagesPerBundle,
+                rpcClient,
+                stateReader,
+                peerManifestVersions,
+                DEFAULT_MAX_BUNDLE_SIZE);
+    }
+
+    public QbftBundleConstructor(
+            Address clprServiceAddress,
+            long epochLength,
+            int maxEpochBlockHeadersPerBundle,
+            int maxMessagesPerBundle,
+            EvmJsonRpcClient rpcClient,
+            @Nullable ContractStateReader stateReader,
+            @Nullable PeerManifestVersionCache peerManifestVersions,
+            long maxBundleSize) {
         this.clprServiceAddress = clprServiceAddress;
         this.rpcClient = rpcClient;
         this.stateReader = stateReader;
@@ -137,6 +161,11 @@ public final class QbftBundleConstructor implements BundleConstructor {
             throw new IllegalArgumentException("maxMessagesPerBundle must be at least 1");
         }
         this.maxMessagesPerBundle = maxMessagesPerBundle;
+
+        if (maxBundleSize < 1) {
+            throw new IllegalArgumentException("maxBundleSize must be at least 1 byte");
+        }
+        this.maxBundleSize = maxBundleSize;
     }
 
     @Override
@@ -413,6 +442,17 @@ public final class QbftBundleConstructor implements BundleConstructor {
                 manifestStorageProof,
                 manifestPreimage);
         final var proofPackageBytes = serializeBundlePayload(proofPackage);
+
+        if (proofPackageBytes.length() > maxBundleSize) {
+            log.warn(
+                    "[QBFT] Assembled bundle proof for channel {} is {} bytes, over the configured maxBundleSize"
+                            + " of {} bytes; not emitting it (a peer submitting it would risk a gas/size blowup)."
+                            + " Lower maxMessagesPerBundle or raise maxBundleSize.",
+                    channelId,
+                    proofPackageBytes.length(),
+                    maxBundleSize);
+            return;
+        }
 
         bundleProofCache.put(channelId, proofPackageBytes);
 

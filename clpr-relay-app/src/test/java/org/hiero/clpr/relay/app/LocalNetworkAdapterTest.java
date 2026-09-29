@@ -9,15 +9,16 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 
 /**
- * Unit tests for {@link LocalNetworkAdapter#accountSubmitterFor}, the sharing rule that the
- * nonce-collision fix (issue #258, PR #283) rests on.
+ * Unit tests for {@link LocalNetworkAdapter}: the client wiring done by {@link
+ * LocalNetworkAdapter#create} and the {@link LocalNetworkAdapter#accountSubmitterFor} sharing rule
+ * that the nonce-collision fix (issue #258, PR #283) rests on.
  *
  * <p>{@link org.hiero.clpr.relay.evm.AccountTransactionSubmitter} guarantees that <em>one</em>
  * submitter never reuses a nonce — its single serial worker reads {@code latest} once per request and
- * confirms each transaction before dequeuing the next. That guarantee only removes cross-connection
- * collisions if every connection signing from the same key on the same chain actually resolves to
- * <em>the same submitter instance</em>. Each connection independently calls
- * {@code network.accountSubmitterFor(signer)} during {@code ClprConnectionHandler.create()}; if that
+ * confirms each transaction before dequeuing the next. That guarantee only removes cross-channel
+ * collisions if every channel signing from the same key on the same chain actually resolves to
+ * <em>the same submitter instance</em>. Each channel independently calls
+ * {@code network.accountSubmitterFor(signer)} during {@code ClprChannelHandler.create()}; if that
  * ever handed back distinct instances, each would start its own worker thread, each would read
  * {@code latest} independently, and the collision would be back regardless of how well-behaved any
  * individual submitter is.
@@ -52,14 +53,17 @@ class LocalNetworkAdapterTest {
         }
     }
 
+    private static RelayConfig.CommonEvmParams evm(final String url) {
+        return new RelayConfig.CommonEvmParams(url, 1L, Long.MAX_VALUE, 0L, 1.2, 1000L, 30_000L, 3);
+    }
+
     private static RelayConfig.LocalNetworkConfig net(final String id) {
         return new RelayConfig.LocalNetworkConfig(
                 id,
                 ProofType.QBFT,
-                new RelayConfig.CommonEvmParams(
-                        "http://localhost:8545", 1L, Long.MAX_VALUE, 0L, 1.2, 1000L, 30_000L, 3),
+                evm("http://localhost:8545"),
                 null,
-                new RelayConfig.QbftConfig(30_000L, 5, 10),
+                new RelayConfig.QbftConfig(30_000L, 5, 10, 1_048_576L),
                 null);
     }
 
@@ -69,11 +73,39 @@ class LocalNetworkAdapterTest {
     }
 
     @Test
+    void create_qbftNetwork_buildsClientsWithoutCometBft() {
+        final var config = net("besu1");
+        adapter = LocalNetworkAdapter.create(config, new SimpleMetrics());
+
+        assertThat(adapter.id()).isEqualTo("besu1");
+        assertThat(adapter.proofType()).isEqualTo(ProofType.QBFT);
+        assertThat(adapter.config()).isSameAs(config);
+        assertThat(adapter.rpcClient()).isNotNull();
+        assertThat(adapter.gasStrategy()).isNotNull();
+        assertThat(adapter.cometBftRpcClient()).isEmpty();
+    }
+
+    @Test
+    void create_cometBftNetwork_buildsCometBftClient() {
+        final var config = new RelayConfig.LocalNetworkConfig(
+                "sei1",
+                ProofType.CometBFT,
+                evm("http://localhost:8545"),
+                new RelayConfig.CometBftConfig("http://localhost:26657", 10, 10, 3, 30_000L, 1_048_576L),
+                null,
+                null);
+        adapter = LocalNetworkAdapter.create(config, new SimpleMetrics());
+
+        assertThat(adapter.proofType()).isEqualTo(ProofType.CometBFT);
+        assertThat(adapter.cometBftRpcClient()).isPresent();
+    }
+
+    @Test
     void sameKey_returnsTheSameSubmitterInstance() {
         final var network = adapter("besu1");
 
-        // Two connections registering independently each build their own EthSigner from the same
-        // configured key — exactly what ClprServiceHandler.addConnection does per connection.
+        // Two channels registering independently each build their own EthSigner from the same
+        // configured key — exactly what ClprServiceHandler.addChannel does per channel.
         final var first = network.accountSubmitterFor(new EthSigner(KEY_A));
         final var second = network.accountSubmitterFor(new EthSigner(KEY_A));
 
@@ -82,11 +114,11 @@ class LocalNetworkAdapterTest {
     }
 
     @Test
-    void sameKeyManyConnections_allShareOneSubmitter() {
+    void sameKeyManyChannels_allShareOneSubmitter() {
         final var network = adapter("besu1");
         final var expected = network.accountSubmitterFor(new EthSigner(KEY_A));
 
-        // The production shape: many connections discovered over time, all on one signing key.
+        // The production shape: many channels discovered over time, all on one signing key.
         for (int i = 0; i < 100; i++) {
             assertThat(network.accountSubmitterFor(new EthSigner(KEY_A))).isSameAs(expected);
         }

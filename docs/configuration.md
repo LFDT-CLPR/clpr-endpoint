@@ -63,11 +63,12 @@ Common EVM connection parameters (`CommonEvmParams`). Present on  `QBFT`, `Ether
 
 QBFT proof parameters (`QbftConfig`). Applies to `QBFT` networks.
 
-|               Key               | Default |                                                    Notes                                                    |
-|---------------------------------|---------|-------------------------------------------------------------------------------------------------------------|
-| `epochLength`                   | `30000` | QBFT epoch length used to compute the epoch-boundary block header for the `getLedgerConfiguration` payload. |
-| `maxEpochBlockHeadersPerBundle` | `5`     | Maximum epoch block headers to include in a bundle when the remote trust anchor is behind.                  |
-| `maxMessagesPerBundle`          | `10`    | Maximum messages to include in a single bundle.                                                             |
+|               Key               |  Default  |                                                                     Notes                                                                     |
+|---------------------------------|-----------|-----------------------------------------------------------------------------------------------------------------------------------------------|
+| `epochLength`                   | `30000`   | QBFT epoch length used to compute the epoch-boundary block header for the `getLedgerConfiguration` payload.                                   |
+| `maxEpochBlockHeadersPerBundle` | `5`       | Maximum epoch block headers to include in a bundle when the remote trust anchor is behind.                                                    |
+| `maxMessagesPerBundle`          | `10`      | Maximum messages to include in a single bundle.                                                                                               |
+| `maxBundleSize`                 | `1048576` | Maximum assembled bundle-proof size in bytes; a larger bundle is not emitted (guards against a gas/size blowup on the peer's `submitBundle`). |
 
 ### `localNetworks[].cometBft` sub-table
 
@@ -80,6 +81,7 @@ CometBFT proof parameters (`CometBftConfig`). Applies to `CometBFT` networks; co
 | `maxPriorValidatorSetUpdates` | `10`                     | Maximum prior validator-set updates (trust-anchor rotations) to include in a single bundle when advancing a lagging peer across validator-set changes. |
 | `maxRetries`                  | `3`                      | Max retry attempts for a CometBFT RPC call on transient failure, beyond the initial attempt.                                                           |
 | `requestTimeoutMs`            | `5000`                   | Per-request CometBFT RPC response timeout (ms).                                                                                                        |
+| `maxBundleSize`               | `1048576`                | Maximum assembled bundle-proof size in bytes; a larger bundle is not emitted (guards against a gas/size blowup on the peer's `submitBundle`).          |
 
 ### `localNetworks[].beacon` sub-table
 

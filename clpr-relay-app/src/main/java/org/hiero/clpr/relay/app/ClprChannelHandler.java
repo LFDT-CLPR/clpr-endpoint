@@ -187,7 +187,8 @@ public final class ClprChannelHandler {
                         qbft.maxMessagesPerBundle(),
                         rpcClient,
                         stateReader,
-                        peerManifestVersions);
+                        peerManifestVersions,
+                        qbft.maxBundleSize());
                 ledgerConfigProvider = new EvmQbftLedgerConfigurationProvider(
                         rpcClient, stateReader, clprServiceAddress, qbft.epochLength());
             }
@@ -202,7 +203,8 @@ public final class ClprChannelHandler {
                         cometBft.maxPriorValidatorSetUpdates(),
                         cometBftRpcClient,
                         stateReader,
-                        peerManifestVersions);
+                        peerManifestVersions,
+                        cometBft.maxBundleSize());
                 ledgerConfigProvider = new SeiLedgerConfigurationProvider(rpcClient, stateReader, cometBftRpcClient);
             }
             case EthereumPOS -> {

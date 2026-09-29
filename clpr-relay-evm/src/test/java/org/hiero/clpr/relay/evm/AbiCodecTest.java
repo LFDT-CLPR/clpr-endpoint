@@ -7,6 +7,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import java.math.BigInteger;
 import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
+import java.util.HexFormat;
 import org.junit.jupiter.api.Test;
 
 class AbiCodecTest {
@@ -380,5 +381,196 @@ class AbiCodecTest {
         assertThat(hex).isEqualTo("0x000fff42");
         assertThat(AbiCodec.fromHex(hex)).isEqualTo(input);
         assertThat(AbiCodec.fromHex("000fff42")).isEqualTo(input);
+    }
+
+    @Test
+    void fromHex_oddLength_throws() {
+        assertThatThrownBy(() -> AbiCodec.fromHex("0xabc"))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("odd length");
+    }
+
+    @Test
+    void fromHex_invalidCharacter_throws() {
+        assertThatThrownBy(() -> AbiCodec.fromHex("0xzz"))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("invalid hex character");
+    }
+
+    // ------------------------------------------------------------------
+    // channelId / head-param length guards
+    // ------------------------------------------------------------------
+
+    @Test
+    void encodeFunctionCall_rejectsNon32HeadParam() {
+        assertThatThrownBy(() -> AbiCodec.encodeFunctionCall("f(bytes32)", new byte[31]))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("head param must be 32 bytes");
+    }
+
+    @Test
+    void encodeSubmitBundle_encodesOffsetAndLength() {
+        final byte[] cid = new byte[32];
+        cid[31] = 0x07;
+        final byte[] proof = new byte[] {(byte) 0xaa, (byte) 0xbb};
+        final byte[] encoded = AbiCodec.encodeSubmitBundle(cid, proof);
+
+        // selector(4) + channelId(32) + offset(32) + length(32) + padded proof(32) = 132
+        assertThat(encoded).hasSize(132);
+        // offset word == 0x40 (64) in its last byte
+        assertThat(encoded[4 + 32 + 31]).isEqualTo((byte) 0x40);
+        // length word == 2
+        assertThat(encoded[4 + 64 + 31]).isEqualTo((byte) 0x02);
+    }
+
+    @Test
+    void encodeSubmitBundle_rejectsNon32ChannelId() {
+        assertThatThrownBy(() -> AbiCodec.encodeSubmitBundle(new byte[31], new byte[0]))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("channelId must be 32 bytes");
+    }
+
+    @Test
+    void encodeGetMessage_rejectsNon32ChannelId() {
+        assertThatThrownBy(() -> AbiCodec.encodeGetMessage(new byte[31], 1L))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("channelId must be 32 bytes");
+    }
+
+    @Test
+    void encodeGetChannel_rejectsNon32ChannelId() {
+        assertThatThrownBy(() -> AbiCodec.encodeGetChannel(new byte[31]))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("channelId must be 32 bytes");
+    }
+
+    @Test
+    void encodeGetPeerEndpointManifest_rejectsNon32ChannelId() {
+        assertThatThrownBy(() -> AbiCodec.encodeGetPeerEndpointManifest(new byte[31]))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("channelId must be 32 bytes");
+    }
+
+    @Test
+    void encodeGetMessage_prependsSelectorAndArgs() {
+        final byte[] encoded = AbiCodec.encodeGetMessage(new byte[32], 5L);
+        // selector(4) + channelId(32) + messageId(32)
+        assertThat(encoded).hasSize(68);
+        assertThat(encoded[67]).isEqualTo((byte) 5);
+    }
+
+    // ------------------------------------------------------------------
+    // encodeUint256
+    // ------------------------------------------------------------------
+
+    @Test
+    void encodeUint256_encodesRightAlignedValue() {
+        final byte[] out = AbiCodec.encodeUint256(BigInteger.valueOf(255));
+        assertThat(out).hasSize(32);
+        assertThat(out[31]).isEqualTo((byte) 0xff);
+        assertThat(out[30]).isEqualTo((byte) 0x00);
+    }
+
+    @Test
+    void encodeUint256_fullWidthValue_stripsSignByte() {
+        // 2^256 - 1: toByteArray() is 33 bytes (leading sign 0x00); encoder must drop it.
+        final BigInteger max = BigInteger.TWO.pow(256).subtract(BigInteger.ONE);
+        final byte[] out = AbiCodec.encodeUint256(max);
+        final byte[] expected = new byte[32];
+        java.util.Arrays.fill(expected, (byte) 0xff);
+        assertThat(out).isEqualTo(expected);
+    }
+
+    @Test
+    void encodeUint256_rejectsNegative() {
+        assertThatThrownBy(() -> AbiCodec.encodeUint256(BigInteger.valueOf(-1)))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("negative");
+    }
+
+    @Test
+    void encodeUint256_rejectsValueExceeding256Bits() {
+        assertThatThrownBy(() -> AbiCodec.encodeUint256(BigInteger.TWO.pow(256)))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("exceeds 256 bits");
+    }
+
+    // ------------------------------------------------------------------
+    // address helpers
+    // ------------------------------------------------------------------
+
+    @Test
+    void encodeAddress_leftPadsTo32Bytes() {
+        final byte[] out = AbiCodec.encodeAddress("0x" + "ab".repeat(20));
+        assertThat(out).hasSize(32);
+        assertThat(HexFormat.of().formatHex(out)).isEqualTo("0".repeat(24) + "ab".repeat(20));
+    }
+
+    @Test
+    void encodeAddress_rejectsNon20Byte() {
+        assertThatThrownBy(() -> AbiCodec.encodeAddress("0xabcd"))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("address must be 20 bytes");
+    }
+
+    @Test
+    void predictContractAddress_matchesKnownCreateVector() {
+        // Canonical Ethereum CREATE vector: keccak256(rlp([sender, nonce]))[12:].
+        final String predicted = AbiCodec.predictContractAddress("0x6ac7ea33f8831ea9dcc53393aaa88b25a785dbf0", 0);
+        assertThat(predicted).isEqualTo("0xcd234a471b72ba2f1ccf0a70fcaba648a5eecd8d");
+    }
+
+    @Test
+    void predictContractAddress_rejectsNegativeNonce() {
+        assertThatThrownBy(() -> AbiCodec.predictContractAddress("0x" + "ab".repeat(20), -1))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("nonce must be non-negative");
+    }
+
+    @Test
+    void predictContractAddress_rejectsNon20ByteSender() {
+        assertThatThrownBy(() -> AbiCodec.predictContractAddress("0xabcd", 0))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("sender must be 20 bytes");
+    }
+
+    // ------------------------------------------------------------------
+    // public RLP helpers
+    // ------------------------------------------------------------------
+
+    @Test
+    void rlpBigInt_zeroAndNull_encodeAsEmptyString() {
+        assertThat(AbiCodec.rlpBigInt(BigInteger.ZERO)).isEqualTo(new byte[] {(byte) 0x80});
+        assertThat(AbiCodec.rlpBigInt(null)).isEqualTo(new byte[] {(byte) 0x80});
+    }
+
+    @Test
+    void rlpBigInt_valueWithHighBit_stripsSignByte() {
+        // 0x80 has its high bit set, so BigInteger prepends a sign byte that must be stripped.
+        assertThat(AbiCodec.rlpBigInt(BigInteger.valueOf(0x80))).isEqualTo(new byte[] {(byte) 0x81, (byte) 0x80});
+    }
+
+    @Test
+    void rlpBytes_singleLowByte_isItsOwnEncoding() {
+        assertThat(AbiCodec.rlpBytes(new byte[] {0x7f})).isEqualTo(new byte[] {0x7f});
+    }
+
+    @Test
+    void rlpList_prependsListHeader() {
+        assertThat(AbiCodec.rlpList(new byte[] {0x01}, new byte[] {0x02}))
+                .isEqualTo(new byte[] {(byte) 0xc2, 0x01, 0x02});
+    }
+
+    @Test
+    void rlpLen_payloadOf56_usesLongLengthPrefix() {
+        // length >= 56 switches from the short form to a length-of-length prefix.
+        assertThat(AbiCodec.rlpLen(56, 0x80)).isEqualTo(new byte[] {(byte) 0xb8, 0x38});
+    }
+
+    @Test
+    void decodeString_roundTripsUtf8() {
+        final byte[] encoded = AbiCodec.concat(
+                AbiCodec.encodeUint(0x20), AbiCodec.encodeBytes("héllo".getBytes(StandardCharsets.UTF_8)));
+        assertThat(AbiCodec.decodeString(encoded, 0)).isEqualTo("héllo");
     }
 }
