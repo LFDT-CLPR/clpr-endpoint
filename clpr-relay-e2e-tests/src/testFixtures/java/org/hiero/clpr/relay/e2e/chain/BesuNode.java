@@ -6,6 +6,10 @@ import com.github.dockerjava.api.model.HostConfig;
 import com.github.dockerjava.api.model.Volume;
 import java.io.IOException;
 import java.io.UncheckedIOException;
+import java.net.URI;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -214,11 +218,63 @@ public final class BesuNode {
         spec.extraEnv().forEach(c::withEnv);
         c.start();
         this.container = c;
+        // The wait strategy only proves that besu inside the container has logged "JSON-RPC service
+        // started" — the RPC server is listening on the container-internal port. The test JVM dials
+        // the host-mapped port instead, and on DIND runners the daemon's port publishing can lag
+        // that signal by tens of seconds after a stop()+start() (docker-proxy / iptables settling
+        // against a freshly reassigned host port). Without this probe, the onStarted refresh below
+        // rebuilds clients against a URL that is not yet reachable, and the whole ~3 min window a
+        // caller has to observe recovery can elapse before the first successful host-side call.
+        awaitHostReachable(Duration.ofMinutes(2));
         // Fresh mapped port needs fresh host-facing clients. Fires on every start (initial and
         // restart); the initial firing during BesuNetwork bring-up is redundant with the client
         // construction the network does itself, but building a few small objects an extra time is
         // cheaper than requiring every future caller of stop()+start() to remember the refresh.
         onStarted.run();
+    }
+
+    /**
+     * Block until a JSON-RPC request from the test JVM to {@link #jsonRpcUrl()} succeeds, using a
+     * fresh {@link HttpClient} per attempt so the check exercises a real TCP handshake rather than
+     * a pooled connection to the previous mapped port. Throws if the port stays unreachable past
+     * {@code timeout} — that is a real defect worth surfacing, not something to swallow.
+     */
+    private void awaitHostReachable(final Duration timeout) {
+        final String url = jsonRpcUrl();
+        final String body = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"eth_chainId\",\"params\":[]}";
+        final long deadline = System.nanoTime() + timeout.toNanos();
+        IOException lastFailure = null;
+        while (System.nanoTime() < deadline) {
+            try (HttpClient client = HttpClient.newBuilder()
+                    .version(HttpClient.Version.HTTP_1_1)
+                    .connectTimeout(Duration.ofSeconds(2))
+                    .build()) {
+                final HttpRequest request = HttpRequest.newBuilder(URI.create(url))
+                        .header("Content-Type", "application/json")
+                        .timeout(Duration.ofSeconds(2))
+                        .POST(HttpRequest.BodyPublishers.ofString(body))
+                        .build();
+                final HttpResponse<Void> response = client.send(request, HttpResponse.BodyHandlers.discarding());
+                if (response.statusCode() == 200) {
+                    return;
+                }
+                lastFailure = new IOException("HTTP " + response.statusCode());
+            } catch (final IOException e) {
+                lastFailure = e;
+            } catch (final InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw new IllegalStateException("interrupted while waiting for " + url, e);
+            }
+            try {
+                Thread.sleep(200L);
+            } catch (final InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw new IllegalStateException("interrupted while waiting for " + url, e);
+            }
+        }
+        throw new IllegalStateException(
+                "besu node " + id + " never became reachable from the test JVM at " + url + " within " + timeout,
+                lastFailure);
     }
 
     private String[] commandArgs() {

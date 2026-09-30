@@ -192,7 +192,7 @@ class RpcConnectivityE2ETest {
         // do. No listener/sync gauge assertions here: eth_call stayed alive throughout, so those
         // gauges are expected to be zero the whole time. The submitter-counter growth above is
         // this test's oracle.
-        env.await().peerReceivedAll(channel.a(), run.messageIds(), Duration.ofMinutes(3));
+        env.await().peerReceivedAll(channel.a(), run.messageIds(), Duration.ofMinutes(5));
         env.await().queueDrained(channel.a(), Duration.ofMinutes(2));
         assertThat(channel.b().state().receivedMessageId())
                 .as("watermark on B advanced by exactly the pending count after the write RPC was restored")
@@ -210,7 +210,7 @@ class RpcConnectivityE2ETest {
             final E2EEnvironment env, final Channel channel, final int count, final String label) {
         final InjectionRun run = env.messages().enqueue(channel.a(), count, MessageShape.small());
         run.awaitAllConfirmed(Duration.ofMinutes(2));
-        env.await().peerReceivedAll(channel.a(), run.messageIds(), Duration.ofMinutes(3));
+        env.await().peerReceivedAll(channel.a(), run.messageIds(), Duration.ofMinutes(5));
         env.await().queueDrained(channel.a(), Duration.ofMinutes(2));
         assertThat(run.errorHistogram()).as("no send error for " + label).isEmpty();
         assertThat(run.confirmed()).as(label + " confirmed count").isEqualTo(count);
@@ -227,7 +227,7 @@ class RpcConnectivityE2ETest {
         final InjectionRun run = env.messages().enqueue(fixture.channel().a(), count, MessageShape.small());
         // messageIds() requires the receipts to have been read — awaitAllConfirmed does that.
         run.awaitAllConfirmed(Duration.ofMinutes(2));
-        env.await().peerReceivedAll(fixture.channel().a(), run.messageIds(), Duration.ofMinutes(3));
+        env.await().peerReceivedAll(fixture.channel().a(), run.messageIds(), Duration.ofMinutes(5));
         // A's queue only drains once the peer's ack returns; awaiting that here lets callers assert
         // queueDepth exactly instead of racing the ack.
         env.await().queueDrained(fixture.channel().a(), Duration.ofMinutes(2));
