@@ -129,7 +129,7 @@ class AccountTransactionSubmitterIntegrationTest {
         final long before = latestNonce();
 
         for (int i = 0; i < connectionCount; i++) {
-            submitter.submit(TARGET, connection(connId(i)), bundle((byte) (i & 0xff), 2L, 1L));
+            submitter.submit(TARGET, channel(connId(i)), bundle((byte) (i & 0xff), 2L, 1L));
         }
 
         // All 100 bundles must land as unique transactions — nonce advances by exactly 100.

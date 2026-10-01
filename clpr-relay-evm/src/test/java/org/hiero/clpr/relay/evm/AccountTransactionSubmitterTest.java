@@ -104,12 +104,12 @@ class AccountTransactionSubmitterTest {
         return ClprChannel.newBuilder().channelId(Bytes.wrap(b)).build();
     }
 
-    /** A unique 32-byte connection id from an integer index (supports up to 65536 connections). */
-    private static ClprConnection connectionWithIndex(final int index) {
+    /** A unique 32-byte channel id from an integer index (supports up to 65536 channels). */
+    private static ClprChannel channelWithIndex(final int index) {
         final byte[] b = new byte[32];
         b[0] = (byte) (index >> 8);
         b[1] = (byte) index;
-        return ClprConnection.newBuilder().connectionId(Bytes.wrap(b)).build();
+        return ClprChannel.newBuilder().channelId(Bytes.wrap(b)).build();
     }
 
     /**
@@ -605,7 +605,7 @@ class AccountTransactionSubmitterTest {
         sub.start();
         try {
             for (int c = 0; c < connectionCount; c++) {
-                final var conn = connectionWithIndex(c);
+                final var conn = channelWithIndex(c);
                 for (int b = 0; b < bundlesPerConnection; b++) {
                     sub.submit(CONTRACT, conn, bundleForIndex(c, b));
                 }
