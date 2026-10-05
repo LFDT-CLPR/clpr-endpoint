@@ -3,6 +3,8 @@ package org.hiero.clpr.relay.app;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+import com.hedera.hapi.node.state.clpr.BundleRequest;
+import com.hedera.hapi.node.state.clpr.BundleResponse;
 import com.hedera.hapi.node.state.clpr.ClprChannel;
 import com.hedera.hapi.node.state.clpr.ClprChannelStatus;
 import com.hedera.hapi.node.state.clpr.ClprEndpoint;
@@ -11,25 +13,20 @@ import com.hedera.hapi.node.state.clpr.ClprLedgerConfigurationResponse;
 import com.hedera.hapi.node.state.clpr.ClprSyncPayload;
 import com.hedera.hapi.node.state.clpr.QbftLedgerConfigurationPayload;
 import com.hedera.pbj.runtime.io.buffer.Bytes;
-import java.math.BigInteger;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
 import org.hiero.clpr.relay.core.CommitmentLevel;
 import org.hiero.clpr.relay.core.ContractStateReader;
-import org.hiero.clpr.relay.core.ParsedBundle;
-import org.hiero.clpr.relay.core.PeerEndpointCache;
+import org.hiero.clpr.relay.core.InboundBundleQueue;
 import org.hiero.clpr.relay.core.PeerEndpointTlsRegistry;
-import org.hiero.clpr.relay.core.PeerManifestVersionCache;
 import org.hiero.clpr.relay.core.StubBundleConstructor;
-import org.hiero.clpr.relay.core.TransactionSubmitter;
 import org.hiero.clpr.relay.core.metrics.SimpleMetrics;
-import org.hiero.clpr.relay.core.testfixtures.PassThroughCodec;
+import org.hiero.clpr.relay.core.testfixtures.MockClprChannelOps;
 import org.hiero.clpr.relay.grpc.client.ClprEndpointClient;
 import org.hiero.clpr.relay.grpc.server.ClprGrpcServer;
 import org.hiero.clpr.relay.grpc.server.ClprSyncHandler;
 import org.hiero.clpr.relay.grpc.server.GetLedgerConfigurationHandler;
-import org.hiero.clpr.relay.grpc.server.ThrottleEnforcer;
 import org.jspecify.annotations.NonNull;
 import org.junit.jupiter.api.Test;
 
@@ -59,40 +56,33 @@ class StubLoopbackTest {
         }
     }
 
-    /** Records each submitBundle call so tests can assert on what was submitted. */
-    static class TrackingSubmitter implements TransactionSubmitter {
-        final List<Bytes> submittedChannelIds = new ArrayList<>();
+    /** Records each offered inbound bundle so tests can assert what reached the channel's queue. */
+    static class TrackingSubmitter implements InboundBundleQueue {
+        final List<Bytes> offered = new ArrayList<>();
 
         @Override
-        public void submitBundle(@NonNull ClprChannel channel, @NonNull ParsedBundle bundle) {
-            submittedChannelIds.add(channel.channelId());
+        public void offer(@NonNull Bytes rawBundleBytes, ClprEndpoint peer) {
+            offered.add(rawBundleBytes);
         }
     }
 
     @Test
     void syncRoundTripWithStubProofs() throws Exception {
         final var channelId = Bytes.wrap(new byte[32]); // all zeros
-        final var proofConstructor = new StubBundleConstructor();
-
-        // Seed the proof constructor with channel state so it has a cached proof
-        proofConstructor.onStateChanged(BigInteger.ONE, channelId, ClprChannel.DEFAULT, List.of());
+        final var stateReader = new ActiveStateReader();
+        // The stub constructor builds its bundle ad hoc from the peer's request against local state.
+        final var proofConstructor = new StubBundleConstructor(stateReader, CommitmentLevel.FINALIZED);
 
         final var txSubmitter = new TrackingSubmitter();
 
-        final var peerCache = new PeerEndpointCache();
-        peerCache.replaceAll(List.of(ClprEndpoint.newBuilder()
-                .accountId(Bytes.wrap(new byte[] {0x01}))
-                .build()));
-
-        final var syncHandler = new ClprSyncHandler(
-                _ -> new PassThroughCodec(),
-                proofConstructor,
-                txSubmitter,
-                id -> new ThrottleEnforcer(Long.MAX_VALUE, Integer.MAX_VALUE, Integer.MAX_VALUE),
-                new ActiveStateReader(),
-                new PeerManifestVersionCache(),
-                new SimpleMetrics(),
-                "");
+        // The channel's collaborators are resolved through a ChannelLookup returning this ClprChannelOps;
+        // the inbound bundle's parse/throttle/submit lives behind inboundBundleQueue() (here, txSubmitter).
+        final var ops = new MockClprChannelOps()
+                .channelId(channelId)
+                .contractStateReader(stateReader)
+                .bundleConstructor(proofConstructor)
+                .inboundBundleQueue(txSubmitter);
+        final var syncHandler = new ClprSyncHandler(id -> Optional.of(ops), new SimpleMetrics(), "");
 
         final var ledgerConfigHandler = new GetLedgerConfigurationHandler(
                 _ -> _ -> ClprLedgerConfigurationResponse.newBuilder()
@@ -119,27 +109,38 @@ class StubLoopbackTest {
             assertThat(server.port()).isEqualTo(port);
             assertThat(server.isRunning()).isTrue();
 
-            // Build outbound payload with stub proof; sign per CLPR design formula
-            final Bytes outboundProof =
-                    proofConstructor.getLatestBundlePayload(channelId).orElseThrow();
-            assertThat(outboundProof.length()).isGreaterThan(0);
-
-            final var outbound = ClprSyncPayload.newBuilder()
+            // Phase 1: send our bundle_request; the endpoint answers with a stub bundle of its own.
+            final var phase1 = ClprSyncPayload.newBuilder()
                     .channelId(channelId)
-                    .bundlePayload(outboundProof)
+                    .bundleRequest(BundleRequest.newBuilder()
+                            .currentReceivedMessageId(0L)
+                            .build())
                     .build();
 
-            final var client = new ClprEndpointClient(1_048_576, null);
-            final var response = client.sync("localhost", port, outbound);
+            // Phase 2: deliver a crafted inbound bundle for the endpoint to submit to the local chain.
+            final Bytes inboundBundle = Bytes.wrap(new byte[] {1, 2, 3});
 
-            // Verify response fields
+            final var client = new ClprEndpointClient(1_048_576, null);
+            final var response = client.sync(
+                    "localhost",
+                    port,
+                    phase1,
+                    reply -> ClprSyncPayload.newBuilder()
+                            .channelId(channelId)
+                            .bundleResponse(BundleResponse.newBuilder()
+                                    .bundlePayload(inboundBundle)
+                                    .build())
+                            .build(),
+                    Bytes.EMPTY);
+
+            // Verify the endpoint's phase-1 reply carries its own bundle.
             assertThat(response).isNotNull();
             assertThat(response.channelId()).isEqualTo(channelId);
-            assertThat(response.bundlePayload().length()).isGreaterThan(0);
+            assertThat(response.bundleResponse().bundlePayload().length()).isGreaterThan(0);
 
-            // Verify the inbound bundle actually reached the submitter with the correct channelId
-            assertThat(txSubmitter.submittedChannelIds).hasSize(1);
-            assertThat(txSubmitter.submittedChannelIds.get(0)).isEqualTo(channelId);
+            // Verify the phase-2 inbound bundle actually reached the channel's inbound queue verbatim.
+            assertThat(txSubmitter.offered).hasSize(1);
+            assertThat(txSubmitter.offered.get(0)).isEqualTo(inboundBundle);
         } finally {
             server.stop();
         }

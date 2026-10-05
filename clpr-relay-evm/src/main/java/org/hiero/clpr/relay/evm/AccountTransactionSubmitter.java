@@ -4,6 +4,7 @@ package org.hiero.clpr.relay.evm;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.hedera.hapi.node.state.clpr.ClprChannel;
 import com.hedera.hapi.node.state.clpr.ClprChannelStatus;
+import com.hedera.hapi.node.state.clpr.ClprEndpoint;
 import com.hedera.pbj.runtime.io.buffer.Bytes;
 import com.swirlds.logging.api.Logger;
 import com.swirlds.logging.api.Loggers;
@@ -26,7 +27,6 @@ import java.util.concurrent.locks.ReentrantLock;
 import org.hiero.clpr.relay.core.BundleLog;
 import org.hiero.clpr.relay.core.EvmSubmissionConfig;
 import org.hiero.clpr.relay.core.ParsedBundle;
-import org.hiero.clpr.relay.core.TransactionSubmitter;
 import org.hiero.clpr.relay.core.metrics.LabeledCounter;
 import org.hiero.clpr.relay.core.metrics.MetricLabels;
 import org.hiero.clpr.relay.evm.jsonrpc.EvmJsonRpcClient;
@@ -151,12 +151,24 @@ public final class AccountTransactionSubmitter {
      *
      * @param contractAddress    hex address of the {@code ClprService} contract to submit against
      * @param channelId       the 32-byte channel id
-     * @param proofBytes         the raw proof bytes submitted verbatim to {@code submitBundle}
+     * @param bundleBytes         the raw bundle bytes submitted verbatim to {@code submitBundle}
      * @param messageCount       number of application messages in the bundle (for volume metrics)
      * @param channelIdLabel  the lower-case hex channel id used as the {@code channel_id} metric label
+     * @param peer               the peer the bundle came from, used to label the submission-outcome
+     *                           metrics ({@code null} when the peer is unknown)
      */
     record SubmitRequest(
-            String contractAddress, Bytes channelId, Bytes proofBytes, int messageCount, String channelIdLabel) {}
+            String contractAddress,
+            Bytes channelId,
+            Bytes bundleBytes,
+            int messageCount,
+            String channelIdLabel,
+            @Nullable ClprEndpoint peer) {}
+
+    /** Metric label for the peer a bundle came from — its roster account id, or {@code anonymous}. */
+    private static String peerLabel(@Nullable final ClprEndpoint peer) {
+        return peer != null ? peer.accountId().toHex() : "anonymous";
+    }
 
     private final EvmJsonRpcClient rpcClient;
     private final EthSigner signer;
@@ -170,7 +182,7 @@ public final class AccountTransactionSubmitter {
     // Per-channel FIFO queues drained round-robin by the single worker so no channel starves
     // another. {@code byChannel} maps channel-id label -> its pending requests; {@code
     // readyOrder} is the round-robin rotation of channel labels that currently have work (each
-    // present at most once); {@code queuedProofKeys} mirrors each channel's queued bundle bytes so
+    // present at most once); {@code queuedBundleKeys} mirrors each channel's queued bundle bytes so
     // exact-duplicate re-offers are detected in O(1) without scanning the FIFO (kept in lockstep with
     // {@code byChannel} on every enqueue/dequeue). All four are guarded by {@code lock}; {@code
     // notEmpty} wakes the worker when work arrives.
@@ -178,7 +190,7 @@ public final class AccountTransactionSubmitter {
     private final Condition notEmpty = lock.newCondition();
     private final Map<String, ArrayDeque<SubmitRequest>> byChannel = new HashMap<>();
     private final ArrayDeque<String> readyOrder = new ArrayDeque<>();
-    private final Map<String, Set<Bytes>> queuedProofKeys = new HashMap<>();
+    private final Map<String, Set<Bytes>> queuedBundleKeys = new HashMap<>();
 
     private volatile boolean running;
 
@@ -320,26 +332,23 @@ public final class AccountTransactionSubmitter {
     }
 
     /**
-     * Enqueue a bundle for submission against {@code contractAddress} onto its channel's FIFO. An
-     * <b>empty ACTIVE initial-state</b> bundle ({@code next ≤ 1 && acked == 0} with status
-     * {@code ACTIVE}) is dropped up front (it would revert {@code EmptyBundle}); a status-only close
-     * at those counters is <em>not</em> empty and is submitted. Every other stale/duplicate bundle is
-     * left for the send-time preview to reject. If the channel's queue is full the request is
-     * dropped ({@code evm.tx.queue_dropped}) — and only that channel is affected.
+     * Enqueue a bundle for submission to {@code contractAddress} on behalf of {@code channelId},
+     * attributing its submission-outcome metrics to {@code peer}. The bundle joins the signing account's
+     * serial FIFO queue; the worker previews it with a gas-free {@code eth_call} and skips (unpaid)
+     * anything the contract would revert, so the enqueue never blocks on-chain.
      *
-     * @param contractAddress the {@code ClprService} contract address to submit against
-     * @param channel      the CLPR channel the bundle belongs to (read only for its id)
-     * @param bundle          the verified bundle to submit
+     * @param contractAddress the {@code ClprService} contract address (hex) to submit against
+     * @param channelId       the 32-byte CLPR channel identifier
+     * @param bundle          the parsed bundle to submit
+     * @param peer the peer the bundle came from, used to label the {@code sync.bundle.submissions} /
+     *             {@code sync.bundle.reverted} counters ({@code null} → {@code anonymous})
      */
-    public void submit(final String contractAddress, final ClprChannel channel, final ParsedBundle bundle) {
-        final byte[] channelId = channel.channelId().toByteArray();
-        final String connIdLabel = HexFormat.of().formatHex(channelId);
-        if (channelId.length != 32) {
-            txFailures.increment("channel_id", connIdLabel, "reason", "validation");
-            LOGGER.warn("submitBundle: channelId must be 32 bytes, got {}", channelId.length);
-            return;
-        }
-
+    public void submit(
+            final String contractAddress,
+            final Bytes channelId,
+            final ParsedBundle bundle,
+            @Nullable final ClprEndpoint peer) {
+        final String connIdLabel = HexFormat.of().formatHex(channelId.toByteArray());
         final long next = bundle.metadata().nextMessageId();
         final long acked = bundle.metadata().receivedMessageId();
 
@@ -351,7 +360,7 @@ public final class AccountTransactionSubmitter {
         // bytes are already queued is suppressed at enqueue (below); any other stale one is left for
         // the send-time preview to reject (replay / running-hash).
         if (next <= 1 && acked == 0 && bundle.metadata().status() == ClprChannelStatus.ACTIVE) {
-            bundleSkipped.increment("channel_id", connIdLabel, "reason", "empty");
+            bundleSkipped.increment("channel_id", connIdLabel, "peer", peerLabel(peer), "reason", "empty");
             LOGGER.debug(
                     "submitBundle: skipping empty initial-state bundle for {} (next={} acked={})",
                     connIdLabel,
@@ -362,15 +371,16 @@ public final class AccountTransactionSubmitter {
 
         final SubmitRequest request = new SubmitRequest(
                 contractAddress,
-                channel.channelId(),
-                bundle.rawProofBytes(),
+                channelId,
+                bundle.rawBundleBytes(),
                 bundle.messages().size(),
-                connIdLabel);
+                connIdLabel,
+                peer);
         lock.lock();
         try {
             final ArrayDeque<SubmitRequest> connQueue = byChannel.computeIfAbsent(connIdLabel, k -> new ArrayDeque<>());
-            final Set<Bytes> queuedKeys = queuedProofKeys.computeIfAbsent(connIdLabel, k -> new HashSet<>());
-            final Bytes proofKey = request.proofBytes();
+            final Set<Bytes> queuedKeys = queuedBundleKeys.computeIfAbsent(connIdLabel, k -> new HashSet<>());
+            final Bytes bundleKey = request.bundleBytes();
             // Suppress exact-duplicate bundles already pending for this channel. The pull
             // (ChannelSyncTask) and push (ClprSyncHandler) sync paths both re-offer the same bundle
             // repeatedly while it is undelivered; without this the FIFO fills with identical copies and
@@ -378,12 +388,12 @@ public final class AccountTransactionSubmitter {
             // O(1) (no FIFO scan; {@link Bytes} hashes/compares by content). Content-exact (not
             // counter-keyed) so it can never suppress a distinct PAUSE-recovery bundle, and it keeps
             // the existing entry rather than letting a re-offer displace it.
-            if (queuedKeys.contains(proofKey)) {
+            if (queuedKeys.contains(bundleKey)) {
                 txQueueDeduped.increment("channel_id", connIdLabel);
                 LOGGER.trace(
                         "submitBundle: identical bundle already queued for {}; skipping re-enqueue {}",
                         connIdLabel,
-                        BundleLog.tag(bundle.rawProofBytes()));
+                        BundleLog.tag(bundle.rawBundleBytes()));
                 return;
             }
             if (connQueue.size() >= perChannelQueueCapacity) {
@@ -393,12 +403,12 @@ public final class AccountTransactionSubmitter {
                         perChannelQueueCapacity,
                         fromAddress,
                         connIdLabel,
-                        BundleLog.tag(bundle.rawProofBytes()));
+                        BundleLog.tag(bundle.rawBundleBytes()));
                 return;
             }
             final boolean wasEmpty = connQueue.isEmpty();
             connQueue.addLast(request);
-            queuedKeys.add(proofKey);
+            queuedKeys.add(bundleKey);
             if (wasEmpty) {
                 // First pending request for this channel: join the round-robin rotation.
                 readyOrder.addLast(connIdLabel);
@@ -407,18 +417,6 @@ public final class AccountTransactionSubmitter {
         } finally {
             lock.unlock();
         }
-    }
-
-    /**
-     * Adapt this account submitter to the per-channel {@link TransactionSubmitter} the sync path
-     * consumes: each {@code submitBundle} call enqueues against {@code contractAddress} and returns
-     * immediately.
-     *
-     * @param contractAddress the {@code ClprService} contract address this channel submits to
-     * @return a {@link TransactionSubmitter} view that enqueues onto this account's queue
-     */
-    public TransactionSubmitter forContract(final String contractAddress) {
-        return (channel, bundle) -> submit(contractAddress, channel, bundle);
     }
 
     private void runLoop() {
@@ -456,15 +454,15 @@ public final class AccountTransactionSubmitter {
             final SubmitRequest request = connQueue.pollFirst();
             // Keep the dedup index in lockstep: the dequeued bundle is no longer pending, so its key
             // must leave the set (its content may legitimately be re-offered and re-enqueued later).
-            final Set<Bytes> queuedKeys = queuedProofKeys.get(connIdLabel);
+            final Set<Bytes> queuedKeys = queuedBundleKeys.get(connIdLabel);
             if (queuedKeys != null) {
-                queuedKeys.remove(request.proofBytes());
+                queuedKeys.remove(request.bundleBytes());
             }
             if (connQueue.isEmpty()) {
                 // Drop the now-empty deque (and its key set) so the maps don't grow unbounded with
                 // discovery-driven channel churn; submit() re-creates them via computeIfAbsent.
                 byChannel.remove(connIdLabel);
-                queuedProofKeys.remove(connIdLabel);
+                queuedBundleKeys.remove(connIdLabel);
             } else {
                 // Still has work: rotate to the back so every other channel is served first.
                 readyOrder.addLast(connIdLabel);
@@ -510,14 +508,15 @@ public final class AccountTransactionSubmitter {
      */
     void process(final SubmitRequest request) {
         final String connIdLabel = request.channelIdLabel();
+        final String peerLabel = peerLabel(request.peer());
         final String contractAddress = request.contractAddress();
-        final Bytes proof = request.proofBytes();
+        final Bytes bundle = request.bundleBytes();
 
         // 1. ABI-encode the call. An encoding failure is definite — skip.
         final byte[] callData;
         try {
             callData = AbiCodec.encodeSubmitBundle(
-                    request.channelId().toByteArray(), request.proofBytes().toByteArray());
+                    request.channelId().toByteArray(), request.bundleBytes().toByteArray());
         } catch (final RuntimeException e) {
             txFailures.increment("channel_id", connIdLabel, "reason", "encode");
             LOGGER.warn("submitBundle: cannot encode call data for {}: {}", connIdLabel, e.getMessage());
@@ -527,7 +526,7 @@ public final class AccountTransactionSubmitter {
 
         // 2. Gas-free preview. A contract revert is a definite rejection (stale, replay, wrong
         //    status, throttled) — skip without spending gas. Transient RPC errors are retried.
-        if (!previewPasses(contractAddress, callDataHex, connIdLabel, proof)) {
+        if (!previewPasses(contractAddress, callDataHex, connIdLabel, peerLabel, bundle)) {
             return;
         }
 
@@ -663,16 +662,16 @@ public final class AccountTransactionSubmitter {
                 affordableTxHash = txHash;
             }
 
-            final Outcome outcome = pollForReceipt(sentHashes, contractAddress, callDataHex, proof);
+            final Outcome outcome = pollForReceipt(sentHashes, contractAddress, callDataHex, bundle);
             if (outcome == Outcome.SUCCESS) {
-                bundleSubmissions.increment("channel_id", connIdLabel);
+                bundleSubmissions.increment("channel_id", connIdLabel, "peer", peerLabel);
                 bundleMessagesSubmitted.add(request.messageCount(), "channel_id", connIdLabel);
-                bundleBytesSubmitted.add(request.proofBytes().length(), "channel_id", connIdLabel);
+                bundleBytesSubmitted.add(request.bundleBytes().length(), "channel_id", connIdLabel);
                 txSubmissions.increment("channel_id", connIdLabel);
                 return;
             }
             if (outcome == Outcome.REVERTED) {
-                bundleReverted.increment("channel_id", connIdLabel);
+                bundleReverted.increment("channel_id", connIdLabel, "peer", peerLabel);
                 txReverts.increment("channel_id", connIdLabel);
                 return;
             }
@@ -755,7 +754,11 @@ public final class AccountTransactionSubmitter {
      * revert it records the skip metric and returns {@code false}; transient RPC errors are retried.
      */
     private boolean previewPasses(
-            final String contractAddress, final String callDataHex, final String connIdLabel, final Bytes proof) {
+            final String contractAddress,
+            final String callDataHex,
+            final String connIdLabel,
+            final String peerLabel,
+            final Bytes bundle) {
         while (!Thread.currentThread().isInterrupted()) {
             try {
                 rpcClient.ethCallFrom(fromAddress, contractAddress, callDataHex, "pending");
@@ -768,11 +771,11 @@ public final class AccountTransactionSubmitter {
                     continue;
                 }
                 EvmErrorParser.parse(e)
-                        .log(LOGGER, "bundle PREVIEW reverted (skipping submission)", BundleLog.tag(proof));
-                bundleSkipped.increment("channel_id", connIdLabel, "reason", "rejected");
+                        .log(LOGGER, "bundle PREVIEW reverted (skipping submission)", BundleLog.tag(bundle));
+                bundleSkipped.increment("channel_id", connIdLabel, "peer", peerLabel, "reason", "rejected");
                 return false;
             } catch (final RuntimeException e) {
-                LOGGER.error("bundle PREVIEW failed unexpectedly for {} {}", e, connIdLabel, BundleLog.tag(proof));
+                LOGGER.error("bundle PREVIEW failed unexpectedly for {} {}", e, connIdLabel, BundleLog.tag(bundle));
                 if (!sleepQuietly(EvmSubmissionConfig.SUBMIT_RETRY_SLEEP_MS)) {
                     return false;
                 }
@@ -863,7 +866,7 @@ public final class AccountTransactionSubmitter {
      * the hash, so several versions may momentarily coexist; the node keeps only the highest-fee one).
      */
     private Outcome pollForReceipt(
-            final List<String> sentHashes, final String contractAddress, final String callDataHex, final Bytes proof) {
+            final List<String> sentHashes, final String contractAddress, final String callDataHex, final Bytes bundle) {
         for (int i = 0; i < EvmSubmissionConfig.RECEIPT_POLL_ATTEMPTS; i++) {
             for (final String hash : sentHashes) {
                 final JsonNode receipt;
@@ -891,7 +894,7 @@ public final class AccountTransactionSubmitter {
                             .log(
                                     LOGGER,
                                     "submitBundle tx %s REVERTED (status=%s)".formatted(hash, statusStr),
-                                    BundleLog.tag(proof));
+                                    BundleLog.tag(bundle));
                     return Outcome.REVERTED;
                 }
             }

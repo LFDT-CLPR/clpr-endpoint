@@ -14,7 +14,7 @@ import java.util.List;
  *
  * @param metadata the queue metadata associated with this bundle
  * @param messages the ordered list of message payloads in this bundle
- * @param rawProofBytes the proof bytes submitted verbatim to the on-chain {@code submitBundle} call so
+ * @param rawBundleBytes the proof bytes submitted verbatim to the on-chain {@code submitBundle} call so
  *                      the verifier contract receives the wire format its chain produced
  */
-public record ParsedBundle(ClprQueueMetadata metadata, List<ClprMessagePayload> messages, Bytes rawProofBytes) {}
+public record ParsedBundle(ClprQueueMetadata metadata, List<ClprMessagePayload> messages, Bytes rawBundleBytes) {}

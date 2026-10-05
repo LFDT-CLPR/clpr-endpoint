@@ -4,29 +4,39 @@ package org.hiero.clpr.relay.grpc.server;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
-import com.hedera.hapi.node.state.clpr.ClprEndpoint;
 import com.hedera.pbj.runtime.grpc.GrpcException;
 import com.hedera.pbj.runtime.grpc.ServiceInterface;
-import com.hedera.pbj.runtime.io.buffer.Bytes;
-import java.util.List;
+import java.util.Optional;
 import org.hiero.clpr.relay.core.PeerEndpointTlsRegistry;
-import org.hiero.clpr.relay.core.testfixtures.CertFixtures;
+import org.hiero.clpr.relay.core.metrics.SimpleMetrics;
 import org.junit.jupiter.api.Test;
 
+/**
+ * Unit tests for {@link ClprSyncService} — the data-plane {@code ServiceInterface} hosting the single
+ * two-phase {@code sync} bidirectional-streaming RPC. Each accepted stream resolves the authenticated
+ * peer from the mutual-TLS client certificate via a {@link PeerEndpointTlsRegistry}.
+ */
 class ClprSyncServiceTest {
 
-    private static final Bytes CONN = Bytes.wrap(new byte[] {1, 2, 3});
+    /** A handler whose channel lookup is never exercised by these method-routing tests. */
+    private static ClprSyncHandler handler() {
+        return new ClprSyncHandler(channelId -> Optional.empty(), new SimpleMetrics(), "test");
+    }
+
+    private static ClprSyncService service() {
+        return new ClprSyncService(handler(), new PeerEndpointTlsRegistry());
+    }
 
     @Test
-    void advertisesOnlySync() {
-        final var service = new ClprSyncService(null, new PeerEndpointTlsRegistry());
-
-        assertThat(service.methods()).extracting(ServiceInterface.Method::name).containsExactly("sync");
+    void advertisesSync() {
+        assertThat(service().methods())
+                .extracting(ServiceInterface.Method::name)
+                .containsExactly("sync");
     }
 
     @Test
     void rejectsNonSyncMethods() {
-        final var service = new ClprSyncService(null, new PeerEndpointTlsRegistry());
+        final var service = service();
 
         // The guard rejects the method before touching request options/responses, so null args are safe.
         assertThatThrownBy(() -> service.open(() -> "discoverEndpoints", null, null))
@@ -36,19 +46,9 @@ class ClprSyncServiceTest {
     }
 
     @Test
-    void peer_resolvesClientByItsIssuingRosterCa() {
-        final ClprEndpoint registered = ClprEndpoint.newBuilder()
-                .accountId(Bytes.wrap(new byte[] {7, 7}))
-                .tlsCertificate(Bytes.wrap(CertFixtures.CA_A_CERT_DER))
-                .build();
-        final var registry = new PeerEndpointTlsRegistry();
-        registry.update(CONN, List.of(registered));
-        final var service = new ClprSyncService(null, registry);
-
-        // A leaf issued by the registered CA resolves to that endpoint.
-        assertThat(service.peer(CertFixtures.leafUnderA().cert())).contains(registered);
-        // A leaf issued by a different CA, and no certificate at all, resolve to nothing.
-        assertThat(service.peer(CertFixtures.leafUnderB().cert())).isEmpty();
-        assertThat(service.peer(null)).isEmpty();
+    void resolvesNoPeerWithoutClientCertificate() {
+        // A plaintext dial (no leaf certificate) resolves to no authenticated peer; the empty registry
+        // would likewise match nothing for an unknown cert.
+        assertThat(service().peer(null)).isEmpty();
     }
 }

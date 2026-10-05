@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-package org.hiero.clpr.relay.evm;
+package org.hiero.clpr.relay.evm.qbft;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.hiero.clpr.relay.evm.ByteUtils.ZERO_HASH;
@@ -7,10 +7,10 @@ import static org.hiero.clpr.relay.evm.ByteUtils.ZERO_HASH;
 import com.hedera.pbj.runtime.io.buffer.Bytes;
 import java.math.BigInteger;
 import java.util.List;
-import org.hiero.clpr.relay.evm.QbftBundleConstructor.QbftBundlePayload;
-import org.hiero.clpr.relay.evm.QbftBundleConstructor.QbftStorageProofEntry;
 import org.hiero.clpr.relay.evm.model.Address;
 import org.hiero.clpr.relay.evm.model.BlockHeader;
+import org.hiero.clpr.relay.evm.qbft.QbftBundleConstructor.QbftBundlePayload;
+import org.hiero.clpr.relay.evm.qbft.QbftBundleConstructor.QbftStorageProofEntry;
 import org.junit.jupiter.api.Test;
 
 /**

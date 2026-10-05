@@ -72,6 +72,10 @@ public class PeerEndpointCache {
         return !entries.isEmpty();
     }
 
+    public boolean hasPeerEndpoint(ClprEndpoint peer) {
+        return entries.values().stream().anyMatch(entry -> entry.endpoint().equals(peer));
+    }
+
     /**
      * Returns the number of peers currently held.
      *

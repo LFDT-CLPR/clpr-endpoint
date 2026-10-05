@@ -130,16 +130,7 @@ class LocalNetworkAdapterTest {
         final var signer = new EthSigner(KEY_A);
         final var shared = network.accountSubmitterFor(signer);
 
-        // Two distinct ClprService contracts on this network, both signing from the same account.
-        // The nonce belongs to the EOA, not the contract, so both MUST share one submitter; the
-        // contract is layered on as a view. Keying the cache on (address, serviceAddress) would
-        // split these into two racing workers.
-        final var viewA = shared.forContract("0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
-        final var viewB = shared.forContract("0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
-
         assertThat(network.accountSubmitterFor(new EthSigner(KEY_A))).isSameAs(shared);
-        // The per-contract views are distinct objects, but both enqueue onto the one shared submitter.
-        assertThat(viewA).isNotSameAs(viewB);
     }
 
     @Test

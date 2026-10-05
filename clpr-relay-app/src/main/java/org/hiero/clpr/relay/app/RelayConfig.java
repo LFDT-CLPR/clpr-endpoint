@@ -255,9 +255,8 @@ public record RelayConfig(
             int maxMessageSize) {}
 
     /**
-     * The <b>info</b> listener: always plaintext, always served. Hosts the public metadata RPCs
-     * {@code discoverEndpoints} and {@code getLedgerConfiguration}, which return chain-verifiable data, so
-     * they are never put behind TLS.
+     * The <b>info</b> listener: always plaintext, always served. Hosts the public metadata RPC
+     * {@code getLedgerConfiguration}, which returns chain-verifiable data, so it is never put behind TLS.
      *
      * <p>System property: {@code relay.grpc.info.port}
      *

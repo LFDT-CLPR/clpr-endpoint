@@ -13,8 +13,10 @@ import static org.hiero.clpr.relay.evm.storage.ClprServiceStorageLayout.buildEvm
 import static org.hiero.clpr.relay.evm.storage.ClprServiceStorageLayout.calculateChannelFieldStorageSlot;
 import static org.hiero.clpr.relay.evm.storage.ClprServiceStorageLayout.calculateMsgRunningHashStorageSlot;
 
+import com.hedera.hapi.node.state.clpr.BundleRequest;
 import com.hedera.hapi.node.state.clpr.ClprBundleContent;
 import com.hedera.hapi.node.state.clpr.ClprChannel;
+import com.hedera.hapi.node.state.clpr.ClprChannelStatus;
 import com.hedera.hapi.node.state.clpr.ClprEndpointManifest;
 import com.hedera.hapi.node.state.clpr.ClprMessagePayload;
 import com.hedera.hapi.node.state.clpr.ClprMessageValue;
@@ -34,12 +36,13 @@ import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
-import java.util.concurrent.ConcurrentHashMap;
 import org.hiero.clpr.relay.core.BundleConstructor;
+import org.hiero.clpr.relay.core.BundleWithConstructionMetadata;
+import org.hiero.clpr.relay.core.CommitmentLevel;
 import org.hiero.clpr.relay.core.ContractStateReader;
 import org.hiero.clpr.relay.core.ManifestProofPolicy;
-import org.hiero.clpr.relay.core.PeerManifestVersionCache;
 import org.hiero.clpr.relay.evm.ByteUtils;
+import org.hiero.clpr.relay.evm.jsonrpc.EvmJsonRpcClient;
 import org.hiero.clpr.relay.evm.model.Address;
 import org.jspecify.annotations.Nullable;
 
@@ -53,9 +56,9 @@ import org.jspecify.annotations.Nullable;
  * storage slot is proven via an ABCI query returning an ICS-23 IAVL proof, and the whole
  * proof package is anchored to a CometBFT signed header.
  *
- * <p>Trust-anchor rotation is handled by including a {@code next_validator_set} in the bundle
- * when the signed header's {@code next_validators_hash} differs from its {@code validators_hash},
- * indicating the validator set will change at the next block.
+ * <p>In the two-phase sync protocol the bundle is built ad hoc from the peer's {@link BundleRequest}:
+ * validator-set rotation catch-up is driven by {@code currentTrustAnchorId} and the local
+ * endpoint-manifest proof is gated on {@code currentEndpointManifestVersion}.
  */
 public final class SeiBundleConstructor implements BundleConstructor {
 
@@ -67,51 +70,48 @@ public final class SeiBundleConstructor implements BundleConstructor {
 
     private static final int ENCODED_TRUST_ANCHOR_ID_LENGTH = VALIDATORS_HASH_LENGTH + Long.BYTES;
 
+    /**
+     * Ceiling on how many blocks below the proof height {@link #scanForValidatorSetUpdates} will walk
+     * looking for validator-set rotations. The scan start is the peer's requested trust-anchor height,
+     * which is <em>untrusted</em> off-the-wire input: without this floor a peer claiming an anchor near
+     * genesis would make us issue one {@code getSignedHeader} RPC per block up to the current head — on
+     * the sync thread, holding the session open. An anchor further behind than this is treated as
+     * unrecoverable in a single bundle; the resulting bundle simply fails the peer's on-chain
+     * verification and is skipped, and the peer must re-bootstrap its anchor out of band.
+     */
+    private static final long MAX_ROTATION_SCAN_WINDOW = 10_000L;
+
     /** Default assembled bundle-proof size ceiling (bytes) when none is configured; matches gRPC 1 MiB. */
     public static final long DEFAULT_MAX_BUNDLE_SIZE = 1_048_576L;
 
-    /** Cache of the latest bundle proof per channel ID. */
-    private final ConcurrentHashMap<Bytes, Bytes> bundleProofCache = new ConcurrentHashMap<>();
-
     private final Address clprServiceAddress;
     private final CometBftRpcClient cometBftRpcClient;
+    private final EvmJsonRpcClient evmRpcClient;
+    private final ContractStateReader stateReader;
+    private final CommitmentLevel commitmentLevel;
+    private final int proofLagBlocks;
     private final int maxMessagesPerBundle;
     private final int maxPriorValidatorSetUpdates;
     private final long maxBundleSize;
-
-    /** Reader for the local endpoint manifest; {@code null} disables manifest proofs. */
-    @Nullable
-    private final ContractStateReader stateReader;
-
-    /**
-     * Per-channel record of the manifest version each peer has cached of our manifest; {@code null}
-     * means "unknown for every channel" (treated as version 0).
-     */
-    @Nullable
-    private final PeerManifestVersionCache peerManifestVersions;
-
-    public SeiBundleConstructor(
-            final Address clprServiceAddress,
-            final int maxMessagesPerBundle,
-            final int maxPriorValidatorSetUpdates,
-            final CometBftRpcClient cometBftRpcClient) {
-        this(clprServiceAddress, maxMessagesPerBundle, maxPriorValidatorSetUpdates, cometBftRpcClient, null, null);
-    }
 
     public SeiBundleConstructor(
             final Address clprServiceAddress,
             final int maxMessagesPerBundle,
             final int maxPriorValidatorSetUpdates,
             final CometBftRpcClient cometBftRpcClient,
-            @Nullable final ContractStateReader stateReader,
-            @Nullable final PeerManifestVersionCache peerManifestVersions) {
+            final EvmJsonRpcClient evmRpcClient,
+            final ContractStateReader stateReader,
+            final CommitmentLevel commitmentLevel,
+            final int proofLagBlocks) {
         this(
                 clprServiceAddress,
                 maxMessagesPerBundle,
                 maxPriorValidatorSetUpdates,
                 cometBftRpcClient,
+                evmRpcClient,
                 stateReader,
-                peerManifestVersions,
+                commitmentLevel,
+                proofLagBlocks,
                 DEFAULT_MAX_BUNDLE_SIZE);
     }
 
@@ -120,13 +120,17 @@ public final class SeiBundleConstructor implements BundleConstructor {
             final int maxMessagesPerBundle,
             final int maxPriorValidatorSetUpdates,
             final CometBftRpcClient cometBftRpcClient,
-            @Nullable final ContractStateReader stateReader,
-            @Nullable final PeerManifestVersionCache peerManifestVersions,
+            final EvmJsonRpcClient evmRpcClient,
+            final ContractStateReader stateReader,
+            final CommitmentLevel commitmentLevel,
+            final int proofLagBlocks,
             final long maxBundleSize) {
         this.clprServiceAddress = clprServiceAddress;
         this.cometBftRpcClient = cometBftRpcClient;
+        this.evmRpcClient = evmRpcClient;
         this.stateReader = stateReader;
-        this.peerManifestVersions = peerManifestVersions;
+        this.commitmentLevel = commitmentLevel;
+        this.proofLagBlocks = proofLagBlocks;
 
         if (maxMessagesPerBundle < 1) {
             throw new IllegalArgumentException("maxMessagesPerBundle must be at least 1");
@@ -145,8 +149,47 @@ public final class SeiBundleConstructor implements BundleConstructor {
     }
 
     @Override
-    public Optional<Bytes> getLatestBundlePayload(final Bytes channelId) {
-        return Optional.ofNullable(bundleProofCache.get(channelId));
+    public BundleWithConstructionMetadata createBundle(final Bytes channelId, final BundleRequest request) {
+        // CometBFT proofs at state height H are anchored to header H+1/H+2, so read the EVM head at the
+        // configured commitment level and back off proofLagBlocks so those headers are committed.
+        final long head = evmRpcClient
+                .ethGetBlockHeaderByNumber(commitmentLevel.toBlockTag())
+                .number()
+                .longValueExact();
+        final long blockNum = head - proofLagBlocks;
+        if (blockNum < 0) {
+            return new BundleWithConstructionMetadata(Bytes.EMPTY, blockNum);
+        }
+
+        if (ClprChannelStatus.CLOSED.equals(request.currentStatus())) {
+            // Nothing to do if the remote side is closed
+            return new BundleWithConstructionMetadata(Bytes.EMPTY, blockNum);
+        }
+
+        final String blockTag = toBlockTag(blockNum);
+        final var maybeChannel = stateReader.readChannelState(channelId, blockTag);
+        if (maybeChannel.isEmpty()) {
+            return new BundleWithConstructionMetadata(Bytes.EMPTY, blockNum);
+        }
+        final ClprChannel channel = maybeChannel.get();
+        if (ClprChannelStatus.PENDING.equals(channel.status())) {
+            return new BundleWithConstructionMetadata(Bytes.EMPTY, blockNum);
+        }
+        // Sender-side trim: serve messages from the id the peer asked for, up to what we have sent.
+        final long fromId = Math.max(1L, request.currentReceivedMessageId() + 1);
+        final List<ContractStateReader.QueuedMessage> pending = fromId >= channel.nextMessageId()
+                ? List.of()
+                : stateReader.readQueuedMessages(channelId, fromId, channel.nextMessageId(), blockTag);
+
+        final Bytes payload = buildBundlePayload(
+                        BigInteger.valueOf(blockNum),
+                        channelId,
+                        channel,
+                        pending,
+                        request.currentTrustAnchorId(),
+                        request.currentEndpointManifestVersion())
+                .orElse(Bytes.EMPTY);
+        return new BundleWithConstructionMetadata(payload, blockNum);
     }
 
     private List<SeiValidatorSetUpdate> scanForValidatorSetUpdates(
@@ -182,12 +225,21 @@ public final class SeiBundleConstructor implements BundleConstructor {
         return new SeiTrustAnchorId(seiHeader.nextValidatorsHash(), seiHeader.height() + 1);
     }
 
-    @Override
-    public void onStateChanged(
+    /**
+     * Builds the Sei CometBFT proof payload for {@code channel} at {@code blockNumber} (the EVM state
+     * height), including {@code pendingMessages} (already trimmed to the requested start). Validator-set
+     * rotation catch-up is driven by {@code remoteTrustAnchorId} (the peer's current trust anchor, from
+     * its request); the local endpoint-manifest proof is gated on {@code peerManifestVersion} (the
+     * version the peer holds of our manifest, from its request). Returns empty when there is nothing to
+     * send or when proof assembly fails.
+     */
+    private Optional<Bytes> buildBundlePayload(
             final BigInteger blockNumber,
             final Bytes channelId,
             final ClprChannel channel,
-            final List<ContractStateReader.QueuedMessage> pendingMessages) {
+            final List<ContractStateReader.QueuedMessage> pendingMessages,
+            final Bytes remoteTrustAnchorIdBytes,
+            final long peerManifestVersion) {
         final long stateHeight = blockNumber.longValueExact();
         final var proofBlockHeight = stateHeight + 1;
         // Fetch the signed header at stateHeight+1.
@@ -196,16 +248,24 @@ public final class SeiBundleConstructor implements BundleConstructor {
         final var signedHeader = cometBftRpcClient.getSignedHeader(proofBlockHeight);
         final var seiHeader = signedHeader.header();
 
-        // Check if we need to update the trust anchor on the remote side
-        // If remoteTrustAnchorId isn't yet set, default to current head.
+        // Check if we need to update the trust anchor on the remote side (from the peer's request).
+        // If it isn't set / decodable, default to current head.
         final SeiTrustAnchorId remoteTrustAnchorId;
-        if (channel.remoteTrustAnchorId().length() == ENCODED_TRUST_ANCHOR_ID_LENGTH) {
-            remoteTrustAnchorId = decodeTrustAnchorId(channel.remoteTrustAnchorId());
+        if (remoteTrustAnchorIdBytes.length() == ENCODED_TRUST_ANCHOR_ID_LENGTH) {
+            remoteTrustAnchorId = decodeTrustAnchorId(remoteTrustAnchorIdBytes);
         } else {
-            log.warn(
-                    "Could not decode Sei remoteTrustAnchorId (= {}). Falling back to default (current header).",
-                    channel.remoteTrustAnchorId().toHex());
             remoteTrustAnchorId = defaultTrustAnchorId(seiHeader);
+        }
+
+        // The trust anchor id comes straight off the peer's (untrusted) request. Its height is read as a
+        // signed long, so a hostile/corrupt anchor could carry a negative height that would slip past the
+        // "future anchor" guard below and into the rotation scan; reject it outright.
+        if (remoteTrustAnchorId.height() < 0) {
+            log.warn(
+                    "Rejecting bundle build for channel {}: peer trust anchor id carries a negative Sei height {}.",
+                    channelId.toHex(),
+                    remoteTrustAnchorId.height());
+            return Optional.empty();
         }
 
         final var currentTrustAnchorMatchesValidators =
@@ -222,11 +282,24 @@ public final class SeiBundleConstructor implements BundleConstructor {
                         Remote channel was updated to trust anchor ID (Sei height) {}, but our JSON RPC says
                         that the current height is {} which is behind remote channel's current trust anchor.
                         This might indicate that our JSON RPC node is lagging behind.""", remoteTrustAnchorId.height(), seiHeader.height());
-                return;
+                return Optional.empty();
             }
 
-            priorValidatorSetUpdates = scanForValidatorSetUpdates(
-                    remoteTrustAnchorId.height(), Math.max(0, proofBlockHeight - 1), maxPriorValidatorSetUpdates);
+            // Floor the scan start so an implausibly old anchor cannot make us walk the whole chain one
+            // getSignedHeader RPC at a time. An anchor further behind than MAX_ROTATION_SCAN_WINDOW is not
+            // caught up here; the bundle then fails the peer's on-chain verification and is skipped.
+            final long maxHeight = Math.max(0, proofBlockHeight - 1);
+            final long scanFrom = Math.max(remoteTrustAnchorId.height(), maxHeight - MAX_ROTATION_SCAN_WINDOW);
+            if (scanFrom > remoteTrustAnchorId.height()) {
+                log.warn(
+                        "Channel {}: peer trust anchor at Sei height {} is more than {} blocks behind proof height {};"
+                                + " scanning only the recent window — the bundle may not verify until the peer re-anchors.",
+                        channelId.toHex(),
+                        remoteTrustAnchorId.height(),
+                        MAX_ROTATION_SCAN_WINDOW,
+                        maxHeight);
+            }
+            priorValidatorSetUpdates = scanForValidatorSetUpdates(scanFrom, maxHeight, maxPriorValidatorSetUpdates);
         } else {
             priorValidatorSetUpdates = new ArrayList<>();
         }
@@ -251,43 +324,52 @@ public final class SeiBundleConstructor implements BundleConstructor {
         // of the bundle.
         // So we're going to create a trust rotation-only bundle, with no other payload, just to push it closer
         // to a state where it can verify messages again.
-        ClprSeiBundlePayload bundlePayload;
+        final ClprSeiBundlePayload bundlePayload;
         if (!verifierAbleToVerifyBundleContent) {
             if (priorValidatorSetUpdates.isEmpty()) {
                 log.warn("""
                         Remote verifier's trust anchor is outdated, but we were unable to provide the
                         necessary trust anchor rotations at height {}.""", seiHeader.height());
-                return;
+                return Optional.empty();
             }
             bundlePayload = createTrustRotationOnlyBundle(priorValidatorSetUpdates);
         } else {
             bundlePayload = createRegularBundle(
-                    channel, pendingMessages, stateHeight, signedHeader, seiHeader, priorValidatorSetUpdates);
+                    channel,
+                    pendingMessages,
+                    stateHeight,
+                    signedHeader,
+                    seiHeader,
+                    priorValidatorSetUpdates,
+                    peerManifestVersion);
         }
 
-        if (bundlePayload != null) {
-            final Bytes payloadBytes = ClprSeiBundlePayload.PROTOBUF.toBytes(bundlePayload);
-            if (payloadBytes.length() > maxBundleSize) {
-                log.warn(
-                        "[Sei] Assembled bundle proof for channel {} is {} bytes, over the configured maxBundleSize"
-                                + " of {} bytes; not emitting it (a peer submitting it would risk a gas/size blowup)."
-                                + " Lower maxMessagesPerBundle or raise maxBundleSize.",
-                        channelId,
-                        payloadBytes.length(),
-                        maxBundleSize);
-                return;
-            }
-            bundleProofCache.put(channelId, payloadBytes);
+        if (bundlePayload == null) {
+            return Optional.empty();
         }
+        final Bytes payloadBytes = ClprSeiBundlePayload.PROTOBUF.toBytes(bundlePayload);
+        if (payloadBytes.length() > maxBundleSize) {
+            log.warn(
+                    "[Sei] Assembled bundle proof for channel {} is {} bytes, over the configured maxBundleSize"
+                            + " of {} bytes; not emitting it (a peer submitting it would risk a gas/size blowup)."
+                            + " Lower maxMessagesPerBundle or raise maxBundleSize.",
+                    channelId,
+                    payloadBytes.length(),
+                    maxBundleSize);
+            return Optional.empty();
+        }
+        return Optional.of(payloadBytes);
     }
 
+    @Nullable
     private ClprSeiBundlePayload createRegularBundle(
             final ClprChannel channel,
             final List<ContractStateReader.QueuedMessage> pendingMessages,
             final long stateHeight,
             SeiSignedHeader signedHeader,
             SeiHeader seiHeader,
-            List<SeiValidatorSetUpdate> priorValidatorSetUpdates) {
+            List<SeiValidatorSetUpdate> priorValidatorSetUpdates,
+            final long peerManifestVersion) {
         final var messagesToInclude =
                 pendingMessages.subList(0, Math.min(maxMessagesPerBundle, pendingMessages.size()));
 
@@ -423,12 +505,11 @@ public final class SeiBundleConstructor implements BundleConstructor {
         // known version" decision is the shared ManifestProofPolicy so no codec can forget it; the
         // Sei-specific part proves the same _endpointManifest.commitment slot via an ICS-23 query at the
         // same height/store as the queue slots, so it verifies against the same signed header and
-        // multistore proof. It is carried in a dedicated field rather than in storage_proofs so the
-        // fixed, positional queue-slot list above is unaffected.
+        // multistore proof. The peer-held version comes from the request ({@code peerManifestVersion}).
         SeiStorageProofEntry manifestProofEntry = null;
         Bytes manifestPreimage = null;
-        final Optional<ClprEndpointManifest> manifestDue = ManifestProofPolicy.manifestToAttach(
-                stateReader, peerManifestVersions, channel.channelId(), toBlockTag(stateHeight));
+        final Optional<ClprEndpointManifest> manifestDue =
+                ManifestProofPolicy.manifestToAttach(stateReader, peerManifestVersion, toBlockTag(stateHeight));
         if (manifestDue.isPresent()) {
             final ClprEndpointManifest manifest = manifestDue.get();
             final var manifestAbciKey = buildEvmStorageAbciKey(clprServiceAddress, ENDPOINT_MANIFEST_COMMITMENT_SLOT);
@@ -453,7 +534,7 @@ public final class SeiBundleConstructor implements BundleConstructor {
             }
         }
 
-        // Step 8: Build SeiStateProof + ClprSeiBundlePayload, then cache.
+        // Step 8: Build SeiStateProof + ClprSeiBundlePayload.
         final var stateProof = SeiStateProof.newBuilder()
                 .signedHeader(signedHeader)
                 .storeKey(STORE_KEY_EVM)

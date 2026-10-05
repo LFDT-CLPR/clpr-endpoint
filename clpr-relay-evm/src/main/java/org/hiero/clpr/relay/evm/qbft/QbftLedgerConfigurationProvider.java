@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-package org.hiero.clpr.relay.evm;
+package org.hiero.clpr.relay.evm.qbft;
 
 import static org.hiero.clpr.relay.evm.jsonrpc.EvmJsonRpcClient.toBlockTag;
 import static org.hiero.clpr.relay.evm.storage.ClprServiceStorageLayout.CONFIG_SERVICE_ADDRESS_SLOT;
@@ -12,6 +12,8 @@ import java.util.List;
 import org.hiero.clpr.relay.core.CommitmentLevel;
 import org.hiero.clpr.relay.core.ContractStateReader;
 import org.hiero.clpr.relay.core.LedgerConfigurationPayloadProvider;
+import org.hiero.clpr.relay.evm.BlockHeaderRlpCodec;
+import org.hiero.clpr.relay.evm.EvmUtils;
 import org.hiero.clpr.relay.evm.jsonrpc.EvmJsonRpcClient;
 import org.hiero.clpr.relay.evm.model.Address;
 import org.hiero.clpr.relay.evm.model.ProofResponse;
@@ -46,7 +48,7 @@ import org.hiero.clpr.relay.evm.model.ProofResponse;
  * every cycle. The provider is only invoked from the gRPC {@code getLedgerConfiguration}
  * pipeline.
  */
-public final class EvmQbftLedgerConfigurationProvider implements LedgerConfigurationPayloadProvider {
+public final class QbftLedgerConfigurationProvider implements LedgerConfigurationPayloadProvider {
     private final EvmJsonRpcClient rpcClient;
     private final ContractStateReader stateReader;
     private final Address clprServiceAddress;
@@ -58,7 +60,7 @@ public final class EvmQbftLedgerConfigurationProvider implements LedgerConfigura
      * @param clprServiceAddress the ClprService contract address — the account the EIP-1186
      *                           proof is constructed against
      */
-    public EvmQbftLedgerConfigurationProvider(
+    public QbftLedgerConfigurationProvider(
             final EvmJsonRpcClient rpcClient,
             final ContractStateReader stateReader,
             final Address clprServiceAddress,
@@ -86,7 +88,7 @@ public final class EvmQbftLedgerConfigurationProvider implements LedgerConfigura
         final ProofResponse proofResp = rpcClient.ethGetProof(
                 clprServiceAddress.toHexString(), new String[] {serviceAddressSlotHex}, currentBlockTag);
         final List<StorageProofEntry> storageProofs = proofResp.storageProof().stream()
-                .map(EvmQbftLedgerConfigurationProvider::toProtoStorageProofEntry)
+                .map(QbftLedgerConfigurationProvider::toProtoStorageProofEntry)
                 .toList();
 
         final var payload = QbftLedgerConfigurationPayload.newBuilder()

@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-package org.hiero.clpr.relay.evm;
+package org.hiero.clpr.relay.evm.qbft;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -22,7 +22,7 @@ import org.hiero.clpr.relay.evm.model.ProofResponse;
 import org.hiero.clpr.relay.evm.testfixtures.TestEvmJsonRpcClient;
 import org.junit.jupiter.api.Test;
 
-class EvmQbftLedgerConfigurationProviderTest {
+class QbftLedgerConfigurationProviderTest {
 
     private static final ObjectMapper MAPPER = new ObjectMapper();
 
@@ -135,7 +135,7 @@ class EvmQbftLedgerConfigurationProviderTest {
         final String serviceAddressSlotValue = "0x" + "12".repeat(20) + "00".repeat(11) + "28";
         rpc.setProofResponse(proof(serviceAddressSlotValue));
 
-        final var provider = new EvmQbftLedgerConfigurationProvider(rpc, stateReader, CONTRACT_ADDRESS, 30_000L);
+        final var provider = new QbftLedgerConfigurationProvider(rpc, stateReader, CONTRACT_ADDRESS, 30_000L);
 
         final var response = provider.provide(CommitmentLevel.FINALIZED);
         assertThat(response.qbft()).isNotNull();
@@ -182,7 +182,7 @@ class EvmQbftLedgerConfigurationProviderTest {
         rpc.setBlock("latest", block("0xabc", ONE_HASH, "0xdeadbeef", "0x65111111"));
         rpc.setProofResponse(proof("0x00"));
 
-        final var provider = new EvmQbftLedgerConfigurationProvider(rpc, stateReader, CONTRACT_ADDRESS, 30_000L);
+        final var provider = new QbftLedgerConfigurationProvider(rpc, stateReader, CONTRACT_ADDRESS, 30_000L);
 
         provider.provide(CommitmentLevel.LATEST);
 

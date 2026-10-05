@@ -63,6 +63,16 @@ import org.jspecify.annotations.Nullable;
  *       chainId: 1337
  *     qbft:
  *       epochLength: 30000
+ *   - id: eth-mainnet            # proofType EthereumPOS: an EVM execution node + a beacon (CL) node
+ *     proofType: EthereumPOS
+ *     evm:
+ *       jsonRpcUrl: "http://geth:8545"
+ *       chainId: 1
+ *     beacon:
+ *       beaconApiUrl: "http://lighthouse:5052"
+ *       maxMessagesPerBundle: 10
+ *       maxRetries: 3
+ *       requestTimeoutMs: 10000
  * clprServices:
  *   - serviceAddress: "0x..."
  *     localNetwork: besu-local
@@ -470,6 +480,11 @@ final class RelayConfigLoader {
                             "localNetworks['" + id
                                     + "'].proofType=Hiero is not supported for a local network; the EVM relay only submits to"
                                     + " QBFT, CometBFT or EthereumPOS chains (Hiero may still be used as a channel's peerProofType)");
+                case Stub ->
+                    // Test-only: a Stub local network builds CLPRSTUB bundles from real channel state
+                    // for the StubClprVerifier (integration tests), so it needs only the EVM block —
+                    // no qbft/cometBft/beacon proof parameters. Never valid against a real production chain.
+                    new RelayConfig.LocalNetworkConfig(id, proofType, parseRequiredEvm(netMap, id), null, null, null);
             };
         }
 

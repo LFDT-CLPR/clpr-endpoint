@@ -8,6 +8,7 @@ import static org.hiero.clpr.relay.test.harness.RelayAssertions.assertMetadata;
 import static org.hiero.clpr.relay.test.harness.RelayAssertions.assertMetric;
 import static org.hiero.clpr.relay.test.harness.RelayAssertions.assertReplyMetadata;
 
+import com.hedera.hapi.node.state.clpr.BundleResponse;
 import com.hedera.hapi.node.state.clpr.ClprChannel;
 import com.hedera.hapi.node.state.clpr.ClprChannelStatus;
 import com.hedera.hapi.node.state.clpr.ClprLedgerConfiguration;
@@ -19,7 +20,7 @@ import java.util.Optional;
 import org.hiero.clpr.relay.core.BundlePayloadCodec;
 import org.hiero.clpr.relay.core.CommitmentLevel;
 import org.hiero.clpr.relay.core.ContractStateReader;
-import org.hiero.clpr.relay.core.HieroProofCodec;
+import org.hiero.clpr.relay.core.StubProofCodec;
 import org.hiero.clpr.relay.core.metrics.LabeledCounter;
 import org.hiero.clpr.relay.core.metrics.SimpleMetrics;
 import org.junit.jupiter.api.Test;
@@ -76,14 +77,15 @@ class RelayAssertionsTest {
 
     @Test
     void peerObservedSurfaceDecodesCraftedBundle() {
-        final BundlePayloadCodec codec = new HieroProofCodec();
-        final Bytes bundle = StubBundles.hieroStateProof()
+        final BundlePayloadCodec codec = new StubProofCodec();
+        final Bytes bundle = StubBundles.stubProof()
                 .status(ClprChannelStatus.DRAINED)
                 .receivedMessageId(7)
                 .build();
         final ClprSyncPayload reply = ClprSyncPayload.newBuilder()
                 .channelId(Bytes.wrap(channelId))
-                .bundlePayload(bundle)
+                .bundleResponse(
+                        BundleResponse.newBuilder().bundlePayload(bundle).build())
                 .build();
 
         assertThatNoException().isThrownBy(() -> assertReplyMetadata(codec, reply)

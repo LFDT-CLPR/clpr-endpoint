@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 package org.hiero.clpr.relay.integration.channelLifecycle;
 
+import com.hedera.hapi.node.state.clpr.BundleRequest;
+import com.hedera.hapi.node.state.clpr.BundleResponse;
 import com.hedera.hapi.node.state.clpr.ClprChannelStatus;
 import com.hedera.hapi.node.state.clpr.ClprMessageReplyStatus;
 import com.hedera.hapi.node.state.clpr.ClprSyncPayload;
@@ -32,16 +34,27 @@ class PeerInitiatedClosePollStubPeerTest extends OneSidedStubPeerTestBase {
 
     @Test
     void peerDeclaringClosingViaPollDrivesLocalCloseAndDrain() {
-        final Bytes closing = StubBundles.hieroStateProof()
+        final Bytes closing = StubBundles.stubProof()
                 .ackedMessageId(0)
                 .receivedMessageId(1)
                 .reply(1L, ClprMessageReplyStatus.SUCCESS, new byte[] {1})
                 .status(ClprChannelStatus.CLOSING)
                 .build();
-        peer.onSync(req -> ClprSyncPayload.newBuilder()
-                .channelId(Bytes.wrap(channelId))
-                .bundlePayload(req.bundlePayload().length() == 0 ? Bytes.EMPTY : closing)
-                .build());
+        peer.onSync(req -> {
+            // Always ask the relay for its data so it delivers its outbound DATA in phase 2. Ack ONLY once
+            // the relay has actually delivered that DATA (a non-empty phase-2 bundle); acking before then
+            // would revert on the contract (received >= next).
+            final var reply = ClprSyncPayload.newBuilder()
+                    .channelId(Bytes.wrap(channelId))
+                    .bundleRequest(BundleRequest.newBuilder()
+                            .currentReceivedMessageId(0L)
+                            .build());
+            if (peer.sawOutboundBundle()) {
+                reply.bundleResponse(
+                        BundleResponse.newBuilder().bundlePayload(closing).build());
+            }
+            return reply.build();
+        });
 
         // Bring up the relay's own sync loop, then enqueue the outbound DATA. The relay polls the peer,
         // gets back {ack + reply + CLOSING}, and drives itself ACTIVE → CLOSING → DRAINED — no admin close.
@@ -54,15 +67,18 @@ class PeerInitiatedClosePollStubPeerTest extends OneSidedStubPeerTestBase {
         // With all outbound acked and the peer reporting DRAINED, the relay completes the handshake:
         // DRAINED → CLOSED.
         final ContractInteractor.ChannelState drained = interactor.requireChannelState(channelId);
-        final Bytes drainedBundle = StubBundles.hieroStateProof()
+        final Bytes drainedBundle = StubBundles.stubProof()
                 .ackedMessageId(drained.receivedMessageId())
                 .receivedMessageId(drained.ackedMessageId())
                 .chainFrom(Bytes.wrap(drained.receivedRunningHash()))
                 .status(ClprChannelStatus.DRAINED)
                 .build();
         peer.respondWith(ClprSyncPayload.newBuilder()
-                .bundlePayload(drainedBundle)
                 .channelId(Bytes.wrap(channelId))
+                .bundleRequest(
+                        BundleRequest.newBuilder().currentReceivedMessageId(0L).build())
+                .bundleResponse(
+                        BundleResponse.newBuilder().bundlePayload(drainedBundle).build())
                 .build());
 
         TestConditions.awaitStatus(interactor, channelId, ClprChannelStatus.CLOSED, TIMEOUT);

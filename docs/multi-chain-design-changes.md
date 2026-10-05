@@ -9,7 +9,7 @@ material on the wire.
 
 ## Problem statement
 
-A single-chain relay hard-wires `ContractStateReader`, `TransactionSubmitter`, `BundleConstructor`,
+A single-chain relay hard-wires `ContractStateReader`, `InboundBundleQueue`, `BundleConstructor`,
 and `BundlePayloadCodec` to one chain, built once at startup and shared across all channels.
 The `getLedgerConfiguration` gRPC returns a flat, QBFT-specific payload with no mechanism for a
 peer to understand it is talking to a different consensus type.
@@ -45,11 +45,13 @@ The composition mirrors the configuration (`localNetworks[]` → `clprServices[]
 - **`ClprServiceHandler`** — one per `clprServices[]` entry (one deployed `ClprService` contract on
   one local network). Owns its `ChannelDiscoveryTask` (when discovery is enabled) and a
   `Map<Bytes, ClprChannelHandler>`. Resolves each channel's signing key and peer proof type.
-- **`ClprChannelHandler`** — one per channel. Owns every channel-scoped component: the
-  `EvmContractStateReader`, a per-channel view (`forContract(serviceAddress)`) of the network's
-  shared per-account `AccountTransactionSubmitter`, the `BundleConstructor`, the `LedgerConfigurationPayloadProvider`, the `PeerEndpointCache`, the
-  `ThrottleEnforcer`, the inbound `BundlePayloadCodec`, and the two worker threads it spawns
-  (`ChannelSyncTask` and `EvmChannelStateChangeTask`).
+- **`ClprChannelHandler`** — one per channel; implements `ClprChannelOps`. Owns every channel-scoped
+  component: the `EvmContractStateReader`, the network's shared per-account
+  `AccountTransactionSubmitter` (it enqueues via `inboundBundleQueue().offer(...)` →
+  `AccountTransactionSubmitter.submit(...)`), the `BundleConstructor` + `BundleRequestConstructor`, the
+  `LedgerConfigurationPayloadProvider`, the `PeerEndpointCache`, the `ThrottleEnforcer`, the inbound
+  `BundlePayloadCodec`, and the two worker threads it spawns (`ChannelSyncTask` and
+  `EndpointManifestRefreshTask`).
 
 ### Channel binding
 
@@ -65,19 +67,18 @@ A channel binds to its chain and peer format as follows:
   with no explicit mapping falls back to the local network's `proofType`; an unmapped non-EVM peer
   is unservable and skipped). This resolution is identical for predefined and discovered channels.
 
-### Keeping `ClprSyncHandler` channel-agnostic via resolver adapters
+### Keeping `ClprSyncHandler` channel-agnostic via `ChannelLookup`
 
-`ClprSyncHandler` is designed around single instances of `ContractStateReader`,
-`TransactionSubmitter`, `BundleConstructor`, and `BundlePayloadCodec` (resolved per request by the
-`channelId` carried on the payload). Rather than redesigning the gRPC module, four
-package-private adapters in `clpr-relay-app` (`ChannelMappedTransactionSubmitter`,
-`ChannelMappedContractStateReader`, `ChannelMappedBundleConstructor`,
-`ChannelMappedProofCodec`) each hold a `Function<Bytes, Optional<ClprChannelHandler>>` resolver
-and dispatch each call to the owning handler's component. The resolver — supplied by `RelayInstance`
-— iterates every `ClprServiceHandler` and looks the channel handler up by id, so channels
-registered at runtime (discovered on-chain, or predefined channels started later) are served
-without rewiring. The `ThrottleEnforcer` (in `ClprSyncHandler`) and `PeerEndpointCache` (in the
-`discoverEndpoints` path) are reached the same way, through `Function<Bytes, …>` resolvers.
+`ClprSyncHandler` serves every channel, resolving the right one per request from the `channelId`
+carried on the payload. It holds a single `ChannelLookup` — `findById(channelId) →
+Optional<ClprChannelOps>`, supplied by `RelayInstance` as a `Function<Bytes,
+Optional<ClprChannelHandler>>` that iterates every `ClprServiceHandler` and looks the channel handler
+up by id. Because `ClprChannelHandler` implements `ClprChannelOps`, the per-stream `ClprSyncSession`
+then reaches that channel's `contractStateReader()`, `bundleConstructor()`,
+`bundleRequestConstructor()`, and `inboundBundleQueue()` off the resolved ops. Resolution at call time
+means channels registered at runtime (discovered on-chain, or predefined channels started later) are
+served without rewiring; an unknown id returns `Optional.empty()` and the session replies with an
+empty payload. (This replaced the earlier four per-interface `ChannelMapped*` resolver adapters.)
 
 ### Typed `getLedgerConfiguration` response
 
@@ -135,7 +136,7 @@ non-null. Implementations pin all reads to the same block so the payload is inte
 ### `ProofType` — discriminator enum
 
 ```java
-public enum ProofType { QBFT, CometBFT, Hiero }
+public enum ProofType { QBFT, CometBFT, Hiero, EthereumPOS, Stub }
 ```
 
 Stored on each `LocalNetworkConfig` (the local chain's own consensus type) and used as the resolved
@@ -165,13 +166,15 @@ public record LocalNetworkConfig(
     ProofType proofType,
     CommonEvmParams evm,
     @Nullable CometBftConfig cometBft,
-    @Nullable QbftConfig qbft) {}
+    @Nullable QbftConfig qbft,
+    @Nullable BeaconConfig beacon) {}
 ```
 
 The `id` is a user-chosen string referenced by `ClprServiceConfig.localNetwork`. The `proofType`
 selects the implementation bundle and proof provider. The typed sub-blocks carry the parameters
-specific to that consensus type — `qbft` is present for `QBFT`, `cometBft` for `CometBFT`; both run
-an EVM JSON-RPC, so `evm` is always present.
+specific to that consensus type — `qbft` is present for `QBFT`, `cometBft` for `CometBFT`, `beacon`
+(the consensus-layer node URL + light-client params) for `EthereumPOS`; all run an EVM JSON-RPC, so
+`evm` is always present. `Stub` (test-only) needs only `evm`.
 
 **`ClprServiceConfig` nested record:**
 
@@ -228,9 +231,10 @@ the outbound `ClprEndpointClient`, and the metrics registry). Structure:
    builds its `ClprChannelHandler`s lazily — predefined channels when the service starts,
    discovered channels at runtime — because construction performs blocking JSON-RPC reads
    (protocol-version check, ledger config, peer roster).
-3. Build the four `ChannelMapped*` resolver adapters, plus the `ThrottleEnforcer` and
-   `PeerEndpointCache` resolvers, over a `Function<Bytes, Optional<ClprChannelHandler>>` that
-   iterates the service-handler map. Pass them to `ClprSyncHandler` / `ClprGrpcServer`.
+3. Build one `ChannelLookup` (`findById(channelId) → Optional<ClprChannelOps>`) over a
+   `Function<Bytes, Optional<ClprChannelHandler>>` that iterates the service-handler map, and pass it
+   to `ClprSyncHandler` / `ClprGrpcServer`. (Each `ClprChannelHandler` implements `ClprChannelOps`, so
+   the throttle enforcer, state reader, codec, and inbound queue are all reached off the resolved ops.)
 4. Wire a `LedgerConfigurationPayloadProvider` to `GetLedgerConfigurationHandler` that serves the
    first registered channel's provider (resolved from the live topology at request time) as a
    temporary measure — `ClprGetLedgerConfigurationRequest` carries no `channel_id`. See
@@ -259,31 +263,28 @@ The inbound codec is selected by `ClprChannelHandler.codecFor(peerProofType, cha
 
 ---
 
-### `ChannelMapped*` resolver adapters
+### `ClprChannelOps` + `ChannelLookup`
 
-All four live in `clpr-relay-app` (package-private) and hold the same
-`Function<Bytes, Optional<ClprChannelHandler>>` resolver rather than their own maps. Resolution
-happens at call time, so a channel registered after construction is served immediately.
+The four per-interface `ChannelMapped*` resolver adapters were replaced by a single per-channel
+interface. `ClprChannelHandler` now **implements `ClprChannelOps`** — the surface the gRPC glue
+consumes: `channelId()`, `bundleConstructor()`, `bundleRequestConstructor()`, `inboundBundleQueue()`,
+`contractStateReader()`.
 
-- **`ChannelMappedTransactionSubmitter`** (implements `TransactionSubmitter`) — dispatches
-  `submitBundle` to the resolved handler's `txSubmitter()`.
-- **`ChannelMappedChannelLookup`** (implements `ChannelLookup`) — dispatches
-  `readChannelState` to the resolved handler's `stateReader()`. `ClprSyncHandler` needs only
-  channel lookup, so this adapter carries just that one method (issue #291); it returns
-  `Optional.empty()` when no handler is registered for the id (mirroring the single-chain "no state
-  for an unknown connection" behavior, letting `ClprSyncHandler` return an empty-proof response).
-- **`ChannelMappedBundleConstructor`** (implements `BundleConstructor`) — dispatches
-  `getLatestBundlePayload` / `onStateChanged` to the resolved handler's `bundleConstructor()`.
-- **`ChannelMappedProofCodec`** (implements `BundlePayloadCodecResolver`) — a codec's methods
-  carry no `channelId` (each codec is bound to one channel at construction), so this resolves
-  the handler and returns its `inboundCodec()`. `ChannelSyncTask` holds its channel's codec
-  directly; `ClprSyncHandler` holds the resolver and looks the codec up per request.
+The inbound server resolves a channel per stream with one `ChannelLookup`:
+`findById(channelId) → Optional<ClprChannelOps>`, backed by a
+`Function<Bytes, Optional<ClprChannelHandler>>` that looks the handler up by id across every
+`ClprServiceHandler`. Resolution happens at call time, so a channel registered after construction is
+served immediately, and an unknown id returns `Optional.empty()` (letting `ClprSyncSession` reply with
+an empty-payload response). `ClprSyncHandler` holds only the `ChannelLookup` + shared metrics; each
+`ClprSyncSession` calls `ops.bundleConstructor().createBundle(...)`,
+`ops.bundleRequestConstructor().createBundleRequest()`, and `ops.inboundBundleQueue().offer(...)` on the
+resolved ops. `ChannelSyncTask` is constructed with its channel's `ClprChannelOps` directly.
 
 ---
 
 ## EVM module (`clpr-relay-evm`)
 
-### `EvmQbftLedgerConfigurationProvider` / `SeiLedgerConfigurationProvider`
+### `QbftLedgerConfigurationProvider` / `SeiLedgerConfigurationProvider`
 
 `provide(CommitmentLevel)` returns a `ClprLedgerConfigurationResponse`, wrapping the
 consensus-specific payload:
@@ -295,12 +296,13 @@ return ClprLedgerConfigurationResponse.newBuilder().qbft(payload).build();
 This aligns the providers with the `LedgerConfigurationPayloadProvider` interface and keeps
 `GetLedgerConfigurationHandler` chain-agnostic.
 
-### `EvmChannelStateChangeTask`
+### `EndpointManifestRefreshTask`
 
-The per-channel on-chain state poller, driven directly by its `ClprChannelHandler` (there is
-no central listener). It refreshes the channel's `PeerEndpointCache` from the on-ledger roster
-when the peer-config marker advances, and notifies the `BundleConstructor` when the queue state
-advances.
+The per-channel peer-manifest refresh poller, driven directly by its `ClprChannelHandler` (there is
+no central listener). It reads only the on-ledger peer endpoint manifest and, when its `version`
+advances, replaces the channel's `PeerEndpointCache` (and the mTLS trust registry) wholesale. In the
+two-phase protocol nothing else is polled: bundles are built ad hoc from a peer's `BundleRequest`
+(`BundleConstructor.createBundle`), not on a state-change trigger.
 
 ---
 
@@ -354,7 +356,7 @@ Regenerate PBJ: `./gradlew :clpr-relay-proto:generatePbjSource`.
 
 ### 2. App — extend `ProofType`
 
-Add one value to the enum (`ProofType { QBFT, CometBFT, Hiero, ACME }`). The compiler surfaces every
+Add one value to the enum (`ProofType { QBFT, CometBFT, Hiero, EthereumPOS, Stub, ACME }`). The compiler surfaces every
 exhaustive `switch` that must be extended — the proof-type switch in `ClprChannelHandler.create()`
 and the codec switch in `ClprChannelHandler.codecFor()`.
 

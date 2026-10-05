@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-package org.hiero.clpr.relay.evm;
+package org.hiero.clpr.relay.evm.qbft;
 
 import static org.hiero.clpr.relay.evm.AbiCodec.rlpBytes;
 import static org.hiero.clpr.relay.evm.AbiCodec.rlpList;
@@ -16,6 +16,7 @@ import static org.hiero.clpr.relay.evm.storage.ClprServiceStorageLayout.ENDPOINT
 import static org.hiero.clpr.relay.evm.storage.ClprServiceStorageLayout.calculateChannelFieldStorageSlot;
 import static org.hiero.clpr.relay.evm.storage.ClprServiceStorageLayout.calculateMsgRunningHashStorageSlot;
 
+import com.hedera.hapi.node.state.clpr.BundleRequest;
 import com.hedera.hapi.node.state.clpr.ClprBundleContent;
 import com.hedera.hapi.node.state.clpr.ClprChannel;
 import com.hedera.hapi.node.state.clpr.ClprChannelStatus;
@@ -26,24 +27,32 @@ import com.hedera.hapi.node.state.clpr.ClprQueueMetadata;
 import com.hedera.pbj.runtime.io.buffer.Bytes;
 import com.swirlds.logging.api.Logger;
 import com.swirlds.logging.api.Loggers;
-import edu.umd.cs.findbugs.annotations.Nullable;
 import java.math.BigInteger;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
-import java.util.concurrent.ConcurrentHashMap;
 import org.hiero.clpr.relay.core.BundleConstructor;
 import org.hiero.clpr.relay.core.BundleLog;
+import org.hiero.clpr.relay.core.BundleWithConstructionMetadata;
+import org.hiero.clpr.relay.core.CommitmentLevel;
 import org.hiero.clpr.relay.core.ContractStateReader;
 import org.hiero.clpr.relay.core.ManifestProofPolicy;
-import org.hiero.clpr.relay.core.PeerManifestVersionCache;
+import org.hiero.clpr.relay.evm.BlockHeaderRlpCodec;
+import org.hiero.clpr.relay.evm.ByteUtils;
+import org.hiero.clpr.relay.evm.EvmUtils;
 import org.hiero.clpr.relay.evm.jsonrpc.EvmJsonRpcClient;
 import org.hiero.clpr.relay.evm.model.Address;
 import org.hiero.clpr.relay.evm.model.BlockHeader;
 import org.hiero.clpr.relay.evm.model.ProofResponse;
+import org.jspecify.annotations.Nullable;
 
 /**
  * An implementation of {@link BundleConstructor} that creates bundles with Besu's QBFT proofs.
+ *
+ * <p>In the two-phase sync protocol a bundle is built ad hoc from the peer's {@link BundleRequest}: the
+ * requested message range, the peer verifier's current trust anchor ({@code currentTrustAnchorId}, which
+ * drives validator-set / epoch catch-up), and the endpoint-manifest version the peer holds of us
+ * ({@code currentEndpointManifestVersion}, which gates the local manifest proof).
  */
 public final class QbftBundleConstructor implements BundleConstructor {
 
@@ -67,43 +76,26 @@ public final class QbftBundleConstructor implements BundleConstructor {
     /** Default assembled bundle-proof size ceiling (bytes) when none is configured; matches gRPC 1 MiB. */
     public static final long DEFAULT_MAX_BUNDLE_SIZE = 1_048_576L;
 
-    /** Cache of the latest bundle proof per channel ID. */
-    private final ConcurrentHashMap<Bytes, Bytes> bundleProofCache = new ConcurrentHashMap<>();
-
     private final Address clprServiceAddress;
     private final EvmJsonRpcClient rpcClient;
+    private final ContractStateReader stateReader;
+    private final CommitmentLevel commitmentLevel;
     private final long epochLength;
     private final int maxEpochBlockHeadersPerBundle;
     private final int maxMessagesPerBundle;
     private final long maxBundleSize;
-    /** Reader for the local endpoint manifest; {@code null} disables manifest proofs. */
-    @Nullable
-    private final ContractStateReader stateReader;
 
     /**
-     * Per-channel record of the manifest version each peer has cached of our manifest; {@code null}
-     * means "unknown for every channel" (treated as version 0), so a local manifest proof is
-     * attached whenever a local manifest exists.
+     * Convenience constructor using {@link #DEFAULT_MAX_BUNDLE_SIZE} as the assembled-bundle size ceiling.
      */
-    @Nullable
-    private final PeerManifestVersionCache peerManifestVersions;
-
-    public QbftBundleConstructor(
-            Address clprServiceAddress,
-            long epochLength,
-            int maxEpochBlockHeadersPerBundle,
-            int maxMessagesPerBundle,
-            EvmJsonRpcClient rpcClient) {
-        this(clprServiceAddress, epochLength, maxEpochBlockHeadersPerBundle, maxMessagesPerBundle, rpcClient, null);
-    }
-
     public QbftBundleConstructor(
             Address clprServiceAddress,
             long epochLength,
             int maxEpochBlockHeadersPerBundle,
             int maxMessagesPerBundle,
             EvmJsonRpcClient rpcClient,
-            @Nullable ContractStateReader stateReader) {
+            ContractStateReader stateReader,
+            CommitmentLevel commitmentLevel) {
         this(
                 clprServiceAddress,
                 epochLength,
@@ -111,25 +103,7 @@ public final class QbftBundleConstructor implements BundleConstructor {
                 maxMessagesPerBundle,
                 rpcClient,
                 stateReader,
-                null);
-    }
-
-    public QbftBundleConstructor(
-            Address clprServiceAddress,
-            long epochLength,
-            int maxEpochBlockHeadersPerBundle,
-            int maxMessagesPerBundle,
-            EvmJsonRpcClient rpcClient,
-            @Nullable ContractStateReader stateReader,
-            @Nullable PeerManifestVersionCache peerManifestVersions) {
-        this(
-                clprServiceAddress,
-                epochLength,
-                maxEpochBlockHeadersPerBundle,
-                maxMessagesPerBundle,
-                rpcClient,
-                stateReader,
-                peerManifestVersions,
+                commitmentLevel,
                 DEFAULT_MAX_BUNDLE_SIZE);
     }
 
@@ -139,13 +113,13 @@ public final class QbftBundleConstructor implements BundleConstructor {
             int maxEpochBlockHeadersPerBundle,
             int maxMessagesPerBundle,
             EvmJsonRpcClient rpcClient,
-            @Nullable ContractStateReader stateReader,
-            @Nullable PeerManifestVersionCache peerManifestVersions,
+            ContractStateReader stateReader,
+            CommitmentLevel commitmentLevel,
             long maxBundleSize) {
         this.clprServiceAddress = clprServiceAddress;
         this.rpcClient = rpcClient;
         this.stateReader = stateReader;
-        this.peerManifestVersions = peerManifestVersions;
+        this.commitmentLevel = commitmentLevel;
 
         if (epochLength < 1) {
             throw new IllegalArgumentException("epochLength must be at least 1");
@@ -169,8 +143,41 @@ public final class QbftBundleConstructor implements BundleConstructor {
     }
 
     @Override
-    public Optional<Bytes> getLatestBundlePayload(final Bytes channelId) {
-        return Optional.ofNullable(bundleProofCache.get(channelId));
+    public BundleWithConstructionMetadata createBundle(final Bytes channelId, final BundleRequest request) {
+        // Read the local head at the configured commitment level (QBFT proves against the head — no lag).
+        final BlockHeader head = rpcClient.ethGetBlockHeaderByNumber(commitmentLevel.toBlockTag());
+        final long blockNum = head.number().longValueExact();
+
+        if (ClprChannelStatus.CLOSED.equals(request.currentStatus())) {
+            // Nothing to do if the remote side is closed
+            return new BundleWithConstructionMetadata(Bytes.EMPTY, blockNum);
+        }
+
+        final String blockTag = toBlockTag(blockNum);
+        final var maybeChannel = stateReader.readChannelState(channelId, blockTag);
+        if (maybeChannel.isEmpty()) {
+            return new BundleWithConstructionMetadata(Bytes.EMPTY, blockNum);
+        }
+        final ClprChannel channel = maybeChannel.get();
+        if (ClprChannelStatus.PENDING.equals(channel.status())) {
+            return new BundleWithConstructionMetadata(Bytes.EMPTY, blockNum);
+        }
+
+        // Sender-side trim: serve messages from the id the peer asked for, up to what we have sent.
+        final long fromId = Math.max(1L, request.currentReceivedMessageId() + 1);
+        final List<ContractStateReader.QueuedMessage> pending = fromId >= channel.nextMessageId()
+                ? List.of()
+                : stateReader.readQueuedMessages(channelId, fromId, channel.nextMessageId(), blockTag);
+
+        final Bytes payload = buildBundlePayload(
+                        BigInteger.valueOf(blockNum),
+                        channelId,
+                        channel,
+                        pending,
+                        request.currentTrustAnchorId(),
+                        request.currentEndpointManifestVersion())
+                .orElse(Bytes.EMPTY);
+        return new BundleWithConstructionMetadata(payload, blockNum);
     }
 
     private List<BlockHeader> fetchEpochBlockHeaders(long fromEpoch, int maxCount) {
@@ -196,25 +203,29 @@ public final class QbftBundleConstructor implements BundleConstructor {
         }
     }
 
-    @Override
-    public void onStateChanged(
+    /**
+     * Builds the QBFT proof payload for {@code channel} at {@code blockNumber}, including
+     * {@code pendingMessages} (already trimmed to the requested start). Validator-set / epoch catch-up is
+     * driven by {@code remoteTrustAnchorId} (the peer's current trust anchor, from its request) and the
+     * local endpoint-manifest proof is gated on {@code peerManifestVersion} (the version the peer holds of
+     * our manifest, from its request). Returns empty when there is nothing to send (no messages, acks,
+     * epoch headers, or lifecycle status) or when proof assembly fails.
+     */
+    private Optional<Bytes> buildBundlePayload(
             final BigInteger blockNumber,
             final Bytes channelId,
             final ClprChannel channel,
-            final List<ContractStateReader.QueuedMessage> pendingMessages) {
+            final List<ContractStateReader.QueuedMessage> pendingMessages,
+            final Bytes remoteTrustAnchorId,
+            final long peerManifestVersion) {
 
         final var currentBlockTag = toBlockTag(blockNumber.longValueExact());
         final var currentBlockHeader = this.rpcClient.ethGetBlockHeaderByNumber(currentBlockTag);
         final var currentEpoch = currentBlockHeader.number().longValueExact() / this.epochLength;
 
-        // Decode the remote trust anchor ID, default to current epoch if not set
-        final QbftTrustAnchorId remoteTrustAnchorId = decodeTrustAnchorId(channel.remoteTrustAnchorId())
-                .orElseGet(() -> {
-                    log.warn(
-                            "Could not decode QBFT remoteTrustAnchorId (= {}). Falling back to default (current epoch).",
-                            channel.remoteTrustAnchorId().toHex());
-                    return new QbftTrustAnchorId(currentEpoch);
-                });
+        // Decode the remote trust anchor ID (from the peer's request), default to current epoch if not set
+        final QbftTrustAnchorId remoteTrustAnchor =
+                decodeTrustAnchorId(remoteTrustAnchorId).orElseGet(() -> new QbftTrustAnchorId(currentEpoch));
 
         log.info(
                 "bundle CONSTRUCT attempt next={} acked={} recv={} status={} block={} local_epoch={} remote_epoch={}",
@@ -224,7 +235,7 @@ public final class QbftBundleConstructor implements BundleConstructor {
                 channel.status(),
                 blockNumber,
                 currentEpoch,
-                remoteTrustAnchorId.epoch());
+                remoteTrustAnchor.epoch());
 
         // Step 1: Check if we need to update the trust anchor on the remote side
 
@@ -241,7 +252,7 @@ public final class QbftBundleConstructor implements BundleConstructor {
 
         final List<BlockHeader> epochBlockHeaders;
         final int maxMessagesToInclude;
-        if (remoteTrustAnchorId.epoch() > currentEpoch) {
+        if (remoteTrustAnchor.epoch() > currentEpoch) {
             // Remote side was updated to a _future_ (from our perspective) trust anchor.
             // That must mean that the RPC node we're connected to is behind.
             log.warn(
@@ -250,20 +261,20 @@ public final class QbftBundleConstructor implements BundleConstructor {
                     that the current block number is {}, so with {} blocks per epoch that results in epoch {},
                     which is behind remote channel's current trust anchor.
                     This might indicate that our JSON RPC node is lagging behind.""",
-                    remoteTrustAnchorId.epoch(),
+                    remoteTrustAnchor.epoch(),
                     currentBlockHeader.number().longValueExact(),
                     epochLength,
                     currentEpoch);
-            return;
-        } else if (remoteTrustAnchorId.epoch() < currentEpoch) {
+            return Optional.empty();
+        } else if (remoteTrustAnchor.epoch() < currentEpoch) {
             // Remote side is behind:
             // let's fetch the missing epoch block headers (up to maxEpochBlockHeadersPerBundle)
             // and include them in the bundle
 
             final var maxEpochHeadersToFetch = Math.min(
-                    (int) Math.min(currentEpoch - remoteTrustAnchorId.epoch(), Integer.MAX_VALUE),
+                    (int) Math.min(currentEpoch - remoteTrustAnchor.epoch(), Integer.MAX_VALUE),
                     maxEpochBlockHeadersPerBundle);
-            epochBlockHeaders = fetchEpochBlockHeaders(remoteTrustAnchorId.epoch() + 1, maxEpochHeadersToFetch);
+            epochBlockHeaders = fetchEpochBlockHeaders(remoteTrustAnchor.epoch() + 1, maxEpochHeadersToFetch);
             // As described in the comment above:
             // - at most one header   => include all messages up to the usual limit
             // - more than one header => don't include any messages
@@ -293,7 +304,7 @@ public final class QbftBundleConstructor implements BundleConstructor {
                     "bundle CONSTRUCT skip (no pending messages, ACKs, epoch headers or lifecycle status) status={} block={}",
                     status,
                     blockNumber);
-            return;
+            return Optional.empty();
         }
 
         final var hasMessages = !messagesToInclude.isEmpty();
@@ -332,7 +343,7 @@ public final class QbftBundleConstructor implements BundleConstructor {
         // Sanity check the proof response
         if (proofResp.accountProof().isEmpty()) {
             logBundleCreationError(channelId, maybeLastMessage, "Account proof is empty.");
-            return;
+            return Optional.empty();
         }
 
         if (proofResp.storageProof().size() != slotsToProve.size()) {
@@ -342,12 +353,12 @@ public final class QbftBundleConstructor implements BundleConstructor {
                     String.format(
                             "Storage proof is missing some slots (expected %s, but got %s).",
                             slotsToProve.size(), proofResp.storageProof().size()));
-            return;
+            return Optional.empty();
         }
 
         if (proofResp.storageProof().stream().anyMatch(e -> e.proof().isEmpty())) {
             logBundleCreationError(channelId, maybeLastMessage, "Some storage proofs are empty.");
-            return;
+            return Optional.empty();
         }
 
         if (hasMessages) {
@@ -359,7 +370,7 @@ public final class QbftBundleConstructor implements BundleConstructor {
             if (lastMessageRunningHashProof.isEmpty()) {
                 logBundleCreationError(
                         channelId, maybeLastMessage, "Last message's runningHashAfterProcessing proof is missing.");
-                return;
+                return Optional.empty();
             }
 
             final var lastMessageRunningHashPaddedProofValue =
@@ -376,22 +387,22 @@ public final class QbftBundleConstructor implements BundleConstructor {
                                         + "(expected %s, but proof contains %s).",
                                 expectedLastMessageRunningHashPadded.toHex(),
                                 lastMessageRunningHashPaddedProofValue.toHex()));
-                return;
+                return Optional.empty();
             }
         }
 
         // Step 3 (optional): local endpoint-manifest proof. The "attach only when our LOCAL manifest is
-        // ahead of the version the peer has cached of it" decision (spec §4.2 Step 1b) is shared across
-        // bundle formats in ManifestProofPolicy so no codec can forget it; here we only supply the
-        // QBFT-specific proof once the policy says a manifest is due. (channel.endpointManifestVersion()
-        // is the version of the *peer's* manifest cached locally, an unrelated quantity, so it must not
-        // gate our own manifest proof — the policy reads the peer-known version from peerManifestVersions.)
+        // ahead of the version the peer holds of it" decision (spec §4.2 Step 1b) is shared across bundle
+        // formats in ManifestProofPolicy so no codec can forget it; here we only supply the QBFT-specific
+        // proof once the policy says a manifest is due. The peer-held version comes from the request
+        // ({@code peerManifestVersion}); channel.endpointManifestVersion() is the version of the *peer's*
+        // manifest cached locally, an unrelated quantity, so it must not gate our own manifest proof.
         // The manifest commitment is proven via ENDPOINT_MANIFEST_COMMITMENT_SLOT (slot 18) — a separate
         // ethGetProof call so the channel-slots sanity check above stays simple.
         QbftStorageProofEntry manifestStorageProof = null;
         Bytes manifestPreimage = null;
         final Optional<ClprEndpointManifest> manifestDue =
-                ManifestProofPolicy.manifestToAttach(stateReader, peerManifestVersions, channelId, currentBlockTag);
+                ManifestProofPolicy.manifestToAttach(stateReader, peerManifestVersion, currentBlockTag);
         if (manifestDue.isPresent()) {
             final ClprEndpointManifest manifest = manifestDue.get();
             try {
@@ -425,14 +436,14 @@ public final class QbftBundleConstructor implements BundleConstructor {
                 .map(ClprMessageValue::payload)
                 .toList();
 
-        // Build bundle content and cache the bundle proof
+        // Build bundle content
         final ClprBundleContent content = ClprBundleContent.newBuilder()
                 .metadata(metadata)
                 .messages(payloads)
                 .build();
         final Bytes serializedContent = ClprBundleContent.PROTOBUF.toBytes(content);
 
-        // Step 5: Create the QBFT payload and cache it
+        // Step 5: Create the QBFT payload
         final var proofPackage = new QbftBundlePayload(
                 epochBlockHeaders,
                 currentBlockHeader,
@@ -451,10 +462,8 @@ public final class QbftBundleConstructor implements BundleConstructor {
                     channelId,
                     proofPackageBytes.length(),
                     maxBundleSize);
-            return;
+            return Optional.empty();
         }
-
-        bundleProofCache.put(channelId, proofPackageBytes);
 
         log.info(
                 "bundle CONSTRUCTED {} status={} block={} blockHash={} accountProofNodes={} storageProofEntries={} "
@@ -466,10 +475,12 @@ public final class QbftBundleConstructor implements BundleConstructor {
                 proofResp.accountProof().size(),
                 proofResp.storageProof().size(),
                 serializedContent.length());
+
+        return Optional.of(proofPackageBytes);
     }
 
     private void logBundleCreationError(
-            Bytes channelId, @Nullable ContractStateReader.QueuedMessage lastMessage, String extraInfo) {
+            Bytes channelId, ContractStateReader.@Nullable QueuedMessage lastMessage, String extraInfo) {
         log.error(
                 "[QBFT] Failed to create a proof for channel ID {} and last message ID {}. {}",
                 channelId.toHex(),

@@ -13,7 +13,6 @@ module org.hiero.clpr.relay.test.harness {
     requires transitive org.hiero.clpr.relay.evm;
     requires transitive org.hiero.clpr.relay.proto;
     requires com.hedera.pbj.grpc.helidon;
-    requires org.hiero.clpr.relay.core.test.fixtures;
     requires org.hiero.clpr.relay.grpc.client;
     requires io.helidon.common.tls;
     requires io.helidon.common;

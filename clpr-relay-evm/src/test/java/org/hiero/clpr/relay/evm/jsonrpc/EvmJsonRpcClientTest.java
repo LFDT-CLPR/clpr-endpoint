@@ -20,9 +20,9 @@ import java.util.ArrayDeque;
 import java.util.List;
 import java.util.Queue;
 import org.hiero.clpr.relay.evm.JsonRpcException;
-import org.hiero.clpr.relay.evm.QbftBundleConstructor;
 import org.hiero.clpr.relay.evm.model.BlockHeader;
 import org.hiero.clpr.relay.evm.model.ProofResponse;
+import org.hiero.clpr.relay.evm.qbft.QbftBundleConstructor;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
@@ -570,7 +570,7 @@ class EvmJsonRpcClientTest {
 
     /**
      * Build a minimal {@code eth_getProof} response with five storage entries — matching
-     * the number of slots {@link QbftBundleConstructor#onStateChanged} now requests
+     * the number of slots {@link QbftBundleConstructor#createBundle} now requests
      * (one for the last-message running hash plus four for the Channel-struct fields
      * backing the ClprQueueMetadata). The first entry carries {@code storageValue}, which
      * is what the constructor validates against the queued message's running hash; the

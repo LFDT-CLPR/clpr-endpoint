@@ -16,8 +16,10 @@ import static org.hiero.clpr.relay.evm.storage.ClprServiceStorageLayout.calculat
 import static org.hiero.clpr.relay.evm.storage.ClprServiceStorageLayout.calculateMsgRunningHashStorageSlot;
 
 import com.hedera.cryptography.hints.HintsLibraryBridge;
+import com.hedera.hapi.node.state.clpr.BundleRequest;
 import com.hedera.hapi.node.state.clpr.ClprBundleContent;
 import com.hedera.hapi.node.state.clpr.ClprChannel;
+import com.hedera.hapi.node.state.clpr.ClprChannelStatus;
 import com.hedera.hapi.node.state.clpr.ClprEndpointManifest;
 import com.hedera.hapi.node.state.clpr.ClprMessagePayload;
 import com.hedera.hapi.node.state.clpr.ClprMessageValue;
@@ -25,17 +27,16 @@ import com.hedera.hapi.node.state.clpr.ClprQueueMetadata;
 import com.hedera.pbj.runtime.io.buffer.Bytes;
 import com.swirlds.logging.api.Logger;
 import com.swirlds.logging.api.Loggers;
-import edu.umd.cs.findbugs.annotations.Nullable;
 import java.math.BigInteger;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
-import java.util.concurrent.ConcurrentHashMap;
 import org.hiero.clpr.relay.core.BundleConstructor;
 import org.hiero.clpr.relay.core.BundleLog;
+import org.hiero.clpr.relay.core.BundleWithConstructionMetadata;
+import org.hiero.clpr.relay.core.CommitmentLevel;
 import org.hiero.clpr.relay.core.ContractStateReader;
 import org.hiero.clpr.relay.core.ManifestProofPolicy;
-import org.hiero.clpr.relay.core.PeerManifestVersionCache;
 import org.hiero.clpr.relay.evm.beacon.BeaconApiClient;
 import org.hiero.clpr.relay.evm.beacon.LightClientBootstrap;
 import org.hiero.clpr.relay.evm.beacon.LightClientHeader;
@@ -46,6 +47,7 @@ import org.hiero.clpr.relay.evm.jsonrpc.EvmJsonRpcClient;
 import org.hiero.clpr.relay.evm.model.Address;
 import org.hiero.clpr.relay.evm.model.ProofResponse;
 import org.hiero.clpr.relay.evm.ssz.Ssz;
+import org.jspecify.annotations.Nullable;
 
 /**
  * A {@link BundleConstructor} that builds bundles verifiable by the Hiero-native Ethereum-PoS
@@ -89,16 +91,18 @@ import org.hiero.clpr.relay.evm.ssz.Ssz;
  * {@link org.hiero.clpr.relay.evm.storage.ClprServiceStorageLayout}.
  *
  * <p><b>Sync-committee rotation:</b> the attested header is sourced from the per-period light-client
- * update (<code>/eth/v1/beacon/light_client/updates</code>) for the period the remote verifier's
- * trust anchor is on, so it is always signed by a committee the verifier still trusts. When the chain
- * advances past that period, the same update carries the {@code next_sync_committee} (+ branch); the
- * bundle includes them (items 4/5) to advance the anchor exactly one period, and the relay tracks the
- * new period per connection. Multi-period catch-up happens one step per bundle.
+ * update (<code>/eth/v1/beacon/light_client/updates</code>) for the period the remote verifier's trust
+ * anchor is on — decoded from the peer's {@code BundleRequest.currentTrustAnchorId} — so it is always
+ * signed by a committee the verifier still trusts. When the local chain has advanced past that period,
+ * the same update carries the {@code next_sync_committee} (+ branch); the bundle includes them (items
+ * 4/5) to advance the anchor exactly one period. Multi-period catch-up happens one step per exchange:
+ * the peer's next request reports the advanced anchor.
  *
- * <p><b>Assumption / limitation:</b> the remote anchor's period is tracked locally (seeded to the
- * chain's current period on the first bundle), because the Ethereum trust anchor exposes no period
- * field. If the relay restarts after the remote anchor has fallen behind, it re-assumes "current" and
- * may need an out-of-band anchor refresh.
+ * <p><b>Stateless / two-phase:</b> the constructor keeps no per-channel state. Each {@code createBundle}
+ * derives the remote anchor period from the request's trust anchor, sources the committee that signed
+ * the attested header from the light-client bootstrap at that header's block root, and gates the
+ * endpoint-manifest proof on the request's {@code currentEndpointManifestVersion}. The exact
+ * trust-anchor-id encoding is owned by the Hiero verifier — see {@link #remotePeriodFromRequest}.
  */
 public final class EthereumPosBundleConstructor implements BundleConstructor {
 
@@ -132,13 +136,6 @@ public final class EthereumPosBundleConstructor implements BundleConstructor {
             @Nullable EthStorageProofEntry manifestStorageProof,
             @Nullable Bytes serializedEndpointManifest) {}
 
-    /**
-     * The per-channel rotation bookkeeping {@code onStateChanged} needs before it can source an
-     * attested header: which sync-committee periods the local chain and the remote anchor are on,
-     * and the committee currently used to identify non-signers.
-     */
-    private record RotationState(long currentPeriod, long remotePeriod, SyncCommittee currentCommittee) {}
-
     /** The optional Step-3 endpoint-manifest proof; {@link #NONE} when none is due or available. */
     private record ManifestProof(
             @Nullable EthStorageProofEntry storageProof,
@@ -146,61 +143,25 @@ public final class EthereumPosBundleConstructor implements BundleConstructor {
         private static final ManifestProof NONE = new ManifestProof(null, null);
     }
 
-    private final ConcurrentHashMap<Bytes, Bytes> bundleProofCache = new ConcurrentHashMap<>();
-
-    /**
-     * The sync-committee period the remote verifier's trust anchor is believed to be on, per
-     * connection. Seeded to the chain's current period on the first bundle (we assume the connection
-     * was registered with an up-to-date bootstrap); advanced by one each time we emit a rotation
-     * proof. Used to decide when a rotation is due and which committee period's update to source the
-     * attested header from.
-     */
-    private final ConcurrentHashMap<Bytes, Long> remotePeriodByConnection = new ConcurrentHashMap<>();
-
-    /**
-     * The active sync committee per connection — needed to identify non-signer pubkeys and build their
-     * depth-9 Merkle inclusion proofs. Seeded from the finalized bootstrap on the first bundle;
-     * advanced to {@code nextCommittee} whenever a rotation bundle is emitted.
-     */
-    private final ConcurrentHashMap<Bytes, SyncCommittee> currentCommitteeByConnection = new ConcurrentHashMap<>();
-
     private final Address clprServiceAddress;
     private final EvmJsonRpcClient rpcClient;
     private final BeaconApiClient beaconClient;
-    private final int maxMessagesPerBundle;
-
-    /** Reader for the local endpoint manifest; {@code null} disables manifest proofs. */
-    @Nullable
     private final ContractStateReader stateReader;
-
-    /**
-     * Per-channel record of the manifest version each peer has cached of our manifest; {@code null}
-     * means "unknown for every channel" (treated as version 0), so a local manifest proof is
-     * attached whenever a local manifest exists.
-     */
-    @Nullable
-    private final PeerManifestVersionCache peerManifestVersions;
-
-    public EthereumPosBundleConstructor(
-            final Address clprServiceAddress,
-            final int maxMessagesPerBundle,
-            final EvmJsonRpcClient rpcClient,
-            final BeaconApiClient beaconClient) {
-        this(clprServiceAddress, maxMessagesPerBundle, rpcClient, beaconClient, null, null);
-    }
+    private final CommitmentLevel commitmentLevel;
+    private final int maxMessagesPerBundle;
 
     public EthereumPosBundleConstructor(
             final Address clprServiceAddress,
             final int maxMessagesPerBundle,
             final EvmJsonRpcClient rpcClient,
             final BeaconApiClient beaconClient,
-            @Nullable final ContractStateReader stateReader,
-            @Nullable final PeerManifestVersionCache peerManifestVersions) {
+            final ContractStateReader stateReader,
+            final CommitmentLevel commitmentLevel) {
         this.clprServiceAddress = clprServiceAddress;
         this.rpcClient = rpcClient;
         this.beaconClient = beaconClient;
         this.stateReader = stateReader;
-        this.peerManifestVersions = peerManifestVersions;
+        this.commitmentLevel = commitmentLevel;
         if (maxMessagesPerBundle < 1) {
             throw new IllegalArgumentException("maxMessagesPerBundle must be at least 1");
         }
@@ -208,101 +169,99 @@ public final class EthereumPosBundleConstructor implements BundleConstructor {
     }
 
     @Override
-    public Optional<Bytes> getLatestBundlePayload(final Bytes connectionId) {
-        return Optional.ofNullable(bundleProofCache.get(connectionId));
-    }
-
-    @Override
-    public void onStateChanged(
-            final BigInteger blockNumber,
-            final Bytes connectionId,
-            final ClprChannel channel,
-            final List<ContractStateReader.QueuedMessage> pendingMessages) {
-
-        final var messagesToInclude =
-                pendingMessages.subList(0, Math.min(maxMessagesPerBundle, pendingMessages.size()));
-        if (messagesToInclude.isEmpty() && channel.receivedMessageId() <= 0) {
-            log.debug(
-                    "bundle CONSTRUCT skip (no pending messages or ACKs) status={} block={}",
-                    channel.status(),
-                    blockNumber);
-            return;
+    public BundleWithConstructionMetadata createBundle(final Bytes channelId, final BundleRequest request) {
+        // Nothing to do if the remote side is closed.
+        if (ClprChannelStatus.CLOSED.equals(request.currentStatus())) {
+            return new BundleWithConstructionMetadata(Bytes.EMPTY, 0L);
         }
 
-        final RotationState rotation = resolveRotationState(connectionId, channel);
-        if (rotation == null) {
-            return;
-        }
+        // The verifier trusts the sync committee at its anchor period; source the attested header from
+        // that period's light-client update so the sync-aggregate's signer set is one it still accepts.
+        // The anchor period comes from the peer's request (its verifier's actual trust anchor), not a
+        // local guess. When the local chain has moved on, the anchor-period update carries the next
+        // committee so this bundle advances the verifier's anchor exactly one period.
+        final long slotsPerSyncCommitteePeriod = beaconClient.getSlotsPerSyncCommitteePeriod();
+        final long currentPeriod =
+                beaconClient.getFinalityUpdate().attestedHeader().beacon().slot() / slotsPerSyncCommitteePeriod;
+        final long remotePeriod = remotePeriodFromRequest(request, currentPeriod);
 
-        log.info(
-                "bundle CONSTRUCT attempt next={} recv={} status={} block={} local_period={} remote_period={}",
-                channel.nextMessageId(),
-                channel.receivedMessageId(),
-                channel.status(),
-                blockNumber,
-                rotation.currentPeriod(),
-                rotation.remotePeriod());
-
-        final Optional<LightClientUpdate> maybeUpdate = fetchPeriodUpdate(connectionId, rotation.remotePeriod());
+        final Optional<LightClientUpdate> maybeUpdate = fetchPeriodUpdate(channelId, remotePeriod);
         if (maybeUpdate.isEmpty()) {
-            return;
+            return new BundleWithConstructionMetadata(Bytes.EMPTY, 0L);
         }
         final LightClientUpdate update = maybeUpdate.get();
         final LightClientHeader attested = update.attestedHeader();
+        final long attestedExecBlock = attested.execution().blockNumber();
+        final String attestedBlockTag = toBlockTag(attestedExecBlock);
 
-        // Rotation is due only once the chain has actually advanced past the anchor's period. The
-        // period update for the anchor's period carries next_sync_committee (the committee for
-        // remotePeriod + 1) and its branch — advancing the anchor exactly one step.
-        final boolean rotationDue = rotation.currentPeriod() > rotation.remotePeriod();
+        // Read channel state at the same beacon-attested execution block the rest of the proof anchors
+        // to, so the metadata slots and the proven storage agree.
+        final var maybeChannel = stateReader.readChannelState(channelId, attestedBlockTag);
+        if (maybeChannel.isEmpty()) {
+            return new BundleWithConstructionMetadata(Bytes.EMPTY, attestedExecBlock);
+        }
+        final ClprChannel channel = maybeChannel.get();
+        if (ClprChannelStatus.PENDING.equals(channel.status())) {
+            return new BundleWithConstructionMetadata(Bytes.EMPTY, attestedExecBlock);
+        }
+
+        // Sender-side trim: serve messages from the id the peer asked for, up to what we have sent,
+        // capped at maxMessagesPerBundle.
+        final long fromId = Math.max(1L, request.currentReceivedMessageId() + 1);
+        final List<ContractStateReader.QueuedMessage> pending = fromId >= channel.nextMessageId()
+                ? List.of()
+                : stateReader.readQueuedMessages(channelId, fromId, channel.nextMessageId(), attestedBlockTag);
+        final List<ContractStateReader.QueuedMessage> messagesToInclude =
+                pending.subList(0, Math.min(maxMessagesPerBundle, pending.size()));
+
+        // Nothing to convey (no messages to deliver and no acks to report) → empty payload.
+        if (messagesToInclude.isEmpty() && channel.receivedMessageId() <= 0) {
+            return new BundleWithConstructionMetadata(Bytes.EMPTY, attestedExecBlock);
+        }
+
+        // Rotation is due once the local chain has advanced past the anchor period. The anchor-period
+        // update then carries next_sync_committee (the committee for remotePeriod + 1) and its branch.
+        final boolean rotationDue = currentPeriod > remotePeriod;
         final boolean rotate = rotationDue && update.hasRotation();
         if (rotationDue && !update.hasRotation()) {
-            // Anomalous: per the beacon light-client protocol, the period-remotePeriod update should
-            // always carry next_sync_committee once the chain has advanced past that period. Without
-            // it we cannot advance the remote anchor, so this cycle's bundle is steady-state only and
-            // will not verify against a remote anchor that is more than one period behind.
+            // Anomalous: per the beacon light-client protocol, the anchor-period update should carry
+            // next_sync_committee once the chain has advanced past that period. Without it we cannot
+            // advance the remote anchor, so this cycle's bundle is steady-state only and will not verify
+            // against a remote anchor that is more than one period behind.
             log.error(
-                    "[ETH-POS] bundle CONSTRUCT anomaly for connection {}: local_period={} > remote_period={} "
-                            + "but the period-{} light-client update carries no next_sync_committee; cannot "
-                            + "advance the remote trust anchor this cycle.",
-                    connectionId.toHex(),
-                    rotation.currentPeriod(),
-                    rotation.remotePeriod(),
-                    rotation.remotePeriod());
+                    "[ETH-POS] bundle CONSTRUCT anomaly for channel {}: local_period={} > remote_period={} but the "
+                            + "period-{} light-client update carries no next_sync_committee; cannot advance the "
+                            + "remote trust anchor this cycle.",
+                    channelId.toHex(),
+                    currentPeriod,
+                    remotePeriod,
+                    remotePeriod);
         }
         final SyncCommittee nextCommittee = rotate ? update.nextSyncCommittee() : null;
         final List<Bytes> nextCommitteeBranch = rotate ? update.nextSyncCommitteeBranch() : null;
 
-        final long attestedExecBlock = attested.execution().blockNumber();
-        final String attestedBlockTag = toBlockTag(attestedExecBlock);
+        // The committee that signed the attested header (remotePeriod's committee) is what identifies the
+        // non-signers; source it statelessly from the light-client bootstrap at the attested block root.
+        final SyncCommittee attestedCommittee = attestedPeriodCommittee(channelId, attested);
+        if (attestedCommittee == null) {
+            return new BundleWithConstructionMetadata(Bytes.EMPTY, attestedExecBlock);
+        }
 
-        final var hasMessages = !messagesToInclude.isEmpty();
-        final var maybeLastMessage = hasMessages ? messagesToInclude.getLast() : null;
-
-        log.info(
-                "bundle CONSTRUCT proof msgs=[{}] msg_count={} attestedExecBlock={} block={}",
-                messagesToInclude.isEmpty()
-                        ? ""
-                        : (messagesToInclude.getFirst().messageId() + ".."
-                                + messagesToInclude.getLast().messageId()),
-                messagesToInclude.size(),
-                attestedExecBlock,
-                blockNumber);
-
+        final var maybeLastMessage = messagesToInclude.isEmpty() ? null : messagesToInclude.getLast();
         final Optional<ProofResponse> maybeProof = fetchAndValidateChannelProof(
-                connectionId, maybeLastMessage, channelProofSlots(channel, messagesToInclude), attestedBlockTag);
+                channelId, maybeLastMessage, channelProofSlots(channel, messagesToInclude), attestedBlockTag);
         if (maybeProof.isEmpty()) {
-            return;
+            return new BundleWithConstructionMetadata(Bytes.EMPTY, attestedExecBlock);
         }
         final ProofResponse proofResp = maybeProof.get();
         final var storageEntries = proofResp.storageProof().stream()
                 .map(e -> new EthStorageProofEntry(e.key(), e.proof()))
                 .toList();
 
-        final ManifestProof manifestProof = resolveManifestProof(connectionId, attestedBlockTag);
-
+        final ManifestProof manifestProof =
+                resolveManifestProof(channelId, request.currentEndpointManifestVersion(), attestedBlockTag);
         final Bytes serializedContent = buildSerializedContent(channel, messagesToInclude);
-
-        final List<byte[]> nonSignerProofs = buildNonSignerProofs(rotation.currentCommittee(), update.syncAggregate());
+        final List<byte[]> nonSignerProofs = buildNonSignerProofs(attestedCommittee, update.syncAggregate());
 
         final var payload = new EthBundlePayload(
                 attested,
@@ -316,70 +275,56 @@ public final class EthereumPosBundleConstructor implements BundleConstructor {
                 manifestProof.storageProof(),
                 manifestProof.preimage());
         final Bytes proofBytes = Bytes.wrap(PayloadRlpEncoder.encode(payload));
-        bundleProofCache.put(connectionId, proofBytes);
-
-        // The bundle advances the verifier's anchor by one period; track that so the next bundle
-        // sources from — and, if needed, advances past — the new period.
-        if (rotate) {
-            remotePeriodByConnection.put(connectionId, rotation.remotePeriod() + 1);
-            currentCommitteeByConnection.put(connectionId, nextCommittee);
-        }
 
         log.info(
-                "bundle CONSTRUCTED {} status={} block={} attestedExecBlock={} beaconSlot={} period={} "
-                        + "rotated={} accountProofNodes={} storageProofEntries={} contentBytes={}",
+                "bundle CONSTRUCTED {} status={} attestedExecBlock={} beaconSlot={} remote_period={} rotated={} "
+                        + "accountProofNodes={} storageProofEntries={} contentBytes={}",
                 BundleLog.tag(proofBytes),
                 channel.status(),
-                blockNumber,
                 attestedExecBlock,
                 attested.beacon().slot(),
-                rotation.remotePeriod(),
+                remotePeriod,
                 rotate,
                 proofResp.accountProof().size(),
                 storageEntries.size(),
                 serializedContent.length());
+        return new BundleWithConstructionMetadata(proofBytes, attestedExecBlock);
     }
 
     /**
-     * Resolves the sync-committee period bookkeeping for {@code connectionId}: the local chain's
-     * current period, the period the remote anchor is believed to be on (seeding it to
-     * {@code currentPeriod} on the first bundle), and the committee currently used to identify
-     * non-signers (seeded from the finalized bootstrap on the first bundle). Returns {@code null} —
-     * having already logged the failure — if no committee is cached yet and the bootstrap didn't
-     * supply one.
+     * Decodes the remote verifier's current sync-committee period from the request's trust-anchor id (a
+     * big-endian unsigned integer, mirroring {@link org.hiero.clpr.relay.evm.qbft.QbftBundleConstructor}'s
+     * epoch encoding). Falls back to {@code currentPeriod} when the request carries no trust anchor — e.g.
+     * the first exchange after channel bring-up, before the peer has reported one.
+     *
+     * <p><b>Gap:</b> the exact trust-anchor-id byte layout is owned by the Hiero-native
+     * {@code EthereumSyncCommitteeProofVerifier}; this decode assumes it is the period as a big-endian
+     * integer. Cross-check against {@code clpr-hiero} — a mismatch sources the attested header from the
+     * wrong period and the bundle will not verify.
      */
-    private @Nullable RotationState resolveRotationState(final Bytes connectionId, final ClprChannel channel) {
-        // Source the attested header from the sync-committee-period light-client update (not just the
-        // finality update), because that is the one endpoint that also carries next_sync_committee for
-        // rotation. We always source from the period the *remote anchor* trusts, so the attested
-        // header is signed by a committee the verifier still accepts.
-        final long slotsPerSyncCommitteePeriod = beaconClient.getSlotsPerSyncCommitteePeriod();
-        final long currentPeriod =
-                beaconClient.getFinalityUpdate().attestedHeader().beacon().slot() / slotsPerSyncCommitteePeriod;
-        final long remotePeriod = remotePeriodByConnection.computeIfAbsent(connectionId, k -> {
-            // TODO: with 2-phase sync, seed from channel.trustAnchorId() (the remote verifier's
-            // actual anchor period) instead of assuming it matches the current local beacon period.
-            // Until then this is fragile: a relay restart or a slow remote anchor will produce an
-            // incorrect seed and may require an out-of-band anchor refresh.
-            log.debug(
-                    "bundle CONSTRUCT seed remote_period={} slot={} status={}",
-                    currentPeriod,
-                    currentPeriod * slotsPerSyncCommitteePeriod,
-                    channel.status());
+    private long remotePeriodFromRequest(final BundleRequest request, final long currentPeriod) {
+        final Bytes anchor = request.currentTrustAnchorId();
+        if (anchor == null || anchor.length() == 0 || anchor.length() > Long.BYTES) {
             return currentPeriod;
-        });
-
-        if (!currentCommitteeByConnection.containsKey(connectionId)) {
-            final LightClientBootstrap bootstrap = beaconClient.getBootstrap(beaconClient.getFinalizedBlockRootHex());
-            currentCommitteeByConnection.putIfAbsent(connectionId, bootstrap.currentSyncCommittee());
         }
-        final SyncCommittee currentCommittee = currentCommitteeByConnection.get(connectionId);
-        if (currentCommittee == null) {
+        return new BigInteger(1, anchor.toByteArray()).longValueExact();
+    }
+
+    /**
+     * The sync committee that signed {@code attested} (its sync-committee period): the current committee
+     * of the light-client bootstrap taken at the attested beacon block root. Returns {@code null} —
+     * having logged — if the beacon node cannot serve a bootstrap for that root.
+     */
+    private @Nullable SyncCommittee attestedPeriodCommittee(final Bytes channelId, final LightClientHeader attested) {
+        try {
+            final LightClientBootstrap bootstrap = beaconClient.getBootstrap(
+                    "0x" + attested.beacon().hashTreeRoot().toHex());
+            return bootstrap.currentSyncCommittee();
+        } catch (final Exception e) {
             logBundleCreationError(
-                    connectionId, null, "Current sync committee not cached; cannot build non-signer proofs.");
+                    channelId, null, "Could not source the attested-period sync committee: " + e.getMessage());
             return null;
         }
-        return new RotationState(currentPeriod, remotePeriod, currentCommittee);
     }
 
     /**
@@ -435,7 +380,7 @@ public final class EthereumPosBundleConstructor implements BundleConstructor {
      */
     private Optional<ProofResponse> fetchAndValidateChannelProof(
             final Bytes connectionId,
-            @Nullable final ContractStateReader.QueuedMessage maybeLastMessage,
+            final ContractStateReader.@Nullable QueuedMessage maybeLastMessage,
             final List<BigInteger> slotsToProve,
             final String attestedBlockTag) {
         final var slotsHex = slotsToProve.stream().map(EvmUtils::toSlotHex).toArray(String[]::new);
@@ -471,9 +416,10 @@ public final class EthereumPosBundleConstructor implements BundleConstructor {
      * {@link #fetchAndValidateChannelProof} stays simple. Returns {@link ManifestProof#NONE} when no
      * manifest is due or the proof could not be fetched.
      */
-    private ManifestProof resolveManifestProof(final Bytes connectionId, final String attestedBlockTag) {
+    private ManifestProof resolveManifestProof(
+            final Bytes connectionId, final long peerKnownManifestVersion, final String attestedBlockTag) {
         final Optional<ClprEndpointManifest> manifestDue =
-                ManifestProofPolicy.manifestToAttach(stateReader, peerManifestVersions, connectionId, attestedBlockTag);
+                ManifestProofPolicy.manifestToAttach(stateReader, peerKnownManifestVersion, attestedBlockTag);
         if (manifestDue.isEmpty()) {
             return ManifestProof.NONE;
         }
@@ -557,7 +503,7 @@ public final class EthereumPosBundleConstructor implements BundleConstructor {
 
     private void logBundleCreationError(
             final Bytes connectionId,
-            @Nullable final ContractStateReader.QueuedMessage lastMessage,
+            final ContractStateReader.@Nullable QueuedMessage lastMessage,
             final String extraInfo) {
         log.error(
                 "[ETH-POS] Failed to create a proof for connection ID {} and last message ID {}. {}",

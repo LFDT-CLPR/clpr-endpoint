@@ -90,22 +90,22 @@ class AccountTransactionSubmitterTest {
     private static AccountTransactionSubmitter.SubmitRequest request(final byte[] proof, final int messageCount) {
         final byte[] connId = conn32();
         return new AccountTransactionSubmitter.SubmitRequest(
-                CONTRACT, Bytes.wrap(connId), Bytes.wrap(proof), messageCount, label(connId));
+                CONTRACT, Bytes.wrap(connId), Bytes.wrap(proof), messageCount, label(connId), null);
     }
 
-    private static ClprChannel channel() {
-        return ClprChannel.newBuilder().channelId(Bytes.wrap(conn32())).build();
+    private static Bytes channel() {
+        return Bytes.wrap(conn32());
     }
 
     /** A distinct 32-byte channel id (first byte {@code tag}) for multi-channel tests. */
-    private static ClprChannel channelWithTag(final byte tag) {
+    private static Bytes channelWithTag(final byte tag) {
         final byte[] b = new byte[32];
         b[0] = tag;
-        return ClprChannel.newBuilder().channelId(Bytes.wrap(b)).build();
+        return Bytes.wrap(b);
     }
 
     /** A unique 32-byte connection id from an integer index (supports up to 65536 connections). */
-    private static ClprChannel connectionWithIndex(final int index) {
+    private static ClprChannel channelWithIndex(final int index) {
         final byte[] b = new byte[32];
         b[0] = (byte) (index >> 8);
         b[1] = (byte) index;
@@ -173,7 +173,8 @@ class AccountTransactionSubmitterTest {
 
         assertThat(rpc.sendRawCalls.get()).isZero();
         assertThat(PrometheusExporter.render(metrics))
-                .contains("clpr_sync_bundle_skipped{channel_id=\"" + label(conn32()) + "\",reason=\"rejected\"} 1");
+                .contains("clpr_sync_bundle_skipped{channel_id=\"" + label(conn32())
+                        + "\",peer=\"anonymous\",reason=\"rejected\"} 1");
     }
 
     @Test
@@ -190,7 +191,7 @@ class AccountTransactionSubmitterTest {
         assertThat(rpc.estimateGasCalls.get()).isEqualTo(1);
         final String out = PrometheusExporter.render(metrics);
         final String conn = label(conn32());
-        assertThat(out).contains("clpr_sync_bundle_submissions{channel_id=\"" + conn + "\"} 1");
+        assertThat(out).contains("clpr_sync_bundle_submissions{channel_id=\"" + conn + "\",peer=\"anonymous\"} 1");
         assertThat(out).contains("clpr_sync_bundle_messages_submitted{channel_id=\"" + conn + "\"} 2");
         assertThat(out).contains("clpr_sync_bundle_bytes_submitted{channel_id=\"" + conn + "\"} 3");
         assertThat(out).contains("clpr_evm_tx_submissions{channel_id=\"" + conn + "\"} 1");
@@ -211,7 +212,7 @@ class AccountTransactionSubmitterTest {
         assertThat(rpc.sendRawCalls.get()).isEqualTo(1);
         final String out = PrometheusExporter.render(metrics);
         final String conn = label(conn32());
-        assertThat(out).contains("clpr_sync_bundle_reverted{channel_id=\"" + conn + "\"} 1");
+        assertThat(out).contains("clpr_sync_bundle_reverted{channel_id=\"" + conn + "\",peer=\"anonymous\"} 1");
         assertThat(out).contains("clpr_evm_tx_reverts{channel_id=\"" + conn + "\"} 1");
     }
 
@@ -233,7 +234,7 @@ class AccountTransactionSubmitterTest {
         assertThat(rpc.txCountCalls.get()).isEqualTo(1);
         final String conn = label(conn32());
         assertThat(PrometheusExporter.render(metrics))
-                .contains("clpr_sync_bundle_submissions{channel_id=\"" + conn + "\"} 1");
+                .contains("clpr_sync_bundle_submissions{channel_id=\"" + conn + "\",peer=\"anonymous\"} 1");
     }
 
     @Test
@@ -249,7 +250,7 @@ class AccountTransactionSubmitterTest {
         assertThat(rpc.txCountCalls.get()).isEqualTo(1);
         final String conn = label(conn32());
         assertThat(PrometheusExporter.render(metrics))
-                .contains("clpr_sync_bundle_submissions{channel_id=\"" + conn + "\"} 1");
+                .contains("clpr_sync_bundle_submissions{channel_id=\"" + conn + "\",peer=\"anonymous\"} 1");
     }
 
     // -------------------------------------------------------------------------
@@ -286,7 +287,7 @@ class AccountTransactionSubmitterTest {
         assertThat(rpc.txCountCalls.get()).isEqualTo(1);
         final String conn = label(conn32());
         assertThat(PrometheusExporter.render(metrics))
-                .contains("clpr_sync_bundle_submissions{channel_id=\"" + conn + "\"} 1");
+                .contains("clpr_sync_bundle_submissions{channel_id=\"" + conn + "\",peer=\"anonymous\"} 1");
     }
 
     @Test
@@ -308,7 +309,7 @@ class AccountTransactionSubmitterTest {
         assertThat(rpc.sentRawTxs).doesNotHaveDuplicates();
         final String conn = label(conn32());
         assertThat(PrometheusExporter.render(metrics))
-                .contains("clpr_sync_bundle_submissions{channel_id=\"" + conn + "\"} 1");
+                .contains("clpr_sync_bundle_submissions{channel_id=\"" + conn + "\",peer=\"anonymous\"} 1");
     }
 
     @Test
@@ -388,8 +389,8 @@ class AccountTransactionSubmitterTest {
         final var sub = submitter(rpc, metrics, 1);
 
         // Two non-empty bundles for the same channel; the second is dropped on queue-full.
-        sub.submit(CONTRACT, channel(), bundle(Bytes.wrap(new byte[] {0x01}), 1, 2L, 1L));
-        sub.submit(CONTRACT, channel(), bundle(Bytes.wrap(new byte[] {0x02}), 1, 3L, 2L));
+        sub.submit(CONTRACT, channel(), bundle(Bytes.wrap(new byte[] {0x01}), 1, 2L, 1L), null);
+        sub.submit(CONTRACT, channel(), bundle(Bytes.wrap(new byte[] {0x02}), 1, 3L, 2L), null);
 
         assertThat(PrometheusExporter.render(metrics))
                 .contains("clpr_evm_tx_queue_dropped{channel_id=\"" + label(conn32()) + "\"} 1");
@@ -406,10 +407,10 @@ class AccountTransactionSubmitterTest {
         final String conn = label(conn32());
 
         final Bytes proof = Bytes.wrap(new byte[] {0x01, 0x02, 0x03});
-        sub.submit(CONTRACT, channel(), bundle(proof, 1, 2L, 1L));
-        sub.submit(CONTRACT, channel(), bundle(proof, 1, 2L, 1L)); // identical bytes → suppressed
+        sub.submit(CONTRACT, channel(), bundle(proof, 1, 2L, 1L), null);
+        sub.submit(CONTRACT, channel(), bundle(proof, 1, 2L, 1L), null); // identical bytes → suppressed
         // A bundle with distinct bytes for the same channel is NOT suppressed.
-        sub.submit(CONTRACT, channel(), bundle(Bytes.wrap(new byte[] {0x09}), 1, 3L, 2L));
+        sub.submit(CONTRACT, channel(), bundle(Bytes.wrap(new byte[] {0x09}), 1, 3L, 2L), null);
 
         final String out = PrometheusExporter.render(metrics);
         assertThat(out).contains("clpr_evm_tx_queue_deduped{channel_id=\"" + conn + "\"} 1");
@@ -432,9 +433,9 @@ class AccountTransactionSubmitterTest {
         // Re-offer matches a bundle at the HEAD (not the tail): the hash-set index must catch any
         // queued entry, not just the most recent one.
         final Bytes first = Bytes.wrap(new byte[] {0x01});
-        sub.submit(CONTRACT, channel(), bundle(first, 1, 2L, 1L));
-        sub.submit(CONTRACT, channel(), bundle(Bytes.wrap(new byte[] {0x02}), 1, 3L, 2L));
-        sub.submit(CONTRACT, channel(), bundle(first, 1, 2L, 1L)); // duplicate of the head → suppressed
+        sub.submit(CONTRACT, channel(), bundle(first, 1, 2L, 1L), null);
+        sub.submit(CONTRACT, channel(), bundle(Bytes.wrap(new byte[] {0x02}), 1, 3L, 2L), null);
+        sub.submit(CONTRACT, channel(), bundle(first, 1, 2L, 1L), null); // duplicate of the head → suppressed
 
         final String out = PrometheusExporter.render(metrics);
         assertThat(out).contains("clpr_evm_tx_queue_deduped{channel_id=\"" + conn + "\"} 1");
@@ -456,9 +457,9 @@ class AccountTransactionSubmitterTest {
         try {
             // Same bundle submitted, drained by the worker, then submitted again: once the first copy
             // has left the queue the identical re-offer is NOT a duplicate and must enqueue + send.
-            sub.submit(CONTRACT, channel(), bundle(Bytes.wrap(new byte[] {0x01}), 1, 2L, 1L));
+            sub.submit(CONTRACT, channel(), bundle(Bytes.wrap(new byte[] {0x01}), 1, 2L, 1L), null);
             Thread.sleep(150); // let the worker drain the first before the second arrives
-            sub.submit(CONTRACT, channel(), bundle(Bytes.wrap(new byte[] {0x01}), 1, 2L, 1L));
+            sub.submit(CONTRACT, channel(), bundle(Bytes.wrap(new byte[] {0x01}), 1, 2L, 1L), null);
             assertThat(rpc.sendLatch.await(5, TimeUnit.SECONDS)).isTrue();
         } finally {
             sub.stop();
@@ -478,10 +479,12 @@ class AccountTransactionSubmitterTest {
                 .submit(
                         CONTRACT,
                         channel(),
-                        bundle(Bytes.wrap(new byte[] {0x01}), 1, 1L, 0L, ClprChannelStatus.ACTIVE));
+                        bundle(Bytes.wrap(new byte[] {0x01}), 1, 1L, 0L, ClprChannelStatus.ACTIVE),
+                        null);
 
         assertThat(PrometheusExporter.render(metrics))
-                .contains("clpr_sync_bundle_skipped{channel_id=\"" + label(conn32()) + "\",reason=\"empty\"} 1");
+                .contains("clpr_sync_bundle_skipped{channel_id=\"" + label(conn32())
+                        + "\",peer=\"anonymous\",reason=\"empty\"} 1");
     }
 
     @Test
@@ -495,13 +498,16 @@ class AccountTransactionSubmitterTest {
             // A status-only close rides at next=1/acked=0 on a never-used channel but conveys
             // CLOSING — it must be submitted (the empty-bundle guard is ACTIVE-only), not dropped.
             sub.submit(
-                    CONTRACT, channel(), bundle(Bytes.wrap(new byte[] {0x01}), 0, 1L, 0L, ClprChannelStatus.CLOSING));
+                    CONTRACT,
+                    channel(),
+                    bundle(Bytes.wrap(new byte[] {0x01}), 0, 1L, 0L, ClprChannelStatus.CLOSING),
+                    null);
 
             assertThat(rpc.sendLatch.await(5, TimeUnit.SECONDS)).isTrue();
             assertThat(rpc.sendRawCalls.get()).isEqualTo(1);
             assertThat(PrometheusExporter.render(metrics))
-                    .doesNotContain(
-                            "clpr_sync_bundle_skipped{channel_id=\"" + label(conn32()) + "\",reason=\"empty\"}");
+                    .doesNotContain("clpr_sync_bundle_skipped{channel_id=\"" + label(conn32())
+                            + "\",peer=\"anonymous\",reason=\"empty\"}");
         } finally {
             sub.stop();
         }
@@ -520,8 +526,8 @@ class AccountTransactionSubmitterTest {
         sub.start();
         try {
             // Distinct proofs so the previews are distinguishable and the enqueue order is checkable.
-            sub.submit(CONTRACT, channel(), bundle(Bytes.wrap(new byte[] {0x0a, 0x0a, 0x0a, 0x0a}), 1, 2L, 1L));
-            sub.submit(CONTRACT, channel(), bundle(Bytes.wrap(new byte[] {0x0b, 0x0b, 0x0b, 0x0b}), 1, 3L, 2L));
+            sub.submit(CONTRACT, channel(), bundle(Bytes.wrap(new byte[] {0x0a, 0x0a, 0x0a, 0x0a}), 1, 2L, 1L), null);
+            sub.submit(CONTRACT, channel(), bundle(Bytes.wrap(new byte[] {0x0b, 0x0b, 0x0b, 0x0b}), 1, 3L, 2L), null);
 
             assertThat(rpc.sendLatch.await(5, TimeUnit.SECONDS)).isTrue();
 
@@ -550,15 +556,18 @@ class AccountTransactionSubmitterTest {
         sub.submit(
                 CONTRACT,
                 connA,
-                bundle(Bytes.wrap(new byte[] {(byte) 0xa1, (byte) 0xa1, (byte) 0xa1, (byte) 0xa1}), 1, 2L, 1L));
+                bundle(Bytes.wrap(new byte[] {(byte) 0xa1, (byte) 0xa1, (byte) 0xa1, (byte) 0xa1}), 1, 2L, 1L),
+                null);
         sub.submit(
                 CONTRACT,
                 connA,
-                bundle(Bytes.wrap(new byte[] {(byte) 0xa2, (byte) 0xa2, (byte) 0xa2, (byte) 0xa2}), 1, 3L, 2L));
+                bundle(Bytes.wrap(new byte[] {(byte) 0xa2, (byte) 0xa2, (byte) 0xa2, (byte) 0xa2}), 1, 3L, 2L),
+                null);
         sub.submit(
                 CONTRACT,
                 connB,
-                bundle(Bytes.wrap(new byte[] {(byte) 0xb1, (byte) 0xb1, (byte) 0xb1, (byte) 0xb1}), 1, 2L, 1L));
+                bundle(Bytes.wrap(new byte[] {(byte) 0xb1, (byte) 0xb1, (byte) 0xb1, (byte) 0xb1}), 1, 2L, 1L),
+                null);
         sub.start();
         try {
             assertThat(rpc.sendLatch.await(5, TimeUnit.SECONDS)).isTrue();
@@ -605,9 +614,9 @@ class AccountTransactionSubmitterTest {
         sub.start();
         try {
             for (int c = 0; c < connectionCount; c++) {
-                final var conn = connectionWithIndex(c);
+                final var channel = channelWithIndex(c);
                 for (int b = 0; b < bundlesPerConnection; b++) {
-                    sub.submit(CONTRACT, conn, bundleForIndex(c, b));
+                    sub.submit(CONTRACT, channel.channelId(), bundleForIndex(c, b), null);
                 }
             }
 

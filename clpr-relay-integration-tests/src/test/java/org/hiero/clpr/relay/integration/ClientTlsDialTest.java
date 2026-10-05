@@ -94,6 +94,7 @@ class ClientTlsDialTest {
                             "127.0.0.1",
                             expiredPeer.port(),
                             ClprSyncPayload.newBuilder().build(),
+                            reply -> ClprSyncPayload.newBuilder().build(),
                             Bytes.wrap(CertFixtures.CA_A_CERT_DER)))
                     .isInstanceOf(StatusRuntimeException.class);
         }
@@ -114,6 +115,7 @@ class ClientTlsDialTest {
                             "127.0.0.1",
                             wrongCaPeer.port(),
                             ClprSyncPayload.newBuilder().build(),
+                            reply -> ClprSyncPayload.newBuilder().build(),
                             Bytes.wrap(CertFixtures.CA_A_CERT_DER)))
                     .isInstanceOf(StatusRuntimeException.class);
         }

@@ -16,5 +16,6 @@ module org.hiero.clpr.relay.evm {
     exports org.hiero.clpr.relay.evm.model;
     exports org.hiero.clpr.relay.evm.sei;
     exports org.hiero.clpr.relay.evm.storage;
+    exports org.hiero.clpr.relay.evm.qbft;
     exports org.hiero.clpr.relay.evm.beacon;
 }

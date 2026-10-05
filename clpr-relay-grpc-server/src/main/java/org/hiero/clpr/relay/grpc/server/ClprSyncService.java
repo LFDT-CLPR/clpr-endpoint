@@ -17,10 +17,14 @@ import org.hiero.clpr.relay.core.PeerEndpointTlsRegistry;
 import org.jspecify.annotations.Nullable;
 
 /**
- * Data-plane {@link ServiceInterface} for the CLPR endpoint service: the {@code sync} RPC only. Hosted
- * on the plaintext ({@code plain}) and mandatory-mTLS ({@code secure}) listeners. The
- * {@code discoverEndpoints} and {@code getLedgerConfiguration} RPCs are served on a separate info
- * listener.
+ * Data-plane {@link ServiceInterface} for the CLPR endpoint service: the two-phase {@code sync}
+ * bidirectional-streaming RPC. Hosted on the plaintext ({@code plain}) and mandatory-mTLS
+ * ({@code secure}) listeners. The {@code discoverEndpoints} and {@code getLedgerConfiguration} RPCs
+ * are served on a separate info listener.
+ *
+ * <p>On the mandatory-mTLS listener the dialer has already been proven to hold a roster-registered
+ * certificate; each accepted stream resolves <em>which</em> registered endpoint that is from the client
+ * leaf certificate (via {@link PeerEndpointTlsRegistry#matchByCa}) and hands it to the session.
  */
 public final class ClprSyncService implements ServiceInterface {
 
@@ -35,10 +39,9 @@ public final class ClprSyncService implements ServiceInterface {
     private final PeerEndpointTlsRegistry tlsRegistry;
 
     /**
-     * @param syncHandler the handler for sync RPCs
-     * @param tlsRegistry global registry of peer TLS CA certificates; used to resolve the
-     *                    authenticated peer from the mutual-TLS client certificate on each incoming
-     *                    sync RPC
+     * @param syncHandler the factory for the two-phase {@code sync} bidirectional-streaming sessions
+     * @param tlsRegistry global registry of peer TLS CA certificates; used to resolve the authenticated
+     *                    peer from the mutual-TLS client certificate on each incoming sync stream
      */
     public ClprSyncService(final ClprSyncHandler syncHandler, final PeerEndpointTlsRegistry tlsRegistry) {
         this.syncHandler = syncHandler;
@@ -68,17 +71,25 @@ public final class ClprSyncService implements ServiceInterface {
             throw new GrpcException(
                     GrpcStatus.UNIMPLEMENTED, "method not served on the sync listener: " + method.name());
         }
+        return openSync(opts, responses);
+    }
 
-        // Resolve the authenticated peer once per RPC. On the mandatory-mTLS listener the dialer has
-        // already been proven to hold a roster-registered certificate; this names which endpoint it is.
-        // Null for a plaintext dial, or an mTLS certificate that matches no roster entry.
+    /**
+     * Opens a bidirectional-streaming pipeline for the two-phase {@code sync} RPC.
+     *
+     * <p>Resolves the authenticated peer once per RPC — on the mandatory-mTLS listener this names which
+     * registered endpoint the (already-proven) dialer is; {@code null} for a plaintext dial or an mTLS
+     * certificate that matches no roster entry — then hands each accepted stream to a fresh
+     * {@link ClprSyncSession}. PBJ invokes the {@code method} function with the outbound response pipeline
+     * and expects back the inbound request pipeline — here, the session.
+     */
+    private Pipeline<? super Bytes> openSync(final RequestOptions opts, final Pipeline<? super Bytes> responses) {
         final ClprEndpoint peer = peer(leafCertificate(opts)).orElse(null);
-
         final var isProtobuf = opts.isProtobuf();
-        return Pipelines.<ClprSyncPayload, ClprSyncPayload>unary()
+        return Pipelines.<ClprSyncPayload, ClprSyncPayload>bidiStreaming()
                 .mapRequest(
                         bytes -> isProtobuf ? ClprSyncPayload.PROTOBUF.parse(bytes) : ClprSyncPayload.JSON.parse(bytes))
-                .method(payload -> syncHandler.handleSync(payload, peer))
+                .method(out -> syncHandler.newSession(out, peer))
                 .mapResponse(reply -> isProtobuf
                         ? ClprSyncPayload.PROTOBUF.toBytes(reply)
                         : Bytes.wrap(ClprSyncPayload.JSON.toJSON(reply)))

@@ -14,12 +14,16 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.condition.EnabledIfEnvironmentVariable;
 
 /**
- * A CLOSING channel must NOT be rejected at gate 0 of {@code ClprSyncHandler} — only CLOSED/PENDING are. The
- * relay must keep serving CLOSING (returning a signed reciprocal proof) so lifecycle status can propagate.
+ * A CLOSING channel must keep being served by the inbound sync responder: when the relay answers the
+ * peer's request via {@code createBundle}, a CLOSING (or DRAINED) status is itself something the peer
+ * must receive, so the bundle is built with the relay's lifecycle status rather than suppressed to an
+ * empty payload the way a settled ACTIVE channel is. (A CLOSED channel conveys no lifecycle and a
+ * PENDING one has no on-chain record, so those two do yield nothing.)
  *
- * <p>Drives the channel to CLOSING with a single relay + admin close (no second relay), then injects an
- * authenticated empty-bundle ping via {@link #poke} and asserts the relay answers with a signed proof
- * (65-byte endpoint signature) rather than an empty-proof rejection.
+ * <p>Drives the channel to CLOSING with a single relay + admin close (no second relay), then sends an
+ * authenticated empty-payload request via {@link #poke} and asserts the relay answers with a non-empty
+ * status bundle rather than an empty payload. Peer identity is the mTLS roster-CA check on the data
+ * plane — there is no payload-level endpoint signature.
  */
 @EnabledIfEnvironmentVariable(named = "RUN_INTEGRATION_TESTS", matches = ".*")
 class ClosingChannelSyncStubPeerTest extends OneSidedStubPeerTestBase {
@@ -38,11 +42,12 @@ class ClosingChannelSyncStubPeerTest extends OneSidedStubPeerTestBase {
         TestConditions.awaitStatusIn(
                 interactor, channelId, EnumSet.of(ClprChannelStatus.CLOSING, ClprChannelStatus.DRAINED), TIMEOUT);
 
-        // Authenticated empty-bundle sync: the relay skips submission but must still return a signed proof.
+        // Authenticated empty-payload request: nothing is submitted, but the relay must still answer the
+        // request with a non-empty reciprocal carrying its CLOSING status.
         final ClprSyncPayload reply = poke(Bytes.EMPTY);
 
-        assertThat(reply.bundlePayload().length())
-                .as("CLOSING channel must not be rejected at gate 0 — relay must return a signed proof")
+        assertThat(replyBundle(reply).length())
+                .as("a CLOSING channel must be served — the relay must answer with a non-empty status bundle")
                 .isGreaterThan(0L);
     }
 }

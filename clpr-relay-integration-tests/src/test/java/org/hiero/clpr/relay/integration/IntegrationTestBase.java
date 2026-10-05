@@ -175,16 +175,33 @@ abstract class IntegrationTestBase {
         // Relay B signs/submits as Anvil dev account 1 (distinct from relay A's account 0) so the
         // two relays don't race the shared dev-account nonce. Secure relays bind an mTLS-only sync
         // listener on portA/portB (the same port each chain's roster advertises as the dial target).
-        final var connsA = List.of(Triple.of(channelIdHex, contractsA.clprServiceAddress(), ProofType.QBFT));
-        final var connsB = List.of(Triple.of(channelIdHex, contractsB.clprServiceAddress(), ProofType.QBFT));
+        // Both relays are real, but the on-chain channel verifier is StubClprVerifier (the suite deploys
+        // only mock/stub verifiers — Anvil is not a real QBFT chain). So each relay both builds
+        // (local proof type) and parses (peerProofType) CLPRSTUB bundles: StubBundleConstructor reads
+        // real channel state and emits "CLPRSTUB || protobuf(ClprBundleContent)", which the receiving
+        // relay submits verbatim and StubClprVerifier accepts.
+        final var connsA = List.of(Triple.of(channelIdHex, contractsA.clprServiceAddress(), ProofType.Stub));
+        final var connsB = List.of(Triple.of(channelIdHex, contractsB.clprServiceAddress(), ProofType.Stub));
         final RelayConfig configA = secure
                 ? RelayTestSupport.secureRelayConfig(
-                        ANVIL.jsonRpcUrl(), portA, certA.keyPath().toString(), AnvilContainer.DEV_PRIVATE_KEY, connsA)
-                : RelayTestSupport.relayConfig(ANVIL.jsonRpcUrl(), portA, AnvilContainer.DEV_PRIVATE_KEY, connsA);
+                        ANVIL.jsonRpcUrl(),
+                        portA,
+                        certA.keyPath().toString(),
+                        AnvilContainer.DEV_PRIVATE_KEY,
+                        connsA,
+                        ProofType.Stub)
+                : RelayTestSupport.relayConfig(
+                        ANVIL.jsonRpcUrl(), portA, AnvilContainer.DEV_PRIVATE_KEY, connsA, ProofType.Stub);
         final RelayConfig configB = secure
                 ? RelayTestSupport.secureRelayConfig(
-                        ANVIL.jsonRpcUrl(), portB, certB.keyPath().toString(), AnvilContainer.DEV_PRIVATE_KEY_2, connsB)
-                : RelayTestSupport.relayConfig(ANVIL.jsonRpcUrl(), portB, AnvilContainer.DEV_PRIVATE_KEY_2, connsB);
+                        ANVIL.jsonRpcUrl(),
+                        portB,
+                        certB.keyPath().toString(),
+                        AnvilContainer.DEV_PRIVATE_KEY_2,
+                        connsB,
+                        ProofType.Stub)
+                : RelayTestSupport.relayConfig(
+                        ANVIL.jsonRpcUrl(), portB, AnvilContainer.DEV_PRIVATE_KEY_2, connsB, ProofType.Stub);
 
         relayA = RelayTestSupport.buildRelay(configA, "A");
         relayB = RelayTestSupport.buildRelay(configB, "B");

@@ -578,49 +578,51 @@ section #4.
 2. **Section 7 item 5** — no final close-notification bundle; relay stops on CLOSED.
 3. **Section 6 item 1** — `channel_id` length is not validated.
 4. **Section 2 item 8** — `nextMessageId` uses on-chain frontier, not `last_included + 1`.
-5. **Section 2 item 14 / Bundle Progress Criteria** — the outbound
-   pre-check does not honor the five criteria as stated in §2.1.2:
-   * **Criterion 3 (ack progress)** is over-permissive — both proof-type
-     constructors treat `connection.receivedMessageId() > 0` as
-     sufficient ack progress (`QbftBundleConstructor.java:261`;
-     `SeiBundleConstructor.java:271`), rather than "advanced since last
-     cycle". A `hasStateChanged()` gate at
-     `EvmConnectionStateChangeTask.java:340` does perform a delta
-     comparison against the previous `ClprConnection` snapshot, so the
-     constructor is not re-invoked on an idle cycle; but the constructor
-     itself has no cached prior value and, once entered for any reason,
-     treats any non-zero ack as reason to build.
+5. **Section 2 item 14 / Bundle Progress Criteria** — in the two-phase
+   pull model a bundle is built on demand inside
+   `BundleConstructor.createBundle(channelId, request)` from the peer's
+   `BundleRequest`; there is no push-based `onStateChanged` pre-check any
+   more (canonical description: `docs/sync-protocol.md` → "Progress
+   criteria — when the payload is non-empty"). Measured against §2.1.2's
+   five criteria:
+   * **Criterion 2 (trust-anchor advancement)** — now honored on both
+     paths, and the move to pull resolved the old gap. The peer states
+     its `current_trust_anchor_id` in the request, so when it is behind,
+     catch-up evidence is included and the payload is non-empty (QBFT
+     epoch headers, `QbftBundleConstructor.java:267`; Sei validator-set
+     updates / rotation, `SeiBundleConstructor.java:346-347`). The former
+     push path could miss this because its change check excluded the
+     trust anchor; a request-driven build cannot.
+   * **Criterion 3 (ack progress)** is over-permissive — both
+     constructors treat `channel.receivedMessageId() > 0` as sufficient
+     ack progress (`QbftBundleConstructor.java:268`;
+     `SeiBundleConstructor.java:348`), rather than "advanced since the
+     peer's last request". The responder holds no per-peer prior value,
+     so any non-zero ack builds a metadata-only bundle.
    * **Criterion 4 (channel-state transition, QBFT path)** — the
      `conveysLifecycle` flag treats only `CLOSING` / `DRAINED` as a
-     lifecycle-carrying status, so the `DRAINED → CLOSED` sub-condition
+     lifecycle-carrying status, so the `DRAINED → CLOSED` sub-transition
      never triggers construction on its own
-     (`QbftBundleConstructor.java:257-258, 259-268`).
+     (`QbftBundleConstructor.java:265-269`).
    * **Criterion 4 (channel-state transition, Sei path)** — no
-     lifecycle-status check exists in the skip condition; the Sei
+     lifecycle-status term exists in the skip condition, so the Sei
      constructor never fires solely on a channel-state transition
-     (`SeiBundleConstructor.java:268-275`, entire
-     `onStateChanged` path at `:159-245`).
+     (`SeiBundleConstructor.java:345-348`).
    * **Criterion 5 (manifest advancement)** — a manifest-only advance
-     never causes construction to fire (both paths). Manifest-version
-     changes take the `refreshPeerManifest()` branch and deliberately
-     skip `proofConstructor.onStateChanged()`; the manifest proof is
-     only attached inside an already-triggered bundle
-     (`EvmConnectionStateChangeTask.java:271-278`;
-     `QbftBundleConstructor.java:368-392`;
-     `SeiBundleConstructor.java:397-421`).
-   * **Criterion 2 (trust-anchor advancement)** — a pure trust-anchor
-     rotation never causes construction to fire (both paths).
-     `hasStateChanged()` intentionally excludes `trustAnchor`, so
-     `onStateChanged()` is never invoked on rotation alone
-     (`EvmConnectionStateChangeTask.java:340-348, 231-233`;
-     QBFT epoch-header path at
-     `QbftBundleConstructor.java:229-247` is unreachable without the
-     `onStateChanged()` call).
+     never causes construction to fire (both paths). The endpoint-manifest
+     proof is attached only *after* the skip check, riding along an
+     already-triggered bundle — never the sole reason to build one
+     (skip check `QbftBundleConstructor.java:266-276`, manifest step
+     `:362`; skip check `SeiBundleConstructor.java:345-352`, manifest step
+     `:461`).
 6. **Section 4 item 2 / Section 8 items 10–11** — mTLS match is
    union-of-rosters, not per-connection. Documented as TODO in
    `ClprSyncHandler.java:115-120` (it may be impossible to solve).
 7. **Section 4 item 2** — no startup self-check of listen-address / CA vs manifest (there is a ticket for CA, the listener address might be difficult as it might hide behind a LB).
 8. **Section 2 items 4, 5, 6** — outbound bundle construction does not
    honor the peer's advertised throttles. `peerThrottles` is decoded
-   (`EvmContractStateReader.java:232`) but never consumed; bundle limits
-   come from local YAML instead (`ClprConnectionHandler.java:182,196`).
+   (`EvmContractStateReader.java:232`) and stored on the channel state but
+   never consumed; outbound message-count / size limits come from the
+   local ledger configuration instead — the per-format
+   `maxMessagesPerBundle()` passed to each constructor in
+   `ClprChannelHandler.java` (QBFT `:211`, Sei `:229`, beacon `:264`).

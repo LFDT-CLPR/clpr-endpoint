@@ -14,7 +14,7 @@ The relay calls the following Solidity functions on the configured `ClprService`
 |-------------------------------|-------------------------------------------------------|----------------------------------------|
 | `submitBundle(bytes32,bytes)` | Land a peer-supplied bundle for a channel. Spec §6.4. | `AccountTransactionSubmitter` (worker) |
 
-The contract takes only `(channelId, proofBytes)`. There is no endpoint signature: the `endpointSignature` argument was removed from both the contract and the relay's `TransactionSubmitter.submitBundle` / `AbiCodec.encodeSubmitBundle` (see `sync-protocol.md`).
+The contract takes only `(channelId, proofBytes)`. There is no endpoint signature: the `endpointSignature` argument was removed from both the contract and the relay's `AccountTransactionSubmitter.submit` / `AbiCodec.encodeSubmitBundle` (see `sync-protocol.md`).
 
 Other contract write methods (`registerEndpoint`, `registerChannel`, `completeChannel`, `registerConnector`, `completeConnector`, `updateLedgerConfiguration`, `sendMessage`, etc.) are not invoked by the relay process. They are exercised only by integration tests via `clpr-relay-integration-tests/.../ContractInteractor.java`, which acts as an admin/test driver.
 
@@ -61,9 +61,9 @@ Outer offset pointer at word 0 (always 0x20 in practice; read dynamically). Then
 | 14    | peerServiceAddress  | bytes (offset)  | tail-encoded                                                                                |
 | 15–19 | Throttles fields    | uint64 inline   | maxMessagesPerBundle, maxMessagePayloadBytes, maxGasPerMessage, maxQueueDepth, maxSyncBytes |
 | 20    | trustAnchor         | bytes (offset)  | tail-encoded                                                                                |
-| 21    | lastDataMessageId   | uint64          | inline; not modelled by `ClprChannel` — skipped                                             |
+| 21    | lastDataMessageId   | uint64          | inline; not modelled by `ClprChannelOps` — skipped                                          |
 | 22    | trustAnchorId       | bytes (offset)  | tail-encoded                                                                                |
-| 23    | channelContext      | bytes (offset)  | tail-encoded; not modelled by `ClprChannel` — skipped                                       |
+| 23    | channelContext      | bytes (offset)  | tail-encoded; not modelled by `ClprChannelOps` — skipped                                    |
 
 A short return (< 800 bytes) is treated as "channel not found" (`readChannelState` yields an empty `Optional`). The relay also tolerates contract calls that revert or return empty data — they degrade to "no record" with a warn log; the next sync tick retries.
 
@@ -81,7 +81,7 @@ Each endpoint is a tuple `(string ipAddress, uint32 port, bytes tlsCertificate, 
 
 ### QBFT-specific wrapper for `getLedgerConfiguration` gRPC
 
-The gRPC `getLedgerConfiguration` response goes beyond the on-chain struct: it also carries a `QbftLedgerConfigurationPayload`. Assembled by `EvmQbftLedgerConfigurationProvider` (`clpr-relay-evm`, implements `core.LedgerConfigurationPayloadProvider`):
+The gRPC `getLedgerConfiguration` response goes beyond the on-chain struct: it also carries a `QbftLedgerConfigurationPayload`. Assembled by `QbftLedgerConfigurationProvider` (`clpr-relay-evm`, implements `core.LedgerConfigurationPayloadProvider`):
 
 - **`genesis_block_header`** — bytes RLP from `eth_getBlockByNumber("0x0", false)`, encoded by `BlockHeaderRlpCodec.encodeRlp` (the same encoder `QbftBundleConstructor` uses, so the wire form matches the bytes Besu signs when computing the QBFT committed-seal hash). The peer's verifier decodes `extra_data` to recover the initial QBFT validator address.
 - **`current_block_header`** — same encoding for the block at the requested commitment level (`FINALIZED`). Its `state_root` is the verification root for the proofs below.
@@ -119,7 +119,7 @@ There is **no nonce cache or tracker**. Because the `AccountTransactionSubmitter
 
 ### Serialization & duplicate suppression
 
-Submission for one signing account (EOA) is fully serialised by `AccountTransactionSubmitter` — one instance per `(network, account)`, shared by every channel/service that signs from the same key (obtained from `LocalNetworkAdapter.accountSubmitterFor(signer)`; a channel gets its enqueuing `TransactionSubmitter` view from `AccountTransactionSubmitter.forContract(serviceAddress)`):
+Submission for one signing account (EOA) is fully serialised by `AccountTransactionSubmitter` — one instance per `(network, account)`, shared by every channel/service that signs from the same key (obtained from `LocalNetworkAdapter.accountSubmitterFor(signer)`; a channel enqueues onto it through its `ClprChannelHandler.inboundBundleQueue()`, which calls `AccountTransactionSubmitter.submit(serviceAddress, channelId, parsedBundle, peer)`):
 
 - The submitter holds a **bounded FIFO queue per channel** (capacity `LocalNetworkAdapter.PER_CHANNEL_SUBMIT_QUEUE_CAPACITY` = 1024 each) and a **single dedicated worker virtual thread** that drains them **round-robin** — one request per channel per turn. The worker drives one request to a verdict — a mined receipt (success or revert), a definite pre-mempool rejection, a preview skip, an observed on-chain nonce advance, or the `MAX_SUBMIT_ROUNDS` safety valve — re-sending at the same nonce until then, before taking the next. Round-robin is essential: with one shared queue a high-volume channel saturated it and **starved** others (their bundles were always dropped, so they never delivered); per-channel queues guarantee every channel makes progress. The queues hold pending *work* and may exceed one entry; the on-chain **in-flight *transaction* count never does**. This subsumes the old per-*channel* lock and covers channels sharing an EOA in one place.
 - **The chain is the duplicate gate; enqueue dedup is only queue hygiene.** The relay's two delivery paths — the pull `ChannelSyncTask` and the push `ClprSyncHandler` — can both construct a bundle for the same channel state, and both re-offer it every poll while it is undelivered. The send-time preview is the authoritative duplicate gate: because the worker is serial and confirm-before-advance, the second of two overlapping bundles is previewed only *after* the first has mined, so it reverts (`ClprReplayDetected` / running-hash mismatch) and is skipped. On top of that, at **enqueue** the submitter suppresses a bundle whose **exact bytes** are already pending in that channel's queue (`evm.tx.queue_deduped`): without it the FIFO fills with identical re-offered copies and a genuinely-new bundle is dropped at enqueue (this was the cause of a real starvation — see below). Only an empty **ACTIVE** initial-state bundle (`next ≤ 1 && acked == 0` with status `ACTIVE`) is dropped without a preview (`sync.bundle.skipped{reason=empty}`; it would revert `EmptyBundle`). A status-only close (`CLOSING`/`DRAINED`/`CLOSED`) rides at those same counters on a never-used channel and is **not** empty — it is always submitted so the lifecycle can advance. There is **no coalescing** within a channel — order is preserved and a valid queued bundle is never displaced. When a *single* channel's queue is full its *new* request is dropped (`evm.tx.queue_dropped`), affecting only that channel.
@@ -127,7 +127,7 @@ Submission for one signing account (EOA) is fully serialised by `AccountTransact
 
 ## Why polling, not events
 
-The deployed `ClprService` contract does emit Solidity events for some lifecycle changes, but the relay does not subscribe to them. Each channel's `EvmChannelStateChangeTask` (owned by its `ClprChannelHandler`) polls `getChannel` on a timer (one virtual thread per channel) and signals progress when `nextMessageId` advances or `ackedMessageId` advances. Reasons:
+The deployed `ClprService` contract does emit Solidity events for some lifecycle changes, but the relay does not subscribe to them. Each channel's `EndpointManifestRefreshTask` (owned by its `ClprChannelHandler`) polls the on-ledger peer endpoint manifest on a timer (one virtual thread per channel) and refreshes the peer cache when its version advances. (Queue/lifecycle state is no longer polled — in the two-phase protocol a peer's own `BundleRequest` states what it needs, and bundles are built ad hoc via `createBundle`.) Reasons the relay polls rather than subscribing to events:
 
 - The relay must support EVM gateways that do not expose reliable WebSocket subscriptions.
 - Polling at the configured `commitmentLevel` makes the reorg story trivial — we only act on confirmations.

@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 package org.hiero.clpr.relay.app;
 
+import com.hedera.hapi.node.state.clpr.BundleRequest;
+import com.hedera.hapi.node.state.clpr.ClprChannelStatus;
 import com.hedera.hapi.node.state.clpr.ClprEndpointManifest;
 import com.hedera.pbj.runtime.io.buffer.Bytes;
 import com.swirlds.base.context.Context;
@@ -8,36 +10,42 @@ import com.swirlds.logging.api.Logger;
 import com.swirlds.logging.api.Loggers;
 import com.swirlds.metrics.api.Metrics;
 import java.time.Duration;
-import java.util.function.UnaryOperator;
+import java.util.function.LongSupplier;
 import org.hiero.clpr.relay.core.BundleConstructor;
 import org.hiero.clpr.relay.core.BundlePayloadCodec;
+import org.hiero.clpr.relay.core.BundleRequestConstructor;
+import org.hiero.clpr.relay.core.CachedBundleConstructor;
+import org.hiero.clpr.relay.core.ClprChannelOps;
 import org.hiero.clpr.relay.core.CommitmentLevel;
 import org.hiero.clpr.relay.core.ContractStateReader;
 import org.hiero.clpr.relay.core.FailState;
 import org.hiero.clpr.relay.core.HieroProofCodec;
+import org.hiero.clpr.relay.core.InboundBundleQueue;
 import org.hiero.clpr.relay.core.LedgerConfigurationPayloadProvider;
+import org.hiero.clpr.relay.core.ParsedBundle;
 import org.hiero.clpr.relay.core.PeerEndpointCache;
 import org.hiero.clpr.relay.core.PeerEndpointTlsRegistry;
-import org.hiero.clpr.relay.core.PeerManifestVersionCache;
 import org.hiero.clpr.relay.core.RelayProtocol;
-import org.hiero.clpr.relay.core.TransactionSubmitter;
+import org.hiero.clpr.relay.core.StubBundleConstructor;
+import org.hiero.clpr.relay.core.StubProofCodec;
+import org.hiero.clpr.relay.core.ThrottleEnforcer;
 import org.hiero.clpr.relay.core.metrics.LabeledCounter;
+import org.hiero.clpr.relay.evm.AccountTransactionSubmitter;
+import org.hiero.clpr.relay.evm.EndpointManifestRefreshTask;
 import org.hiero.clpr.relay.evm.EthSigner;
 import org.hiero.clpr.relay.evm.EthereumPosBundleConstructor;
 import org.hiero.clpr.relay.evm.EthereumPosLedgerConfigurationProvider;
 import org.hiero.clpr.relay.evm.EthereumPosProofCodec;
-import org.hiero.clpr.relay.evm.EvmChannelStateChangeTask;
 import org.hiero.clpr.relay.evm.EvmContractStateReader;
-import org.hiero.clpr.relay.evm.EvmQbftLedgerConfigurationProvider;
-import org.hiero.clpr.relay.evm.QbftBundleConstructor;
-import org.hiero.clpr.relay.evm.QbftProofCodec;
 import org.hiero.clpr.relay.evm.beacon.BeaconApiClient;
 import org.hiero.clpr.relay.evm.model.Address;
+import org.hiero.clpr.relay.evm.qbft.QbftBundleConstructor;
+import org.hiero.clpr.relay.evm.qbft.QbftLedgerConfigurationProvider;
+import org.hiero.clpr.relay.evm.qbft.QbftProofCodec;
 import org.hiero.clpr.relay.evm.sei.SeiBundleConstructor;
 import org.hiero.clpr.relay.evm.sei.SeiLedgerConfigurationProvider;
 import org.hiero.clpr.relay.evm.sei.SeiProofCodec;
 import org.hiero.clpr.relay.grpc.client.ClprEndpointClient;
-import org.hiero.clpr.relay.grpc.server.ThrottleEnforcer;
 import org.hiero.clpr.relay.sync.ChannelSyncTask;
 import org.hiero.clpr.relay.sync.PeerSelector;
 import org.jspecify.annotations.Nullable;
@@ -47,7 +55,7 @@ import org.jspecify.annotations.Nullable;
  * channel: the contract state reader, transaction submitter, bundle constructor, ledger-config
  * provider, peer endpoint cache, inbound throttle enforcer, inbound proof codec, and the two worker
  * loops it spawns — the outbound {@link ChannelSyncTask} and the on-chain
- * {@link EvmChannelStateChangeTask}. Handlers are created and managed by a
+ * {@link EndpointManifestRefreshTask}. Handlers are created and managed by a
  * {@link ClprServiceHandler}, one per {@code ClprService} deployment.
  *
  * <p>Construction ({@link #create}) performs the blocking JSON-RPC reads needed to bring the
@@ -56,48 +64,60 @@ import org.jspecify.annotations.Nullable;
  * half-wired handler is ever published; the caller (predefined wiring or discovery) simply retries.
  * The handler spawns no threads until {@link #start(boolean)} is called.
  */
-public final class ClprChannelHandler {
+public final class ClprChannelHandler implements ClprChannelOps {
 
     private static final Logger log = Loggers.getLogger(ClprChannelHandler.class);
 
     private final Bytes channelId;
+    private final String serviceAddress;
     private final CommitmentLevel commitmentLevel;
 
     private final EvmContractStateReader stateReader;
-    private final TransactionSubmitter txSubmitter;
+    private final AccountTransactionSubmitter txSubmitter;
     private final BundleConstructor bundleConstructor;
     private final LedgerConfigurationPayloadProvider ledgerConfigProvider;
     private final PeerEndpointCache peerCache;
     private final ThrottleEnforcer throttleEnforcer;
     private final BundlePayloadCodec inboundCodec;
 
-    private final ChannelSyncTask syncTask;
-    private final EvmChannelStateChangeTask stateChangeTask;
+    private final Metrics metrics;
+    private final LabeledCounter bundleEnqueued;
+    private final RelayConfig.BackoffConfig backoffConfig;
+    private final ClprEndpointClient clprEndpointClient;
+    private final PeerEndpointTlsRegistry tlsRegistry;
+    private final RelayConfig.CommonEvmParams evmParams;
+    private final long syncIntervalMs;
+
+    @Nullable
+    private ChannelSyncTask syncTask;
+
+    @Nullable
+    private EndpointManifestRefreshTask manifestRefreshTask;
+
     private final String instanceName;
-
-    // Handles to the child threads this handler spawns in start(); null until started.
-    @Nullable
-    private volatile Thread syncThread;
-
-    @Nullable
-    private volatile Thread stateChangeThread;
 
     private volatile boolean started;
 
     private ClprChannelHandler(
             final Bytes channelId,
+            final String serviceAddress,
             final CommitmentLevel commitmentLevel,
             final EvmContractStateReader stateReader,
-            final TransactionSubmitter txSubmitter,
+            final AccountTransactionSubmitter txSubmitter,
             final BundleConstructor bundleConstructor,
             final LedgerConfigurationPayloadProvider ledgerConfigProvider,
             final PeerEndpointCache peerCache,
             final ThrottleEnforcer throttleEnforcer,
             final BundlePayloadCodec inboundCodec,
-            final ChannelSyncTask syncTask,
-            final EvmChannelStateChangeTask stateChangeTask,
+            final Metrics metrics,
+            final RelayConfig.BackoffConfig backoffConfig,
+            final ClprEndpointClient clprEndpointClient,
+            final PeerEndpointTlsRegistry tlsRegistry,
+            final RelayConfig.CommonEvmParams evmParams,
+            final long syncIntervalMs,
             final String instanceName) {
         this.channelId = channelId;
+        this.serviceAddress = serviceAddress;
         this.commitmentLevel = commitmentLevel;
         this.stateReader = stateReader;
         this.txSubmitter = txSubmitter;
@@ -106,8 +126,17 @@ public final class ClprChannelHandler {
         this.peerCache = peerCache;
         this.throttleEnforcer = throttleEnforcer;
         this.inboundCodec = inboundCodec;
-        this.syncTask = syncTask;
-        this.stateChangeTask = stateChangeTask;
+        this.metrics = metrics;
+        this.bundleEnqueued = new LabeledCounter(
+                "sync",
+                "bundle.enqueued",
+                "Inbound peer bundles accepted onto the submit queue (passed parse + throttle)",
+                metrics);
+        this.backoffConfig = backoffConfig;
+        this.clprEndpointClient = clprEndpointClient;
+        this.tlsRegistry = tlsRegistry;
+        this.evmParams = evmParams;
+        this.syncIntervalMs = syncIntervalMs;
         this.instanceName = instanceName;
     }
 
@@ -126,11 +155,7 @@ public final class ClprChannelHandler {
      * @param metrics            metrics registry
      * @param backoff            per-loop failure-backoff policy
      * @param instanceName       worker-loop log-context label; a blank value adds no context entry
-     * @param submitterDecorator wraps the per-account submitter's channel view
-     *                           ({@link UnaryOperator#identity()} in production)
      * @param clprEndpointClient outbound gRPC client used by the sync loop
-     * @param peerManifestVersions global cache of the endpoint-manifest version each peer last
-     *                           reported holding, consumed by the QBFT bundle constructor
      * @param tlsRegistry        global TLS registry updated alongside the peer cache on every
      *                           manifest change and at bootstrap
      * @return a not-yet-started channel handler
@@ -147,9 +172,7 @@ public final class ClprChannelHandler {
             final Metrics metrics,
             final RelayConfig.BackoffConfig backoff,
             final String instanceName,
-            final UnaryOperator<TransactionSubmitter> submitterDecorator,
             final ClprEndpointClient clprEndpointClient,
-            final PeerManifestVersionCache peerManifestVersions,
             final PeerEndpointTlsRegistry tlsRegistry) {
 
         final var evmParams = network.config().evm();
@@ -166,30 +189,35 @@ public final class ClprChannelHandler {
 
         // Share the per-account submitter across every channel/service on this network that signs
         // from the same key. It fully serialises submission (at most one tx per account in flight, so no
-        // nonce tracking is needed) and runs the gas-free eth_call preview per request. submitterDecorator
-        // is identity in production; the integration suite injects the CLPRSTUB re-encoder here, so the
-        // re-encode runs first and the submitter's preview simulates the exact bytes it will submit
-        // against the StubClprVerifier.
-        final TransactionSubmitter txSubmitter =
-                submitterDecorator.apply(network.accountSubmitterFor(signer).forContract(serviceAddress));
+        // nonce tracking is needed) and runs the gas-free eth_call preview per request.
+        final AccountTransactionSubmitter txSubmitter = network.accountSubmitterFor(signer);
 
         final var clprServiceAddress = Address.fromHexString(serviceAddress);
 
-        final BundleConstructor bundleConstructor;
+        // The head read the decorator uses to key the cache must match the height each constructor
+        // proves against: QBFT proves against the commitment head (no lag), Sei backs off proofLagBlocks.
+        final BundleConstructor rawBundleConstructor;
+        // Null for proof types that read at a commitment tag rather than a numeric height (Stub):
+        // those are left unwrapped by CachedBundleConstructor below.
+        final @Nullable LongSupplier localChainHeight;
         final LedgerConfigurationPayloadProvider ledgerConfigProvider;
         switch (network.proofType()) {
             case QBFT -> {
                 final var qbft = network.config().qbft();
-                bundleConstructor = new QbftBundleConstructor(
+                rawBundleConstructor = new QbftBundleConstructor(
                         clprServiceAddress,
                         qbft.epochLength(),
                         qbft.maxEpochBlockHeadersPerBundle(),
                         qbft.maxMessagesPerBundle(),
                         rpcClient,
                         stateReader,
-                        peerManifestVersions,
+                        commitmentLevel,
                         qbft.maxBundleSize());
-                ledgerConfigProvider = new EvmQbftLedgerConfigurationProvider(
+                localChainHeight = () -> rpcClient
+                        .ethGetBlockHeaderByNumber(commitmentLevel.toBlockTag())
+                        .number()
+                        .longValueExact();
+                ledgerConfigProvider = new QbftLedgerConfigurationProvider(
                         rpcClient, stateReader, clprServiceAddress, qbft.epochLength());
             }
             case CometBFT -> {
@@ -197,34 +225,65 @@ public final class ClprChannelHandler {
                 final var cometBftRpcClient = network.cometBftRpcClient()
                         .orElseThrow(() -> new IllegalStateException(
                                 "CometBFT network '" + network.id() + "' has no CometBFT RPC client"));
-                bundleConstructor = new SeiBundleConstructor(
+                rawBundleConstructor = new SeiBundleConstructor(
                         clprServiceAddress,
                         cometBft.maxMessagesPerBundle(),
                         cometBft.maxPriorValidatorSetUpdates(),
                         cometBftRpcClient,
+                        rpcClient,
                         stateReader,
-                        peerManifestVersions,
+                        commitmentLevel,
+                        proofLagBlocks,
                         cometBft.maxBundleSize());
+                localChainHeight = () -> rpcClient
+                                .ethGetBlockHeaderByNumber(commitmentLevel.toBlockTag())
+                                .number()
+                                .longValueExact()
+                        - proofLagBlocks;
                 ledgerConfigProvider = new SeiLedgerConfigurationProvider(rpcClient, stateReader, cometBftRpcClient);
+            }
+            case Stub -> {
+                // Test-only local network: build CLPRSTUB bundles from real channel state for the
+                // StubClprVerifier, exercising the full two-phase sync + submission path without a real
+                // proof. The stub reads at a commitment tag and reports no numeric height, so it is
+                // deliberately left unwrapped by CachedBundleConstructor (its height sentinel would
+                // otherwise collide across chain heights and serve stale bundles).
+                rawBundleConstructor = new StubBundleConstructor(stateReader, commitmentLevel);
+                localChainHeight = null;
+                // getLedgerConfiguration has no meaning for a stub network (the sync path never calls
+                // it; it is exposed only on the info plane), so fail loudly if a tool ever asks.
+                ledgerConfigProvider = commitment -> {
+                    throw new UnsupportedOperationException(
+                            "getLedgerConfiguration is not supported for a Stub local network");
+                };
             }
             case EthereumPOS -> {
                 final var beacon = network.config().beacon();
                 final var beaconClient = new BeaconApiClient(
                         beacon.beaconApiUrl(), beacon.maxRetries(), Duration.ofMillis(beacon.requestTimeoutMs()));
-                bundleConstructor = new EthereumPosBundleConstructor(
+                rawBundleConstructor = new EthereumPosBundleConstructor(
                         clprServiceAddress,
                         beacon.maxMessagesPerBundle(),
                         rpcClient,
                         beaconClient,
                         stateReader,
-                        peerManifestVersions);
-
+                        commitmentLevel);
+                // The bundle proves against the beacon-attested (finalized) execution block, which lags
+                // head and is derived inside createBundle from the light-client update — a cheap head
+                // probe can't predict it, so the (expensive) build is left uncached, like Stub, rather
+                // than risking a stale cache hit. Caching keyed on the attested block is a future option.
+                localChainHeight = null;
                 ledgerConfigProvider = new EthereumPosLedgerConfigurationProvider(rpcClient, stateReader, beaconClient);
             }
             default ->
                 throw new UnsupportedOperationException(
                         "Local network proof type " + network.proofType() + " is not supported");
         }
+        // Memoize built bundles so a burst of identical peer requests at the same height reuses one
+        // build. Skipped for constructors that report no numeric height (Stub), which must not be cached.
+        final BundleConstructor bundleConstructor = localChainHeight == null
+                ? rawBundleConstructor
+                : new CachedBundleConstructor(rawBundleConstructor, localChainHeight);
 
         // Bootstrap reads: on-chain protocol version + throttles (from the ledger configuration) and
         // the peer endpoint manifest. These block and may throw; doing them here means a failed read
@@ -259,38 +318,9 @@ public final class ClprChannelHandler {
 
         final var inboundCodec = codecFor(peerProofType, channelId);
 
-        final var stateChangeTask = new EvmChannelStateChangeTask(
-                channelId,
-                commitmentLevel,
-                rpcClient,
-                stateReader,
-                bundleConstructor,
-                peerCache,
-                tlsRegistry,
-                metrics,
-                evmParams.pollIntervalMs(),
-                backoff.baseMs(),
-                backoff.capMs(),
-                proofLagBlocks);
-
-        final var peerSelector = new PeerSelector(peerCache);
-        final var syncTask = new ChannelSyncTask(
-                channelId,
-                commitmentLevel,
-                stateReader,
-                bundleConstructor,
-                inboundCodec,
-                txSubmitter,
-                peerSelector,
-                clprEndpointClient,
-                peerManifestVersions,
-                metrics,
-                backoff.baseMs(),
-                backoff.capMs(),
-                syncIntervalMs);
-
         return new ClprChannelHandler(
                 channelId,
+                serviceAddress,
                 commitmentLevel,
                 stateReader,
                 txSubmitter,
@@ -299,8 +329,12 @@ public final class ClprChannelHandler {
                 peerCache,
                 throttleEnforcer,
                 inboundCodec,
-                syncTask,
-                stateChangeTask,
+                metrics,
+                backoff,
+                clprEndpointClient,
+                tlsRegistry,
+                evmParams,
+                syncIntervalMs,
                 instanceName);
     }
 
@@ -316,17 +350,45 @@ public final class ClprChannelHandler {
             return;
         }
         started = true;
-        stateChangeThread = spawn(" clpr-state-change", stateChangeTask::run);
+        manifestRefreshTask = new EndpointManifestRefreshTask(
+                channelId,
+                stateReader,
+                commitmentLevel,
+                peerCache,
+                tlsRegistry,
+                metrics,
+                evmParams.pollIntervalMs(),
+                backoffConfig.baseMs(),
+                backoffConfig.capMs());
+        spawn(" clpr-manifest-refresh", manifestRefreshTask::run);
+
         if (outboundSync) {
-            syncThread = spawn(" clpr-sync-task", syncTask::run);
+            syncTask = new ChannelSyncTask(
+                    this,
+                    commitmentLevel,
+                    new PeerSelector(peerCache),
+                    clprEndpointClient,
+                    metrics,
+                    backoffConfig.baseMs(),
+                    backoffConfig.capMs(),
+                    syncIntervalMs);
+            spawn(" clpr-sync-task", syncTask::run);
         }
+
         log.info("Started channel {} (outboundSync={})", channelId, outboundSync);
     }
 
     /** Signal both worker loops to stop and interrupt any in-flight wait. */
     public synchronized void stop() {
-        syncTask.stop();
-        stateChangeTask.stop();
+        // syncTask is only spawned for outbound (full-duplex) channels; manifestRefreshTask only after
+        // start(). Guard both so an inbound-only or never-started handler tears down cleanly rather than
+        // NPEing (which would also strand the manifest poller against a torn-down node).
+        if (syncTask != null) {
+            syncTask.stop();
+        }
+        if (manifestRefreshTask != null) {
+            manifestRefreshTask.stop();
+        }
     }
 
     private Thread spawn(final String threadSuffix, final Runnable body) {
@@ -349,6 +411,7 @@ public final class ClprChannelHandler {
             case Hiero -> new HieroProofCodec();
             case CometBFT -> new SeiProofCodec(channelId);
             case EthereumPOS -> new EthereumPosProofCodec();
+            case Stub -> new StubProofCodec();
         };
     }
 
@@ -372,7 +435,7 @@ public final class ClprChannelHandler {
         }
     }
 
-    // --- Accessors consumed by the gRPC glue (ClprSyncHandler / discoverEndpoints) and metrics. ---
+    // --- ClprChannelOps + accessors consumed by the gRPC glue (ClprSyncHandler via ChannelLookup) and metrics. ---
 
     /** The channel identifier this handler manages. */
     public Bytes channelId() {
@@ -384,39 +447,89 @@ public final class ClprChannelHandler {
         return commitmentLevel;
     }
 
-    /** The per-channel contract state reader. */
-    public ContractStateReader stateReader() {
-        return stateReader;
-    }
-
-    /** The per-channel transaction submitter (enqueues onto the shared per-account submitter). */
-    public TransactionSubmitter txSubmitter() {
-        return txSubmitter;
-    }
-
     /** The per-channel bundle constructor / cached-proof supplier. */
     public BundleConstructor bundleConstructor() {
         return bundleConstructor;
     }
 
+    @Override
+    public BundleRequestConstructor bundleRequestConstructor() {
+        return () -> {
+            final var channelStateOpt = stateReader.readChannelState(channelId, "pending");
+            if (channelStateOpt.isEmpty()) {
+                return BundleRequest.newBuilder()
+                        .currentReceivedMessageId(0L)
+                        .currentStatus(ClprChannelStatus.PENDING)
+                        .build();
+            }
+            final var channel = channelStateOpt.get();
+
+            return BundleRequest.newBuilder()
+                    .currentReceivedMessageId(channel.receivedMessageId())
+                    .currentStatus(channel.status())
+                    .currentTrustAnchorId(channel.trustAnchorId())
+                    // The version of the peer's endpoint manifest we currently hold, cached on-chain in the
+                    // Channel struct — so the peer re-proves its manifest only when it has advanced past this.
+                    .currentEndpointManifestVersion(channel.endpointManifestVersion())
+                    .build();
+        };
+    }
+
+    @Override
+    public InboundBundleQueue inboundBundleQueue() {
+        return (rawBundleBytes, peer) -> {
+            if (rawBundleBytes.length() == 0) {
+                log.warn("Ignoring empty bundle from {}", peer);
+                return;
+            }
+
+            final var currentStateOpt = stateReader.readChannelState(channelId, "pending");
+            if (currentStateOpt.isEmpty()) {
+                log.warn("Ignoring incoming bundle from {} - channel not yet initialized", peer);
+                return;
+            }
+            final var currentState = currentStateOpt.get();
+
+            if (ClprChannelStatus.CLOSED.equals(currentState.status())) {
+                log.warn("Ignoring incoming bundle from {} - channel is closed", peer);
+                return;
+            }
+
+            final ParsedBundle parsedBundle;
+            try {
+                parsedBundle = inboundCodec.parseBundle(rawBundleBytes, currentState.receivedMessageId());
+            } catch (Exception e) {
+                log.warn("Parsing bundle from {} failed: {}", peer, e);
+                return;
+            }
+
+            if (!throttleEnforcer.shouldAccept(parsedBundle.rawBundleBytes(), parsedBundle.messages())) {
+                log.info("bundle was rejected before adding to the queue due to throttles (size limits)");
+                return;
+            }
+
+            // Accepted onto the submit queue (parse + throttle passed). Labels mirror the submitter's
+            // channel_id/peer so bundle.enqueued → bundle.submissions/reverted/skipped can be joined.
+            final String peerLabel = peer != null ? peer.accountId().toHex() : "anonymous";
+            bundleEnqueued.increment("channel_id", channelId.toHex(), "peer", peerLabel);
+            txSubmitter.submit(serviceAddress, channelId, parsedBundle, peer);
+        };
+    }
+
     /** The per-channel ledger-configuration payload provider. */
+    // TODO: this should live on ClprServiceHandler and be parametrized with proofType
     public LedgerConfigurationPayloadProvider ledgerConfigProvider() {
         return ledgerConfigProvider;
     }
 
-    /** The per-channel peer endpoint cache (seeded from the on-ledger roster). */
-    public PeerEndpointCache peerCache() {
+    @Override
+    public ContractStateReader contractStateReader() {
+        return stateReader;
+    }
+
+    @Override
+    public PeerEndpointCache peerEndpointCache() {
         return peerCache;
-    }
-
-    /** The per-channel inbound throttle enforcer. */
-    public ThrottleEnforcer throttleEnforcer() {
-        return throttleEnforcer;
-    }
-
-    /** The inbound proof codec for the peer's proof format. */
-    public BundlePayloadCodec inboundCodec() {
-        return inboundCodec;
     }
 
     /** The outbound sync loop's failure state (for aggregate metrics). */
@@ -425,7 +538,7 @@ public final class ClprChannelHandler {
     }
 
     /** The state-change poll loop's failure state (for aggregate metrics). */
-    public FailState stateChangeFailState() {
-        return stateChangeTask.failState();
+    public FailState manifestRefreshFailState() {
+        return manifestRefreshTask.failState();
     }
 }

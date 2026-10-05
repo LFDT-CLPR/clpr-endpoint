@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 package org.hiero.clpr.relay.sync;
 
+import com.hedera.hapi.node.state.clpr.BundleResponse;
 import com.hedera.hapi.node.state.clpr.ClprChannelStatus;
+import com.hedera.hapi.node.state.clpr.ClprEndpoint;
 import com.hedera.hapi.node.state.clpr.ClprSyncPayload;
 import com.hedera.pbj.runtime.io.buffer.Bytes;
 import com.swirlds.logging.api.Logger;
@@ -9,15 +11,11 @@ import com.swirlds.logging.api.Loggers;
 import com.swirlds.metrics.api.Counter;
 import com.swirlds.metrics.api.Metrics;
 import java.util.HexFormat;
-import java.util.Objects;
-import org.hiero.clpr.relay.core.BundleConstructor;
-import org.hiero.clpr.relay.core.BundleLog;
-import org.hiero.clpr.relay.core.BundlePayloadCodec;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.function.Function;
+import org.hiero.clpr.relay.core.ClprChannelOps;
 import org.hiero.clpr.relay.core.CommitmentLevel;
-import org.hiero.clpr.relay.core.ContractStateReader;
 import org.hiero.clpr.relay.core.FailState;
-import org.hiero.clpr.relay.core.PeerManifestVersionCache;
-import org.hiero.clpr.relay.core.TransactionSubmitter;
 import org.hiero.clpr.relay.core.metrics.LabeledCounter;
 import org.hiero.clpr.relay.core.metrics.MetricLabels;
 import org.hiero.clpr.relay.grpc.client.ClprEndpointClient;
@@ -37,23 +35,13 @@ public class ChannelSyncTask implements Runnable {
 
     private static final Logger log = Loggers.getLogger(ChannelSyncTask.class);
     // Unique ID for this channel. Must have a matching ID on the source & destination ledgers
-    private final Bytes channelId;
+    private final ClprChannelOps clprChannel;
     // EVM chains have different commitment levels with different "finality" guarantees
     private final CommitmentLevel commitmentLevel;
-    // Reads state from the EVM chain for the channel
-    private final ContractStateReader stateReader;
-    // Creates a state proof to send to the destination
-    private final BundleConstructor bundleConstructor;
-    // Decodes (and replay-trims) the remote peer's bundle proofs before submission
-    private final BundlePayloadCodec proofCodec;
-    // Submits verified bundles from the remote peer into this ledger
-    private final TransactionSubmitter txSubmitter;
     // Determines which remote peer to sync with
     private final PeerSelector peerSelector;
     // Used to talk with the remote peer
     private final ClprEndpointClient clprEndpointClient;
-    // Records the manifest version the peer reports holding of our manifest (outbound leg)
-    private final PeerManifestVersionCache peerManifestVersions;
 
     // interval between sync cycles (ms) based on config
     private final long syncIntervalMs;
@@ -62,10 +50,11 @@ public class ChannelSyncTask implements Runnable {
     private final Counter cyclesTotal;
     private final LabeledCounter cyclesFailed;
     private final Counter noPeerSkips;
-    private final Counter noProofSkips;
     private final LabeledCounter peerSyncSuccess;
     private final LabeledCounter peerSyncErrors;
-    private final LabeledCounter outboundAttempts;
+    private final LabeledCounter exchangesStarted;
+    private final LabeledCounter exchangesFailed;
+    private final LabeledCounter exchangesFailedAfterSend;
     private final FailState failState;
     private volatile boolean running = true;
 
@@ -75,46 +64,30 @@ public class ChannelSyncTask implements Runnable {
     /**
      * Creates a new {@code ChannelSyncTask}.
      *
-     * @param channelId the CLPR channel identifier this task manages
      * @param commitmentLevel the commitment level used when reading on-chain state
-     * @param stateReader reads on-chain channel state
-     * @param bundleConstructor supplies cached bundle payloads for the channel
-     * @param proofCodec decodes (and replay-trims) bundle proofs received from peers
-     * @param txSubmitter submits verified bundles to the EVM contract
      * @param peerSelector selects the remote peer to sync with
      * @param clprEndpointClient gRPC client used to send sync payloads to peers
-     * @param peerManifestVersions records the manifest version the peer reports on the outbound leg
      * @param metrics the metrics registry
      * @param backoffBaseMs first-failure backoff in ms (doubled per consecutive failure)
      * @param backoffCapMs ceiling on the per-failure backoff in ms
      * @param syncIntervalMs     sync intervals for running channel tasks
      */
     public ChannelSyncTask(
-            final Bytes channelId,
+            final ClprChannelOps clprChannel,
             final CommitmentLevel commitmentLevel,
-            final ContractStateReader stateReader,
-            final BundleConstructor bundleConstructor,
-            final BundlePayloadCodec proofCodec,
-            final TransactionSubmitter txSubmitter,
             final PeerSelector peerSelector,
             final ClprEndpointClient clprEndpointClient,
-            final PeerManifestVersionCache peerManifestVersions,
             final Metrics metrics,
             final long backoffBaseMs,
             final long backoffCapMs,
             final long syncIntervalMs) {
-        this.channelId = channelId;
+        this.clprChannel = clprChannel;
         this.commitmentLevel = commitmentLevel;
-        this.stateReader = stateReader;
-        this.bundleConstructor = bundleConstructor;
-        this.proofCodec = proofCodec;
-        this.txSubmitter = txSubmitter;
         this.peerSelector = peerSelector;
         this.clprEndpointClient = clprEndpointClient;
-        this.peerManifestVersions = Objects.requireNonNull(peerManifestVersions, "peerManifestVersions");
         this.syncIntervalMs = syncIntervalMs;
 
-        this.channelIdLabel = HexFormat.of().formatHex(channelId.toByteArray());
+        this.channelIdLabel = HexFormat.of().formatHex(clprChannel.channelId().toByteArray());
         this.cyclesTotal = metrics.getOrCreate(
                 new Counter.Config("sync", MetricLabels.labeled("cycles.total", "channel_id", channelIdLabel))
                         .withDescription("Total sync cycles attempted"));
@@ -122,16 +95,23 @@ public class ChannelSyncTask implements Runnable {
         this.noPeerSkips = metrics.getOrCreate(
                 new Counter.Config("sync", MetricLabels.labeled("no_peer_skips", "channel_id", channelIdLabel))
                         .withDescription("Cycles that skipped syncing because no peer was available"));
-        this.noProofSkips = metrics.getOrCreate(
-                new Counter.Config("sync", MetricLabels.labeled("no_proof_skips", "channel_id", channelIdLabel))
-                        .withDescription("Cycles that skipped syncing because no cached proof was ready"));
 
         this.peerSyncSuccess =
                 new LabeledCounter("sync", "outbound.peer.success", "Successful outbound sync RPCs by peer", metrics);
         this.peerSyncErrors =
                 new LabeledCounter("sync", "outbound.peer.errors", "Failed outbound sync RPCs by peer", metrics);
-        this.outboundAttempts =
-                new LabeledCounter("sync", "outbound.attempts", "Outbound peer sync RPCs attempted", metrics);
+        this.exchangesStarted = new LabeledCounter(
+                "sync",
+                "exchanges.started",
+                "Two-phase sync exchanges started (role=initiator dialed a peer | responder received a phase-1 request)",
+                metrics);
+        this.exchangesFailed = new LabeledCounter(
+                "sync", "exchanges.failed", "Two-phase sync exchanges that failed before completing", metrics);
+        this.exchangesFailedAfterSend = new LabeledCounter(
+                "sync",
+                "exchanges.failed_after_send",
+                "Two-phase exchanges that failed after we had already sent a non-empty bundle (possible non-reciprocity)",
+                metrics);
 
         this.failState = new FailState(backoffBaseMs, backoffCapMs);
     }
@@ -199,7 +179,9 @@ public class ChannelSyncTask implements Runnable {
         // 1. Read channel state. Empty means the chain has no Channel record for this id
         //    (PENDING commit-only phase, or never registered). Per spec §3.1.3 that is
         //    "no messaging, no syncing" — idle this cycle and re-check next tick.
-        final var channelOpt = stateReader.readChannelState(channelId, commitmentLevel.toBlockTag());
+        final var channelOpt = clprChannel
+                .contractStateReader()
+                .readChannelState(clprChannel.channelId(), commitmentLevel.toBlockTag());
         if (channelOpt.isEmpty()) {
             log.debug("no Channel record yet — idling cycle");
             return;
@@ -223,6 +205,9 @@ public class ChannelSyncTask implements Runnable {
         switch (status) {
             case CLOSED -> {
                 log.info("CLOSED, stopping");
+                // TODO: move the stop logic to parent (ClprChannelHandler)
+                // ClprChannelHandler should detect when the channel closes and when it should cease
+                // all its operations (including ChannelSyncTask, but also others).
                 running = false;
                 return;
             }
@@ -235,17 +220,7 @@ public class ChannelSyncTask implements Runnable {
             }
         }
 
-        // 3. Get cached bundle if available.
-        final var ourBundlePayload =
-                bundleConstructor.getLatestBundlePayload(channelId).orElse(Bytes.EMPTY);
-
-        if (ourBundlePayload.equals(Bytes.EMPTY)) {
-            noProofSkips.increment();
-            log.debug("no cached bundle payload");
-            return;
-        }
-
-        // 4. Select peer
+        // 3. Select a peer to run the two-phase exchange with.
         var peerOpt = peerSelector.selectPeer();
         if (peerOpt.isEmpty()) {
             noPeerSkips.increment();
@@ -262,46 +237,63 @@ public class ChannelSyncTask implements Runnable {
         final String peerAddress = serviceEndpoint.ipAddress() + ":" + serviceEndpoint.port();
         log.debug("selected peer {}", peerAddress);
 
-        try {
-            // 6. outbound sync
-            log.debug("bundle SEND→ {} {}", peerAddress, BundleLog.tag(ourBundlePayload));
-            final var ourSyncPayload = ClprSyncPayload.newBuilder()
-                    .channelId(channelId)
-                    .bundlePayload(ourBundlePayload)
-                    .build();
-            outboundAttempts.increment("channel_id", channelIdLabel);
-            // Dial mutual TLS when the peer publishes a certificate on-chain; plaintext otherwise.
-            final var response = clprEndpointClient.sync(
-                    serviceEndpoint.ipAddress(), serviceEndpoint.port(), ourSyncPayload, peer.tlsCertificate());
-            // The RPC completed, so the peer is reachable: credit its health now, regardless of whether
-            // its response carried a bundle. Bundle outcome (below) drives the bundle metrics, not peer
-            // selection.
-            peerSelector.recordSuccess(peer);
-            peerSyncSuccess.increment("channel_id", channelIdLabel, "peer", peerAddress);
-            log.debug("bundle RECV← {} {}", peerAddress, BundleLog.tag(response.bundlePayload()));
-
-            if (response.bundlePayload().length() > 0) {
-                // Trim messages the local ledger has already accepted before submitting: the codec drops
-                // already-delivered messages and re-encodes the retained suffix into the peer's proof
-                // format (verbatim when nothing was trimmed or the format is read-only, e.g. Hiero), so an
-                // already-delivered message can't sink the bundle (and its acknowledgment) as a replay.
-                final var parsed = proofCodec.parseBundle(response.bundlePayload(), channel.receivedMessageId());
-                log.debug(
-                        "bundle PARSED {} {}",
-                        BundleLog.coords(parsed.metadata(), parsed.messages().size()),
-                        BundleLog.tag(parsed.rawProofBytes()));
-                // Record the manifest version the peer reports holding of our manifest. On the
-                // outbound leg the peer's response is the only place this version surfaces; without
-                // recording it, an outbound-only topology (the peer never inbound-syncs to us) would
-                // re-attach our manifest proof to every bundle forever. The cache is monotonic (max),
-                // so the inbound handler and this path can both feed it safely.
-                peerManifestVersions.record(channelId, parsed.metadata().endpointManifestVersion());
-                // submitBundle enqueues onto the signing account's serial submitter and returns
-                // immediately. The submission outcome — preview-skipped (stale/replay/…) versus
-                // submitted/reverted, plus message and byte volume — is metered inside the
-                // AccountTransactionSubmitter, the only layer that knows the on-chain result.
-                txSubmitter.submitBundle(channel, parsed);
+        // 4. Phase 1: send our request (what we want next, our status/trust anchor). The peer replies
+        //    with a bundle answering it PLUS its own request; the phase-2 factory answers that request
+        //    with a bundle built ad hoc via createBundle. The peer does not answer our phase-2 message.
+        final var phase1 = ClprSyncPayload.newBuilder()
+                .channelId(clprChannel.channelId())
+                .bundleRequest(clprChannel.bundleRequestConstructor().createBundleRequest())
+                .build();
+        // Tracks whether we hand the stream a non-empty phase-2 bundle: if the exchange then fails, we
+        // may have delivered messages the peer never acked back (a possible non-reciprocity — see catch).
+        final AtomicBoolean sentBundle = new AtomicBoolean(false);
+        final Function<ClprSyncPayload, ClprSyncPayload> followUp = peerReply -> {
+            // Consume the peer's answer to OUR request the moment its phase-1 reply arrives — before we
+            // build our own phase-2 answer — so a phase-2 build or transport failure never drops an
+            // inbound bundle we already hold. (The old unary design had no coupling between our inbound
+            // delivery and our outbound leg.) The codec replay-trims already-accepted messages, so a
+            // stale message can't sink it as a replay; offer() hands it to the serial submitter, whose
+            // outcome is metered inside AccountTransactionSubmitter. An empty payload is a no-op.
+            if (peerReply.hasBundleResponse()) {
+                final Bytes inbound = peerReply.bundleResponseOrThrow().bundlePayload();
+                if (inbound.length() > 0) {
+                    try {
+                        clprChannel.inboundBundleQueue().offer(inbound, peer);
+                    } catch (final RuntimeException e) {
+                        // Decouple the two directions: offer() reaches the serial submitter, so a full queue
+                        // or a submitter fault surfaces here. It must not stop us building and sending our own
+                        // phase-2 bundle (nor fail the whole cycle) — log and carry on.
+                        log.warn("failed to enqueue the peer's inbound bundle; continuing with phase 2", e);
+                    }
+                }
             }
+
+            final var b = ClprSyncPayload.newBuilder().channelId(clprChannel.channelId());
+            if (peerReply.hasBundleRequest()) {
+                final var built = clprChannel
+                        .bundleConstructor()
+                        .createBundle(clprChannel.channelId(), peerReply.bundleRequestOrThrow());
+                final Bytes outbound = built.bundlePayload();
+                b.bundleResponse(
+                        BundleResponse.newBuilder().bundlePayload(outbound).build());
+                if (outbound.length() > 0) {
+                    sentBundle.set(true);
+                }
+            }
+            return b.build();
+        };
+
+        try {
+            exchangesStarted.increment("role", "initiator", "channel_id", channelIdLabel);
+            // Dial mutual TLS when the peer publishes a certificate on-chain; plaintext otherwise.
+            // followUp (above) already enqueued the peer's answer to our request when its phase-1 reply
+            // arrived, so sync()'s return value is not needed here: the inbound delivery is done,
+            // decoupled from whether our phase-2 leg completes.
+            clprEndpointClient.sync(
+                    serviceEndpoint.ipAddress(), serviceEndpoint.port(), phase1, followUp, peer.tlsCertificate());
+            // The RPC completed, so the peer is reachable: credit its health now.
+            peerSelector.recordSuccess(peer);
+            peerSyncSuccess.increment("channel_id", channelIdLabel, "peer", peerAccountLabel(peer));
         } catch (final Exception e) {
             if (!running) {
                 // Shutting down: the peer client may already be closed or the RPC cancelled
@@ -309,10 +301,26 @@ public class ChannelSyncTask implements Runnable {
                 return;
             }
             cyclesFailed.increment("channel_id", channelIdLabel, "reason", classifySyncError(e));
+            exchangesFailed.increment("role", "initiator", "channel_id", channelIdLabel);
+            if (sentBundle.get()) {
+                // We handed the peer a non-empty bundle before the exchange broke — it may hold our
+                // messages while we never learned it did. Surfaced separately as a reciprocity signal.
+                exchangesFailedAfterSend.increment(
+                        "role", "initiator", "channel_id", channelIdLabel, "peer", peerAccountLabel(peer));
+            }
             peerSelector.recordFailure(peer);
-            peerSyncErrors.increment("channel_id", channelIdLabel, "peer", peerAddress);
+            peerSyncErrors.increment("channel_id", channelIdLabel, "peer", peerAccountLabel(peer));
             log.warn("Sync failed for channel {}", e, channelIdLabel);
         }
+    }
+
+    /**
+     * Peer label for cross-metric correlation with {@code sync.bundle.*}: the roster account id (hex),
+     * or {@code anonymous} when absent.
+     */
+    private static String peerAccountLabel(final ClprEndpoint peer) {
+        final Bytes id = peer.accountId();
+        return (id != null && id.length() > 0) ? id.toHex() : "anonymous";
     }
 
     /**
@@ -361,7 +369,7 @@ public class ChannelSyncTask implements Runnable {
      * @return the channel ID
      */
     public Bytes channelId() {
-        return channelId;
+        return clprChannel.channelId();
     }
 
     /**

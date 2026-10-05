@@ -3,19 +3,24 @@ package org.hiero.clpr.relay.evm;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+import com.hedera.hapi.node.state.clpr.BundleRequest;
 import com.hedera.hapi.node.state.clpr.ClprBundleContent;
 import com.hedera.hapi.node.state.clpr.ClprChannel;
 import com.hedera.hapi.node.state.clpr.ClprChannelStatus;
+import com.hedera.hapi.node.state.clpr.ClprEndpointManifest;
+import com.hedera.hapi.node.state.clpr.ClprLedgerConfiguration;
 import com.hedera.hapi.node.state.clpr.ClprMessagePayload;
 import com.hedera.hapi.node.state.clpr.ClprMessageValue;
 import com.hedera.pbj.runtime.io.buffer.Bytes;
 import java.math.BigInteger;
+import java.nio.ByteBuffer;
 import java.time.Duration;
 import java.util.HexFormat;
 import java.util.List;
+import java.util.Optional;
 import org.hiero.clpr.relay.core.BundleConstructor;
+import org.hiero.clpr.relay.core.CommitmentLevel;
 import org.hiero.clpr.relay.core.ContractStateReader;
-import org.hiero.clpr.relay.core.PeerManifestVersionCache;
 import org.hiero.clpr.relay.evm.beacon.BeaconApiClient;
 import org.hiero.clpr.relay.evm.beacon.BeaconBlockHeader;
 import org.hiero.clpr.relay.evm.beacon.ExecutionPayloadHeader;
@@ -160,7 +165,53 @@ class EthereumPosBundleConstructorTest {
         return new ContractStateReader.QueuedMessage(BigInteger.valueOf(id), value);
     }
 
+    /** A state reader returning the fixed channel + queued messages {@code createBundle} reads. */
+    private static final class StubStateReader implements ContractStateReader {
+        private Optional<ClprChannel> channelState = Optional.of(channel());
+        private List<QueuedMessage> messages = List.of(message(1));
+
+        @Override
+        public Optional<ClprChannel> readChannelState(final Bytes id, final String blockTag) {
+            return channelState;
+        }
+
+        @Override
+        public List<QueuedMessage> readQueuedMessages(
+                final Bytes id, final long fromId, final long toId, final String blockTag) {
+            return messages;
+        }
+
+        @Override
+        public ClprLedgerConfiguration readLedgerConfiguration(final CommitmentLevel commitmentLevel) {
+            return ClprLedgerConfiguration.DEFAULT;
+        }
+
+        @Override
+        public ClprEndpointManifest readEndpointManifest(final String blockTag) {
+            return ClprEndpointManifest.DEFAULT;
+        }
+    }
+
+    /** A request from {@code fromMessageId} carrying the given remote-anchor period + peer manifest version. */
+    private static BundleRequest request(
+            final long currentReceivedMessageId, final long remotePeriod, final long manifestVersion) {
+        return BundleRequest.newBuilder()
+                .currentReceivedMessageId(currentReceivedMessageId)
+                .currentStatus(ClprChannelStatus.ACTIVE)
+                .currentTrustAnchorId(encodedPeriod(remotePeriod))
+                .currentEndpointManifestVersion(manifestVersion)
+                .build();
+    }
+
+    /** The sync-committee period as an 8-byte big-endian trust-anchor id (see {@code remotePeriodFromRequest}). */
+    private static Bytes encodedPeriod(final long period) {
+        return Bytes.wrap(ByteBuffer.allocate(Long.BYTES).putLong(period).array());
+    }
+
     private static final long PERIOD_SLOTS = 32L * 256L;
+
+    /** The sync-committee period the sample updates (slot 7_000_000) sit in: 7_000_000 / 8192. */
+    private static final long SAMPLE_PERIOD = 7_000_000L / PERIOD_SLOTS;
 
     private static boolean isRlpList(final Bytes item) {
         return item.length() > 0 && (item.getByte(0) & 0xff) >= 0xc0;
@@ -232,14 +283,18 @@ class EthereumPosBundleConstructorTest {
         // The anchor-period update (period 854) carries the next committee for period 855.
         final var anchorUpdate = rotatingUpdate(854 * PERIOD_SLOTS);
         final var stub = new MutableStubBeaconClient(anchorUpdate);
-        final var constructor =
-                new EthereumPosBundleConstructor(Address.fromHexString(CONTRACT), 10, new StubRpcClient(), stub);
+        final var constructor = new EthereumPosBundleConstructor(
+                Address.fromHexString(CONTRACT),
+                10,
+                new StubRpcClient(),
+                stub,
+                new StubStateReader(),
+                CommitmentLevel.LATEST);
 
-        // Cycle 1: chain still in period 854 → anchor seeded to 854, no rotation (items 4/5 absent).
+        // Cycle 1: chain still in period 854, anchor (from the request) at 854 → no rotation (items 4/5 absent).
         stub.finalityUpdate = rotatingUpdate(854 * PERIOD_SLOTS);
-        constructor.onStateChanged(BigInteger.valueOf(100), CONNECTION_ID, channel(), List.of(message(1)));
         final List<Bytes> steady = RlpReader.splitList(
-                constructor.getLatestBundlePayload(CONNECTION_ID).orElseThrow());
+                constructor.createBundle(CONNECTION_ID, request(0L, 854L, 0L)).bundlePayload());
         assertThat(isRlpList(steady.get(4)))
                 .as("nextCommittee absent in steady state")
                 .isFalse();
@@ -247,11 +302,10 @@ class EthereumPosBundleConstructorTest {
                 .as("nextCommitteeBranch empty")
                 .isEmpty();
 
-        // Cycle 2: chain advanced to period 855 → rotation due; items 4/5 now populated.
+        // Cycle 2: chain advanced to period 855, anchor still 854 → rotation due; items 4/5 now populated.
         stub.finalityUpdate = rotatingUpdate(855 * PERIOD_SLOTS);
-        constructor.onStateChanged(BigInteger.valueOf(101), CONNECTION_ID, channel(), List.of(message(1)));
         final List<Bytes> rotated = RlpReader.splitList(
-                constructor.getLatestBundlePayload(CONNECTION_ID).orElseThrow());
+                constructor.createBundle(CONNECTION_ID, request(0L, 854L, 0L)).bundlePayload());
         assertThat(isRlpList(rotated.get(4)))
                 .as("nextCommittee present after boundary")
                 .isTrue();
@@ -267,11 +321,16 @@ class EthereumPosBundleConstructorTest {
     void buildsTenItemBundleWhoseBranchFoldsToBodyRoot() {
         final LightClientUpdate update = selfConsistentUpdate();
         final var constructor = new EthereumPosBundleConstructor(
-                Address.fromHexString(CONTRACT), 10, new StubRpcClient(), new StubBeaconClient(update));
+                Address.fromHexString(CONTRACT),
+                10,
+                new StubRpcClient(),
+                new StubBeaconClient(update),
+                new StubStateReader(),
+                CommitmentLevel.LATEST);
 
-        constructor.onStateChanged(BigInteger.valueOf(100), CONNECTION_ID, channel(), List.of(message(1)));
-
-        final Bytes bundle = constructor.getLatestBundlePayload(CONNECTION_ID).orElseThrow();
+        final Bytes bundle = constructor
+                .createBundle(CONNECTION_ID, request(0L, SAMPLE_PERIOD, 0L))
+                .bundlePayload();
         final List<Bytes> items = RlpReader.splitList(bundle);
         assertThat(items).hasSize(10);
 
@@ -324,21 +383,23 @@ class EthereumPosBundleConstructorTest {
     @Nested
     class ManifestAttachmentContract extends BundleConstructorManifestContract {
         @Override
-        protected BundleConstructor newConstructor(
-                final ContractStateReader manifestReader, final PeerManifestVersionCache peerVersions) {
+        protected BundleConstructor newConstructor(final ContractStateReader stateReader) {
             return new EthereumPosBundleConstructor(
                     Address.fromHexString(CONTRACT),
                     10,
                     new StubRpcClient(),
                     new StubBeaconClient(selfConsistentUpdate()),
-                    manifestReader,
-                    peerVersions);
+                    stateReader,
+                    CommitmentLevel.LATEST);
         }
 
         @Override
-        protected void driveOneBundle(final BundleConstructor constructor) {
-            // Ack-only bundle (receivedMessageId > 0, no pending messages) → a bundle is produced.
-            constructor.onStateChanged(BigInteger.valueOf(100), CONN, channel(), List.of());
+        protected Bytes driveOneBundle(final BundleConstructor constructor, final long peerKnownVersion) {
+            // The base contract's reader supplies an ack-only channel (receivedMessageId > 0, no pending
+            // messages), so a bundle is produced whose only optional element is the manifest proof.
+            return constructor
+                    .createBundle(CONN, request(0L, SAMPLE_PERIOD, peerKnownVersion))
+                    .bundlePayload();
         }
 
         @Override

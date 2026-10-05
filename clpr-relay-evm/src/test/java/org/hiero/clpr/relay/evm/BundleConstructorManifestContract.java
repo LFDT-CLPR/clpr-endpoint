@@ -4,6 +4,7 @@ package org.hiero.clpr.relay.evm;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import com.hedera.hapi.node.state.clpr.ClprChannel;
+import com.hedera.hapi.node.state.clpr.ClprChannelStatus;
 import com.hedera.hapi.node.state.clpr.ClprEndpointManifest;
 import com.hedera.hapi.node.state.clpr.ClprLedgerConfiguration;
 import com.hedera.pbj.runtime.io.buffer.Bytes;
@@ -13,8 +14,6 @@ import org.hiero.clpr.relay.core.BundleConstructor;
 import org.hiero.clpr.relay.core.CommitmentLevel;
 import org.hiero.clpr.relay.core.ContractStateReader;
 import org.hiero.clpr.relay.core.ManifestProofPolicy;
-import org.hiero.clpr.relay.core.PeerManifestVersionCache;
-import org.jspecify.annotations.Nullable;
 import org.junit.jupiter.api.Test;
 
 /**
@@ -24,6 +23,12 @@ import org.junit.jupiter.api.Test;
  * through {@link ManifestProofPolicy} so the "attach iff the local manifest version is strictly ahead
  * of the version the peer holds AND the manifest carries a service address" rule is identical across
  * wire formats. This base pins that behaviour; each codec supplies the three hooks below.
+ *
+ * <p>In the two-phase sync protocol the peer states the version it holds of our manifest directly in
+ * its {@code BundleRequest.current_endpoint_manifest_version}; the local manifest itself is read from
+ * the codec's {@link ContractStateReader}. This contract therefore drives each codec with a
+ * peer-known-version {@code long} and a state reader whose {@code readEndpointManifest} returns the
+ * manifest under test.
  *
  * <p>A new bundle format (e.g. a future Ethereum proof constructor) plugs in by subclassing this and
  * implementing the hooks — if it forgets to route through the policy, either
@@ -37,32 +42,34 @@ public abstract class BundleConstructorManifestContract {
     protected static final Bytes CONN = Bytes.wrap(new byte[32]);
 
     /**
-     * Builds the codec under test wired with {@code manifestReader} as its local-manifest source and
-     * {@code peerVersions} as the peer-known-version cache, plus whatever codec-specific RPC stubs are
-     * needed to produce exactly one bundle for {@link #CONN} via {@link #driveOneBundle}.
+     * Builds the codec under test wired with {@code stateReader} as its channel-state and local-manifest
+     * source, plus whatever codec-specific RPC stubs are needed to produce exactly one bundle for
+     * {@link #CONN} via {@link #driveOneBundle}. The reader returns an ack-only channel so a (non-empty)
+     * bundle is always produced regardless of whether the manifest proof is attached.
      */
-    protected abstract BundleConstructor newConstructor(
-            @Nullable ContractStateReader manifestReader, @Nullable PeerManifestVersionCache peerVersions);
+    protected abstract BundleConstructor newConstructor(ContractStateReader stateReader);
 
-    /** Drives a single {@code onStateChanged} that produces a (non-empty) bundle for {@link #CONN}. */
-    protected abstract void driveOneBundle(BundleConstructor constructor);
+    /**
+     * Drives a single {@code createBundle} for {@link #CONN}, telling the codec that the peer already
+     * holds {@code peerKnownVersion} of our manifest, and returns the resulting bundle payload bytes.
+     */
+    protected abstract Bytes driveOneBundle(BundleConstructor constructor, long peerKnownVersion);
 
-    /** Parses the cached bundle payload and reports whether an endpoint-manifest proof is attached. */
+    /** Parses the bundle payload and reports whether an endpoint-manifest proof is attached. */
     protected abstract boolean manifestAttached(Bytes payload) throws Exception;
 
     @Test
     void attachesManifestWhenLocalStrictlyAheadOfPeer() throws Exception {
-        // Local manifest v1 with a service address; the peer-known version defaults to 0 → 1 > 0 → attach.
-        assertThat(manifestAttached(buildBundle(readerOf(manifest(1L, true)), new PeerManifestVersionCache())))
+        // Local manifest v1 with a service address; the peer holds version 0 → 1 > 0 → attach.
+        assertThat(manifestAttached(buildBundle(manifest(1L, true), 0L)))
                 .as("a manifest strictly ahead of the peer and carrying a service address must be attached")
                 .isTrue();
     }
 
     @Test
     void skipsManifestWhenPeerAlreadyCurrent() throws Exception {
-        final var peerVersions = new PeerManifestVersionCache();
-        peerVersions.record(CONN, 1L); // peer already holds v1 → 1 > 1 is false → skip (peer would drop a re-send)
-        assertThat(manifestAttached(buildBundle(readerOf(manifest(1L, true)), peerVersions)))
+        // Peer already holds v1 → 1 > 1 is false → skip (the peer would drop a re-send).
+        assertThat(manifestAttached(buildBundle(manifest(1L, true), 1L)))
                 .as("a manifest the peer already holds must not be re-attached")
                 .isFalse();
     }
@@ -70,28 +77,26 @@ public abstract class BundleConstructorManifestContract {
     @Test
     void skipsManifestWhenServiceAddressEmpty() throws Exception {
         // v1 but an empty service address (freshly initialized ledger, no admitted endpoint) → not provable.
-        assertThat(manifestAttached(buildBundle(readerOf(manifest(1L, false)), new PeerManifestVersionCache())))
+        assertThat(manifestAttached(buildBundle(manifest(1L, false), 0L)))
                 .as("a version>=1 manifest with an empty service address must not be attached")
                 .isFalse();
     }
 
     @Test
-    void skipsManifestWhenNoLocalManifestReader() throws Exception {
-        // No reader → manifest proofs are disabled entirely.
-        assertThat(manifestAttached(buildBundle(null, new PeerManifestVersionCache())))
-                .as("with no local-manifest reader no manifest proof may be attached")
+    void skipsManifestWhenLocalManifestAtDefaultVersion() throws Exception {
+        // The default (version 0, empty) manifest is never strictly ahead of any peer → no proof.
+        assertThat(manifestAttached(buildBundle(ClprEndpointManifest.DEFAULT, 0L)))
+                .as("a default (version 0) local manifest must not be attached")
                 .isFalse();
     }
 
-    private Bytes buildBundle(
-            @Nullable final ContractStateReader manifestReader, final PeerManifestVersionCache peerVersions) {
-        final var constructor = newConstructor(manifestReader, peerVersions);
-        driveOneBundle(constructor);
-        final Optional<Bytes> payload = constructor.getLatestBundlePayload(CONN);
-        assertThat(payload)
+    private Bytes buildBundle(final ClprEndpointManifest manifest, final long peerKnownVersion) {
+        final var constructor = newConstructor(readerOf(manifest));
+        final Bytes payload = driveOneBundle(constructor, peerKnownVersion);
+        assertThat(payload.length())
                 .as("the scenario must produce a bundle so the manifest attachment can be asserted")
-                .isPresent();
-        return payload.get();
+                .isGreaterThan(0);
+        return payload;
     }
 
     private static ClprEndpointManifest manifest(final long version, final boolean withServiceAddress) {
@@ -106,7 +111,11 @@ public abstract class BundleConstructorManifestContract {
         return new FixedManifestReader(manifest);
     }
 
-    /** Minimal {@link ContractStateReader} that only supplies a fixed local endpoint manifest. */
+    /**
+     * Minimal {@link ContractStateReader} that supplies a fixed local endpoint manifest and a single
+     * ack-only channel (received message id &gt; 0, no pending messages) so every codec produces a
+     * bundle whose only optional element is the manifest proof.
+     */
     private static final class FixedManifestReader implements ContractStateReader {
         private final ClprEndpointManifest manifest;
 
@@ -121,7 +130,16 @@ public abstract class BundleConstructorManifestContract {
 
         @Override
         public Optional<ClprChannel> readChannelState(final Bytes channelId, final String blockTag) {
-            return Optional.empty();
+            return Optional.of(ClprChannel.newBuilder()
+                    .channelId(CONN)
+                    .status(ClprChannelStatus.ACTIVE)
+                    .nextMessageId(2L)
+                    .ackedMessageId(0L)
+                    .sentRunningHash(Bytes.wrap(new byte[32]))
+                    .receivedMessageId(5L)
+                    .receivedRunningHash(Bytes.wrap(new byte[32]))
+                    .trustAnchorId(Bytes.EMPTY)
+                    .build());
         }
 
         @Override

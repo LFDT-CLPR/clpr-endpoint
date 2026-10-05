@@ -13,9 +13,9 @@ import java.util.Optional;
 import org.hiero.clpr.relay.core.CommitmentLevel;
 import org.hiero.clpr.relay.core.ContractStateReader;
 import org.hiero.clpr.relay.evm.AbiCodec;
-import org.hiero.clpr.relay.evm.EvmQbftLedgerConfigurationProvider;
 import org.hiero.clpr.relay.evm.jsonrpc.EvmJsonRpcClient;
 import org.hiero.clpr.relay.evm.model.Address;
+import org.hiero.clpr.relay.evm.qbft.QbftLedgerConfigurationProvider;
 import org.hiero.clpr.relay.evm.testfixtures.TestEvmJsonRpcClient;
 import org.jspecify.annotations.NonNull;
 import org.junit.jupiter.api.Test;
@@ -24,7 +24,7 @@ import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
 
 /**
- * Smoke test: verifies that {@link EvmQbftLedgerConfigurationProvider} can assemble a valid
+ * Smoke test: verifies that {@link QbftLedgerConfigurationProvider} can assemble a valid
  * {@link com.hedera.hapi.node.state.clpr.QbftLedgerConfigurationPayload} against a live Besu
  * node — real block headers (RLP-encoded), a real EIP-1186 account and storage proof returned by
  * Besu, and a stubbed ledger configuration (no deployed ClprService contract required).
@@ -37,7 +37,7 @@ import org.testcontainers.junit.jupiter.Testcontainers;
  */
 @EnabledIfEnvironmentVariable(named = "RUN_INTEGRATION_TESTS", matches = ".*")
 @Testcontainers
-class EvmQbftLedgerConfigurationProviderSmokeTest {
+class QbftLedgerConfigurationProviderSmokeTest {
 
     @Container
     static final BesuContainer BESU = new BesuContainer();
@@ -58,8 +58,8 @@ class EvmQbftLedgerConfigurationProviderSmokeTest {
                 .throttles(ClprThrottles.newBuilder().maxMessagesPerBundle(50).build())
                 .build();
 
-        final var provider = new EvmQbftLedgerConfigurationProvider(
-                rpc, new StubStateReader(expectedConfig), contractAddress, 30_000L);
+        final var provider =
+                new QbftLedgerConfigurationProvider(rpc, new StubStateReader(expectedConfig), contractAddress, 30_000L);
         final var response = provider.provide(CommitmentLevel.LATEST);
 
         assertThat(response.qbft()).isNotNull();

@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-package org.hiero.clpr.relay.grpc.server;
+package org.hiero.clpr.relay.core;
 
 import com.hedera.hapi.node.state.clpr.ClprMessagePayload;
 import com.hedera.pbj.runtime.io.buffer.Bytes;
@@ -68,12 +68,12 @@ public class ThrottleEnforcer {
      */
     public boolean shouldAccept(final Bytes bundleBytes, @NonNull final List<ClprMessagePayload> messages) {
         if (maxSyncBytes > 0 && bundleBytes.length() > maxSyncBytes) {
-            LOG.warn("peer {} shunned: bundle size {} bytes exceeds MaxSyncBytes={}", bundleBytes, maxSyncBytes);
+            LOG.warn("bundle shunned: size {} bytes exceeds MaxSyncBytes={}", bundleBytes.length(), maxSyncBytes);
             return false;
         }
         if (maxMessagesPerBundle > 0 && messages.size() > maxMessagesPerBundle) {
             LOG.warn(
-                    "peer {} shunned: {} messages exceeds MaxMessagesPerBundle={}",
+                    "bundle shunned: {} messages exceeds MaxMessagesPerBundle={}",
                     messages.size(),
                     maxMessagesPerBundle);
             return false;
@@ -87,7 +87,7 @@ public class ThrottleEnforcer {
                 final long sz = userPayloadBytes(messages.get(i));
                 if (sz > maxMessagePayloadBytes) {
                     LOG.warn(
-                            "peer {} shunned: message[{}] payload {} bytes exceeds MaxMessagePayloadBytes={}",
+                            "bundle shunned: message[{}] payload {} bytes exceeds MaxMessagePayloadBytes={}",
                             i,
                             sz,
                             maxMessagePayloadBytes);

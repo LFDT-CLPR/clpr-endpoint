@@ -46,7 +46,7 @@ class ChannelLifeCyclePauseResumeStubPeerTest extends OneSidedStubPeerTestBase {
         // 2. PAUSE: the peer acks the outbound DATA (received_message_id = 1) but supplies NO reply for it
         //    — a response-ordering violation. The contract accepts the (verifier-valid) bundle and flips
         //    ACTIVE→PAUSED without reverting (the ack is not applied — earlyReturn).
-        final Bytes violating = StubBundles.hieroStateProof()
+        final Bytes violating = StubBundles.stubProof()
                 .ackedMessageId(afterSend.receivedMessageId()) // leaf.acked → replay frontier (= local received)
                 .receivedMessageId(afterSend.nextMessageId() - 1) // ack DATA 1
                 .build();
@@ -56,7 +56,7 @@ class ChannelLifeCyclePauseResumeStubPeerTest extends OneSidedStubPeerTestBase {
         // 3. RESUME: the peer now supplies the in-order reply for the oldest unreplied DATA (id 1). The
         //    ordering check passes, so the contract auto-resumes PAUSED→ACTIVE and applies the bundle.
         final ChannelState paused = interactor.requireChannelState(channelId);
-        final Bytes corrected = StubBundles.hieroStateProof()
+        final Bytes corrected = StubBundles.stubProof()
                 .ackedMessageId(paused.receivedMessageId())
                 .receivedMessageId(paused.nextMessageId() - 1)
                 .reply(1L, ClprMessageReplyStatus.SUCCESS, new byte[] {1})

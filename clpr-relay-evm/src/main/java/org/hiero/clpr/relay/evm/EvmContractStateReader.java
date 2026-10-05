@@ -282,11 +282,6 @@ public class EvmContractStateReader implements ContractStateReader {
             LOGGER.warn("Failed to decode trustAnchorId from channel record: {}", e.getMessage());
         }
 
-        // remoteTrustAnchorId was removed from the on-chain Channel struct. No on-chain source
-        // remains, so leave it empty. QbftBundleConstructor treats an empty remoteTrustAnchorId as
-        // "remote epoch = current epoch".
-        final Bytes remoteTrustAnchorId = Bytes.EMPTY;
-
         // Slot 26: endpointManifestVersion (uint64 inline).
         long endpointManifestVersion = 0L;
         try {
@@ -309,7 +304,6 @@ public class EvmContractStateReader implements ContractStateReader {
                 .peerThrottles(peerThrottles)
                 .trustAnchor(trustAnchor)
                 .trustAnchorId(trustAnchorId)
-                .remoteTrustAnchorId(remoteTrustAnchorId)
                 .endpointManifestVersion(endpointManifestVersion)
                 .build());
     }

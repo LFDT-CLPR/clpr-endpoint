@@ -10,7 +10,7 @@ import com.hedera.pbj.runtime.io.buffer.Bytes;
 import java.time.Duration;
 import java.util.function.Predicate;
 import org.hiero.clpr.relay.core.ParsedBundle;
-import org.hiero.clpr.relay.evm.QbftProofCodec;
+import org.hiero.clpr.relay.evm.qbft.QbftProofCodec;
 import org.hiero.clpr.relay.integration.ContractInteractor.ChannelState;
 import org.hiero.clpr.relay.integration.OneSidedStubPeerTestBase;
 import org.hiero.clpr.relay.integration.TestConditions;
@@ -20,17 +20,19 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.condition.EnabledIfEnvironmentVariable;
 
 /**
- * The relay must initiate an outbound sync <em>only</em> when it has progress to share, and must do so for <em>every</em> progress
- * criterion. There is no "empty probe": when no progress criterion holds, the relay stays silent and relies
- * on the peer to push its own progress to {@code ClprSyncHandler}.
+ * The relay must deliver a progress-bearing bundle <em>only</em> when it has progress to share, and must do
+ * so for <em>every</em> progress criterion. When no criterion holds it conveys nothing (an empty phase-2
+ * payload) and relies on the peer to push its own progress to {@code ClprSyncHandler}.
  *
  * <p>Observation is direct: {@link org.hiero.clpr.relay.test.harness.StubPeer} records every outbound sync
  * the relay makes, so {@link #assertPush} / {@link #assertNoPushWithin} assert on what the relay actually
  * sent rather than on side effects.
  *
- * <p>{@code ChannelSyncTask} no longer sends an empty-payload probe
- * every cycle and the {@code QbftBundleConstructor} suppress-decision is authoritative for what counts as
- * progress, so the negative assertions ({@link #assertNoPushWithin}) hold alongside the positive ones.
+ * <p>Under the two-phase protocol {@code ChannelSyncTask} initiates a sync every cycle (a phase-1
+ * {@code bundle_request}), but only delivers a bundle in phase 2 when it has progress — the
+ * {@code QbftBundleConstructor} suppress-decision (an empty {@code bundle_response} payload) is
+ * authoritative for what counts as progress. The negative assertions ({@link #assertNoPushWithin}) therefore
+ * key on the absence of a non-empty phase-2 {@code bundle_response}, not on the absence of any traffic.
  */
 @EnabledIfEnvironmentVariable(named = "RUN_INTEGRATION_TESTS", matches = ".*")
 class RelayPushesIffProgressStubPeerTest extends OneSidedStubPeerTestBase {
@@ -64,7 +66,7 @@ class RelayPushesIffProgressStubPeerTest extends OneSidedStubPeerTestBase {
         //    acknowledgement bundle. Consume that owed ack — it is real progress, NOT a violation.
         final ChannelState afterSend = interactor.requireChannelState(channelId);
         final long ackTarget = afterSend.receivedMessageId() + 1;
-        poke(StubBundles.hieroStateProof()
+        poke(StubBundles.stubProof()
                 .ackedMessageId(afterSend.receivedMessageId())
                 .receivedMessageId(afterSend.nextMessageId() - 1)
                 .reply(1L, ClprMessageReplyStatus.SUCCESS, new byte[] {1})
@@ -85,7 +87,7 @@ class RelayPushesIffProgressStubPeerTest extends OneSidedStubPeerTestBase {
         //    relay drains and pushes its DRAINED status.
         final ChannelState closing = interactor.requireChannelState(channelId);
         peer.drain();
-        poke(StubBundles.hieroStateProof()
+        poke(StubBundles.stubProof()
                 .ackedMessageId(closing.receivedMessageId())
                 .receivedMessageId(closing.nextMessageId() - 1)
                 .chainFrom(Bytes.wrap(closing.receivedRunningHash()))
@@ -102,7 +104,7 @@ class RelayPushesIffProgressStubPeerTest extends OneSidedStubPeerTestBase {
 
         // ── G) Criterion 4b — DRAINED → CLOSED: the peer declares CLOSED; the relay closes and ceases.
         final ChannelState drained = interactor.requireChannelState(channelId);
-        poke(StubBundles.hieroStateProof()
+        poke(StubBundles.stubProof()
                 .ackedMessageId(drained.receivedMessageId())
                 .receivedMessageId(drained.ackedMessageId())
                 .chainFrom(Bytes.wrap(drained.receivedRunningHash()))
@@ -129,22 +131,27 @@ class RelayPushesIffProgressStubPeerTest extends OneSidedStubPeerTestBase {
     // ── helpers ──────────────────────────────────────────────────────────────────────────────────────────
 
     private static ParsedBundle decode(final ClprSyncPayload p) {
-        return new QbftProofCodec(Bytes.wrap(channelId)).decodeBundle(p.bundlePayload());
+        return new QbftProofCodec(Bytes.wrap(channelId)).decodeBundle(replyBundle(p));
     }
 
-    /** Assert the relay initiates NO outbound sync within {@code window} (it has no progress to share). */
+    /**
+     * Assert the relay delivers NO progress-bearing bundle within {@code window}. Under the two-phase
+     * protocol the relay still initiates a sync every cycle (a phase-1 {@code bundle_request}), so
+     * "silence" is the absence of a non-empty phase-2 {@code bundle_response} — the relay had nothing to
+     * convey and its follow-up carried an empty payload.
+     */
     private static void assertNoPushWithin(final Duration window) {
         peer.drain();
-        final ClprSyncPayload pushed = peer.awaitSync(window);
+        final ClprSyncPayload pushed = peer.awaitSync(p -> replyBundle(p).length() > 0, window);
         assertThat(pushed)
-                .as("relay initiated an outbound sync with no progress to share")
+                .as("relay delivered a progress-bearing bundle when it had no progress to share")
                 .isNull();
     }
 
-    /** Await an outbound sync whose decoded bundle matches {@code matches}; fail if none arrives in time. */
+    /** Await a delivered bundle (a non-empty phase-2 {@code bundle_response}) matching {@code matches}; fail if none arrives in time. */
     private static ParsedBundle assertPush(final Predicate<ParsedBundle> matches, final Duration timeout) {
         final ClprSyncPayload pushed =
-                peer.awaitSync(p -> p.bundlePayload().length() > 0 && matches.test(decode(p)), timeout);
+                peer.awaitSync(p -> replyBundle(p).length() > 0 && matches.test(decode(p)), timeout);
         assertThat(pushed)
                 .as("relay did not push the expected progress-bearing bundle")
                 .isNotNull();

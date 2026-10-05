@@ -3,6 +3,7 @@ package org.hiero.clpr.relay.integration;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+import com.hedera.hapi.node.state.clpr.BundleRequest;
 import com.hedera.hapi.node.state.clpr.ClprChannel;
 import com.hedera.hapi.node.state.clpr.ClprChannelStatus;
 import com.hedera.hapi.node.state.clpr.ClprMessagePayload;
@@ -10,10 +11,11 @@ import com.hedera.hapi.node.state.clpr.ClprMessageValue;
 import com.hedera.pbj.runtime.io.buffer.Bytes;
 import java.math.BigInteger;
 import java.util.List;
+import org.hiero.clpr.relay.core.CommitmentLevel;
 import org.hiero.clpr.relay.core.ContractStateReader;
-import org.hiero.clpr.relay.evm.QbftBundleConstructor;
 import org.hiero.clpr.relay.evm.jsonrpc.EvmJsonRpcClient;
 import org.hiero.clpr.relay.evm.model.Address;
+import org.hiero.clpr.relay.evm.qbft.QbftBundleConstructor;
 import org.hiero.clpr.relay.evm.testfixtures.TestEvmJsonRpcClient;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.condition.EnabledIfEnvironmentVariable;
@@ -50,109 +52,18 @@ class QbftBundleConstructorTest {
         final var runningHashAfterProcessing =
                 Bytes.fromHex("2fb88ac06bd872a82e3338db1e6b58c3b517bf8329538dc836b53e69d626c11c");
 
-        final var blockNumber = rpc.ethGetBlockHeaderByNumber("latest").number();
-        final var qbftProofConstructor = new QbftBundleConstructor(accountAddress, 30_000L, 10, 10, rpc);
         final var clprChannel = minimalChannel(channelId);
-        qbftProofConstructor.onStateChanged(
-                blockNumber,
-                clprChannel.channelId(),
-                clprChannel,
-                List.of(minimalMessage(messageId, runningHashAfterProcessing)));
-        final var constructedBundle = qbftProofConstructor.getLatestBundlePayload(clprChannel.channelId());
-        assertThat(constructedBundle).isNotEmpty();
+        final ContractStateReader stateReader =
+                new FixedStateReader(clprChannel, List.of(minimalMessage(messageId, runningHashAfterProcessing)));
+        final var qbftProofConstructor =
+                new QbftBundleConstructor(accountAddress, 30_000L, 10, 10, rpc, stateReader, CommitmentLevel.LATEST);
 
-        // RLP-DIVERGENCE REPRO: decode the REAL proof bytes with a faithful port of OpenZeppelin
-        // RLP.sol (the strict decoder the on-chain QBFTVerifier uses). Random-byte synthetics are
-        // OZ-valid at every size, so if real Besu block-header / MPT-proof-node bytes trip OZ, this
-        // pinpoints it. Diagnostic only: prints the byte offset + reason rather than masking it.
-        final byte[] proof = constructedBundle.orElseThrow().toByteArray();
-        System.out.printf("[RLP-REPRO] real QBFT proof size=%d bytes%n", proof.length);
-        try {
-            OzRlp.validate(proof);
-            System.out.println("[RLP-REPRO] real proof is OZ-strict VALID");
-        } catch (final OzRlp.Invalid e) {
-            System.out.printf("[RLP-REPRO] real proof REJECTED by OZ: %s%n", e.getMessage());
-            throw e;
-        }
-    }
-
-    /** Faithful port of OpenZeppelin utils/RLP.sol _decodeLength (strict, exact-consumption, recursive). */
-    static final class OzRlp {
-        private static final int SHORT_THRESHOLD = 55;
-        private static final int SHORT_OFFSET = 0x80;
-        private static final int LONG_OFFSET = 0xC0;
-
-        static final class Invalid extends RuntimeException {
-            Invalid(final String why, final int pos) {
-                super(why + " @pos=" + pos);
-            }
-        }
-
-        private static void req(final boolean c, final String why, final int pos) {
-            if (!c) throw new Invalid(why, pos);
-        }
-
-        private static long readBE(final byte[] b, final int off, final int n) {
-            long v = 0;
-            for (int i = 0; i < n; i++) v = (v << 8) | (b[off + i] & 0xffL);
-            return v;
-        }
-
-        static void validate(final byte[] b) {
-            final int consumed = item(b, 0, b.length);
-            req(consumed == b.length, "top item not exactly buffer (" + consumed + "/" + b.length + ")", 0);
-        }
-
-        private static int item(final byte[] b, final int start, final int end) {
-            final int itemLength = end - start;
-            req(itemLength != 0, "empty item", start);
-            final int prefix = b[start] & 0xff;
-            if (prefix < LONG_OFFSET) {
-                if (prefix < SHORT_OFFSET) {
-                    return 1;
-                } else if (prefix <= SHORT_OFFSET + SHORT_THRESHOLD) {
-                    final int strLen = prefix - SHORT_OFFSET;
-                    req(
-                            itemLength > strLen && (strLen != 1 || (b[start + 1] & 0xff) >= SHORT_OFFSET),
-                            "short-str",
-                            start);
-                    return 1 + strLen;
-                } else {
-                    final int ll = prefix - SHORT_OFFSET - SHORT_THRESHOLD;
-                    req(itemLength > ll, "long-str lenlen", start);
-                    req((b[start + 1] & 0xff) != 0x00, "long-str leading-zero", start);
-                    final long len = readBE(b, start + 1, ll);
-                    req(len > SHORT_THRESHOLD && (long) (itemLength - ll) > len, "long-str len", start);
-                    return (int) (1 + ll + len);
-                }
-            } else {
-                if (prefix <= LONG_OFFSET + SHORT_THRESHOLD) {
-                    final int listLen = prefix - LONG_OFFSET;
-                    req(itemLength > listLen, "short-list", start);
-                    listContent(b, start + 1, start + 1 + listLen);
-                    return 1 + listLen;
-                } else {
-                    final int ll = prefix - LONG_OFFSET - SHORT_THRESHOLD;
-                    req(itemLength > ll, "long-list lenlen", start);
-                    req((b[start + 1] & 0xff) != 0x00, "long-list leading-zero", start);
-                    final long len = readBE(b, start + 1, ll);
-                    req(len > SHORT_THRESHOLD && (long) (itemLength - ll) > len, "long-list len", start);
-                    listContent(b, start + 1 + ll, (int) (start + 1 + ll + len));
-                    return (int) (1 + ll + len);
-                }
-            }
-        }
-
-        private static void listContent(final byte[] b, final int cStart, final int cEnd) {
-            req(cEnd <= b.length, "list-content exceeds buffer", cStart);
-            int pos = cStart;
-            while (pos < cEnd) {
-                final int consumed = item(b, pos, cEnd);
-                req(pos + consumed <= cEnd, "element exceeds list bound", pos);
-                pos += consumed;
-            }
-            req(pos == cEnd, "list not exactly consumed", cStart);
-        }
+        // Ad-hoc construction: ask for the channel's messages from id 1 (the peer's request). createBundle
+        // reads the fixture channel/message from the state reader and fetches the proof from Besu at head.
+        final var request =
+                BundleRequest.newBuilder().currentReceivedMessageId(0L).build();
+        final var response = qbftProofConstructor.createBundle(clprChannel.channelId(), request);
+        assertThat(response.bundlePayload().length()).isGreaterThan(0);
     }
 
     private static ContractStateReader.QueuedMessage minimalMessage(long id, Bytes runningHashAfterProcessing) {
@@ -167,7 +78,7 @@ class QbftBundleConstructorTest {
     private static ClprChannel minimalChannel(long channelId) {
         return ClprChannel.newBuilder()
                 .channelId(Bytes.wrap(BigInteger.valueOf(channelId).toByteArray()))
-                .nextMessageId(1L)
+                .nextMessageId(2L) // message 1 has been sent, so createBundle serves it for a from-1 request
                 .sentRunningHash(Bytes.wrap(new byte[32]))
                 .receivedMessageId(0L)
                 .receivedRunningHash(Bytes.wrap(new byte[32]))

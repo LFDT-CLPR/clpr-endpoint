@@ -13,7 +13,7 @@ import org.hiero.clpr.relay.core.BundlePayloadCodec;
 import org.hiero.clpr.relay.core.BundleTrimmer;
 import org.hiero.clpr.relay.core.ParsedBundle;
 import org.hiero.clpr.relay.evm.AbiCodec;
-import org.hiero.clpr.relay.evm.QbftProofCodec;
+import org.hiero.clpr.relay.evm.qbft.QbftProofCodec;
 import org.hiero.clpr.relay.evm.storage.ClprServiceStorageLayout;
 import org.jspecify.annotations.NonNull;
 

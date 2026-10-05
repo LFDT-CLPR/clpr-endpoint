@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-package org.hiero.clpr.relay.evm;
+package org.hiero.clpr.relay.evm.qbft;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -12,6 +12,10 @@ import com.hedera.pbj.runtime.io.buffer.Bytes;
 import java.math.BigInteger;
 import java.util.List;
 import org.hiero.clpr.relay.core.ParsedBundle;
+import org.hiero.clpr.relay.evm.AbiCodec;
+import org.hiero.clpr.relay.evm.ByteUtils;
+import org.hiero.clpr.relay.evm.EvmUtils;
+import org.hiero.clpr.relay.evm.RlpReader;
 import org.hiero.clpr.relay.evm.storage.ClprServiceStorageLayout;
 import org.junit.jupiter.api.Test;
 
@@ -84,7 +88,7 @@ class QbftProofCodecTest {
         assertThat(parsed.metadata().nextMessageId()).isEqualTo(7L);
         assertThat(parsed.messages()).hasSize(1);
         assertThat(parsed.messages().get(0).message().messageData()).isEqualTo(Bytes.wrap("hello".getBytes()));
-        assertThat(parsed.rawProofBytes()).isEqualTo(proof);
+        assertThat(parsed.rawBundleBytes()).isEqualTo(proof);
     }
 
     @Test
@@ -132,7 +136,7 @@ class QbftProofCodecTest {
 
         assertThat(parsed.metadata().nextMessageId()).isEqualTo(3L);
         assertThat(parsed.messages()).hasSize(1);
-        assertThat(parsed.rawProofBytes()).isEqualTo(proof);
+        assertThat(parsed.rawBundleBytes()).isEqualTo(proof);
     }
 
     @Test
@@ -143,7 +147,7 @@ class QbftProofCodecTest {
         final ParsedBundle parsed = trim(proof, 0L);
 
         assertThat(parsed.messages()).hasSize(1);
-        assertThat(parsed.rawProofBytes()).isEqualTo(proof);
+        assertThat(parsed.rawBundleBytes()).isEqualTo(proof);
     }
 
     @Test
@@ -158,7 +162,7 @@ class QbftProofCodecTest {
         // nextMessageId (sender frontier) is preserved.
         assertThat(parsed.metadata().nextMessageId()).isEqualTo(6L);
         // The re-encoded bytes round-trip to the trimmed content.
-        final ParsedBundle reparsed = codec.decodeBundle(parsed.rawProofBytes());
+        final ParsedBundle reparsed = codec.decodeBundle(parsed.rawBundleBytes());
         assertThat(reparsed.messages()).hasSize(1);
         assertThat(reparsed.messages().get(0).message().messageData()).isEqualTo(Bytes.wrap("m5".getBytes()));
     }
@@ -175,12 +179,12 @@ class QbftProofCodecTest {
 
         assertThat(parsed.messages()).isEmpty();
         // Re-encoded content has no messages but keeps the metadata (the acknowledgment).
-        final ParsedBundle reparsed = codec.decodeBundle(parsed.rawProofBytes());
+        final ParsedBundle reparsed = codec.decodeBundle(parsed.rawBundleBytes());
         assertThat(reparsed.messages()).isEmpty();
         assertThat(reparsed.metadata().nextMessageId()).isEqualTo(2L);
         // The running-hash proof entry is gone; the two unrelated entries survive.
         final List<Bytes> storageEntries =
-                RlpReader.splitList(RlpReader.splitList(parsed.rawProofBytes()).get(3));
+                RlpReader.splitList(RlpReader.splitList(parsed.rawBundleBytes()).get(3));
         assertThat(storageEntries).hasSize(2);
         final Bytes droppedKey = ByteUtils.leftPad32(ByteUtils.fromPrefixedHex(EvmUtils.toSlotHex(
                 ClprServiceStorageLayout.calculateMsgRunningHashStorageSlot(channelId, BigInteger.ONE))));

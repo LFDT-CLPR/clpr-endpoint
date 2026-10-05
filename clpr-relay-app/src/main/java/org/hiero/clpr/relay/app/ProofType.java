@@ -4,7 +4,7 @@ package org.hiero.clpr.relay.app;
 /**
  * Proof format discriminator for a local network or peer channel.
  *
- * <p>The relay's core abstractions ({@code ContractStateReader}, {@code TransactionSubmitter},
+ * <p>The relay's core abstractions ({@code ContractStateReader}, {@code InboundBundleQueue},
  * {@code BundleConstructor}, {@code BundlePayloadCodec}) are chain-agnostic. This enum selects which
  * concrete implementation bundle to build in {@code ClprChannelHandler.create()} and which
  * {@code getLedgerConfiguration} payload type to serve.
@@ -25,6 +25,7 @@ public enum ProofType {
     QBFT,
     CometBFT,
     Hiero,
+
     /**
      * Ethereum mainnet (post-Merge, proof-of-stake) and L2s anchoring to it.
      * {@code getLedgerConfiguration} returns an {@code EthereumPosLedgerConfigurationPayload} carrying
@@ -32,5 +33,21 @@ public enum ProofType {
      * Hiero-native {@code EthereumSyncCommitteeProofVerifier} against a sync-committee BLS finality
      * proof.
      */
-    EthereumPOS
+    EthereumPOS,
+
+    /**
+     * No-crypto stub format {@code "CLPRSTUB" || protobuf(ClprBundleContent)} used only for
+     * integration testing against the {@code StubClprVerifier} contract — never a real production
+     * chain. Valid on both sides of a test channel:
+     *
+     * <ul>
+     *   <li>As a channel's {@code peerProofType}: the relay parses inbound bundles with
+     *       {@code StubProofCodec} and submits them verbatim to the stub verifier. A simulated stub
+     *       peer supplies hand-crafted bundles this way.</li>
+     *   <li>As a <em>local network's</em> own proof type: {@code StubBundleConstructor} builds
+     *       CLPRSTUB bundles from real on-chain channel state, letting two real relays exchange
+     *       messages end-to-end over the stub verifier without a real consensus proof.</li>
+     * </ul>
+     */
+    Stub
 }

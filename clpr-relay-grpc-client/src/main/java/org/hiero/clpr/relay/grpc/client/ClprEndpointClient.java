@@ -15,15 +15,22 @@ import io.grpc.netty.shaded.io.grpc.netty.NettyChannelBuilder;
 import io.grpc.netty.shaded.io.netty.handler.ssl.SslContext;
 import io.grpc.netty.shaded.io.netty.handler.ssl.SslContextBuilder;
 import io.grpc.netty.shaded.io.netty.handler.ssl.SslProvider;
+import io.grpc.stub.ClientCallStreamObserver;
 import io.grpc.stub.ClientCalls;
+import io.grpc.stub.StreamObserver;
 import java.io.ByteArrayInputStream;
 import java.io.InputStream;
 import java.security.KeyStore;
 import java.security.NoSuchAlgorithmException;
 import java.time.Duration;
 import java.util.List;
+import java.util.concurrent.ArrayBlockingQueue;
+import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.Function;
 import java.util.function.Supplier;
 import javax.net.ssl.KeyManager;
 import javax.net.ssl.KeyManagerFactory;
@@ -146,54 +153,45 @@ public class ClprEndpointClient implements AutoCloseable {
      */
     private volatile boolean closed = false;
 
-    /** The grpc-java method descriptor for the sync RPC. */
+    /** The grpc-java method descriptor for the two-phase sync bidirectional-streaming RPC. */
     private static final MethodDescriptor<byte[], byte[]> SYNC_METHOD_DESCRIPTOR =
             MethodDescriptor.<byte[], byte[]>newBuilder()
-                    .setType(MethodDescriptor.MethodType.UNARY)
+                    .setType(MethodDescriptor.MethodType.BIDI_STREAMING)
                     .setFullMethodName(MethodDescriptor.generateFullMethodName(SERVICE_NAME, "sync"))
                     .setRequestMarshaller(BYTE_MARSHALLER)
                     .setResponseMarshaller(BYTE_MARSHALLER)
                     .build();
 
     /**
-     * Initiates a sync with a peer endpoint.
+     * Runs a two-phase {@code sync} exchange with a peer endpoint over a single bidirectional
+     * stream, driven synchronously:
      *
-     * @param host            the peer's hostname or IP address
-     * @param port            the peer's gRPC port
-     * @param outboundPayload the sync payload to send
-     * @return the peer's response payload
-     * @throws Exception if the call fails
-     */
-    public ClprSyncPayload sync(final String host, final int port, final ClprSyncPayload outboundPayload)
-            throws Exception {
-        return sync(host, port, outboundPayload, Bytes.EMPTY);
-    }
-
-    /**
-     * Initiates a sync with a peer endpoint. The transport is decided by this endpoint's
-     * {@code sync.tlsEnabled} profile, not by whether the peer happens to publish a certificate:
+     * <ol>
+     *   <li>open the stream and send {@code request} (phase 1),</li>
+     *   <li>block until the peer's single response arrives,</li>
+     *   <li>derive the follow-up from that response via {@code followUpFactory}, send it (phase 2),
+     *       then half-close,</li>
+     *   <li>wait for the server to complete the stream.</li>
+     * </ol>
      *
-     * <ul>
-     *   <li>{@code tlsEnabled} — the channel is mutual TLS. The peer MUST publish an on-chain
-     *       {@code tls_certificate}; it is the trust anchor its presented leaf must chain to, and — if this
-     *       endpoint has its own leaf — that leaf is presented as the client certificate. A peer that
-     *       publishes no certificate is a misconfiguration in a secure network and fails fast here.</li>
-     *   <li>{@code !tlsEnabled} — the channel is plaintext and {@code peerTlsCertificate} is ignored.</li>
-     * </ul>
+     * <p>The peer emits exactly one response (to the phase-1 request); the phase-2 follow-up is not
+     * answered. The call is bounded by the read timeout at each blocking step. Transport (mutual-TLS
+     * vs plaintext) is chosen exactly as in {@link #sync}.
      *
      * @param host               the peer's hostname or IP address
      * @param port               the peer's gRPC port
-     * @param outboundPayload    the sync payload to send
-     * @param peerTlsCertificate the peer's on-chain {@code tls_certificate} (CA DER); required (as the
-     *                           trust anchor) when {@code sslEnabled}, ignored otherwise
-     * @return the peer's response payload
-     * @throws Exception             if the call fails
-     * @throws IllegalStateException if {@code sslEnabled} but the peer publishes no {@code tls_certificate}
+     * @param request            the phase-1 payload to send
+     * @param followUpFactory    maps the peer's response to the phase-2 follow-up payload
+     * @param peerTlsCertificate the peer's on-chain {@code tls_certificate} (CA DER); required when
+     *                           this endpoint's {@code sync.tlsEnabled}, ignored otherwise
+     * @return the peer's phase-1 response payload
+     * @throws Exception if the call fails or does not complete within the read timeout
      */
     public ClprSyncPayload sync(
             final String host,
             final int port,
-            final ClprSyncPayload outboundPayload,
+            final ClprSyncPayload request,
+            final Function<ClprSyncPayload, ClprSyncPayload> followUpFactory,
             @Nullable final Bytes peerTlsCertificate)
             throws Exception {
         final byte[] peerCertDer;
@@ -204,24 +202,111 @@ public class ClprEndpointClient implements AutoCloseable {
             }
             peerCertDer = peerTlsCertificate.toByteArray();
         } else {
-            // Plaintext network: dial plaintext regardless of any certificate the peer may publish.
             peerCertDer = NO_PEER_CERT;
         }
         final String key = cacheKey(host, port, peerCertDer);
         final ManagedChannel channel = channelFor(key, host, port, () -> buildChannel(host, port, peerCertDer));
+        final var callOptions =
+                CallOptions.DEFAULT.withDeadlineAfter(DEFAULT_READ_TIMEOUT.toMillis(), TimeUnit.MILLISECONDS);
+
+        final BlockingQueue<ClprSyncPayload> replies = new ArrayBlockingQueue<>(2);
+        final AtomicReference<Throwable> error = new AtomicReference<>();
+        final CountDownLatch completed = new CountDownLatch(1);
+
+        final StreamObserver<byte[]> responseObserver = new StreamObserver<>() {
+            @Override
+            public void onNext(final byte[] value) {
+                try {
+                    if (!replies.offer(ClprSyncPayload.PROTOBUF.parse(Bytes.wrap(value)))) {
+                        LOGGER.warn("Received more than 2 messages while syncing with peer");
+                    }
+                } catch (final Exception e) {
+                    error.compareAndSet(null, e);
+                }
+            }
+
+            @Override
+            public void onError(final Throwable t) {
+                error.compareAndSet(null, t);
+                completed.countDown();
+            }
+
+            @Override
+            public void onCompleted() {
+                completed.countDown();
+            }
+        };
+
+        // asyncBidiStreamingCall always returns a ClientCallStreamObserver; casting lets us cancel the
+        // call in the finally below, which onError() alone cannot do once the request stream is half-closed.
+        final ClientCallStreamObserver<byte[]> requestObserver =
+                (ClientCallStreamObserver<byte[]>) ClientCalls.asyncBidiStreamingCall(
+                        channel.newCall(SYNC_METHOD_DESCRIPTOR, callOptions), responseObserver);
+        // Only a fully-completed exchange (server finished the stream cleanly) leaves the call in a state
+        // that needs no teardown. Every other exit — a phase-2 build failure, an await timeout, a
+        // transport error, or no phase-1 reply — must cancel the half-open call so the client stream and
+        // the peer's ClprSyncSession are released now, not when the CallOptions deadline eventually fires.
+        boolean completedNormally = false;
         try {
-            final var callOptions =
-                    CallOptions.DEFAULT.withDeadlineAfter(DEFAULT_READ_TIMEOUT.toMillis(), TimeUnit.MILLISECONDS);
-            final var requestBytes = ClprSyncPayload.PROTOBUF.toBytes(outboundPayload);
-            final var responseBytes = ClientCalls.blockingUnaryCall(
-                    channel, SYNC_METHOD_DESCRIPTOR, callOptions, requestBytes.toByteArray());
-            return ClprSyncPayload.PROTOBUF.parse(Bytes.wrap(responseBytes));
+            // Phase 1: send the request.
+            requestObserver.onNext(ClprSyncPayload.PROTOBUF.toBytes(request).toByteArray());
+
+            // Block for the peer's single response.
+            final ClprSyncPayload reply = replies.poll(DEFAULT_READ_TIMEOUT.toMillis(), TimeUnit.MILLISECONDS);
+            if (reply == null) {
+                throw toException(
+                        error.get(),
+                        Status.DEADLINE_EXCEEDED
+                                .withDescription("sync: no response from peer within read timeout")
+                                .asRuntimeException());
+            }
+
+            // Phase 2: send the follow-up derived from the response, then half-close.
+            final ClprSyncPayload followUp = followUpFactory.apply(reply);
+            requestObserver.onNext(ClprSyncPayload.PROTOBUF.toBytes(followUp).toByteArray());
+            requestObserver.onCompleted();
+
+            // Wait for the server to finish the stream.
+            if (!completed.await(DEFAULT_READ_TIMEOUT.toMillis(), TimeUnit.MILLISECONDS)) {
+                throw Status.DEADLINE_EXCEEDED
+                        .withDescription("sync: stream did not complete within read timeout")
+                        .asRuntimeException();
+            }
+            final Throwable t = error.get();
+            if (t != null) {
+                throw toException(t, null);
+            }
+            completedNormally = true;
+            return reply;
         } catch (final StatusRuntimeException e) {
             if (isTransportError(e)) {
                 evictChannel(key, channel);
             }
             throw e;
+        } finally {
+            if (!completedNormally) {
+                // cancel() is idempotent and safe on an already-terminated call; it is the only teardown
+                // that works both before and after the half-close (onCompleted) above.
+                requestObserver.cancel("sync: aborted before completion", null);
+            }
         }
+    }
+
+    /**
+     * Chooses the exception to surface from a failed {@code sync} call: the observed transport
+     * error when present, otherwise the supplied fallback. Re-throws a {@link RuntimeException}
+     * directly; wraps anything else.
+     */
+    private static Exception toException(
+            @Nullable final Throwable observed, @Nullable final StatusRuntimeException fallback) {
+        final Throwable t = observed != null ? observed : fallback;
+        if (t instanceof RuntimeException re) {
+            throw re;
+        }
+        if (t instanceof Exception e) {
+            return e;
+        }
+        return new RuntimeException("sync failed", t);
     }
 
     /**
