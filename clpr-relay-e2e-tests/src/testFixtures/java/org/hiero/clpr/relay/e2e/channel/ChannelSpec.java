@@ -4,6 +4,7 @@ package org.hiero.clpr.relay.e2e.channel;
 import java.math.BigInteger;
 import java.util.List;
 import org.hiero.clpr.relay.e2e.chain.BesuNetwork;
+import org.hiero.clpr.relay.e2e.chain.E2eContracts;
 import org.hiero.clpr.relay.e2e.endpoint.EvmEndpoint;
 import org.jspecify.annotations.Nullable;
 
@@ -30,6 +31,12 @@ import org.jspecify.annotations.Nullable;
  *     and making the test prove nothing in particular
  * @param salt32 operator-chosen label mixed into the channel id; {@code null} generates a fresh
  *     random one, so re-running a test never collides with a previous run's channel
+ * @param serviceA optional override for the CLPR stack this channel wires against on side A. When
+ *     {@code null}, {@code networkA.contracts()} — the chain's primary stack — is used. A non-null
+ *     override lets the channel target a second {@code ClprService} deployed via
+ *     {@link BesuNetwork#deployAdditionalService()}, so a single endpoint can carry multiple
+ *     {@code clprServices[]} entries
+ * @param serviceB optional override for side B, same shape as {@code serviceA}
  */
 public record ChannelSpec(
         BesuNetwork networkA,
@@ -39,7 +46,9 @@ public record ChannelSpec(
         BigInteger connectorStakeWei,
         BigInteger connectorFundingWeiA,
         BigInteger connectorFundingWeiB,
-        @Nullable byte[] salt32) {
+        @Nullable byte[] salt32,
+        @Nullable E2eContracts serviceA,
+        @Nullable E2eContracts serviceB) {
 
     /** Minimum locked stake the service accepts: 0.1 ether. */
     public static final BigInteger DEFAULT_CONNECTOR_STAKE_WEI = BigInteger.valueOf(100_000_000_000_000_000L);
@@ -80,6 +89,16 @@ public record ChannelSpec(
         return new Builder(a, b);
     }
 
+    /** @return the resolved side-A CLPR stack — the override if set, else the chain's primary. */
+    public E2eContracts resolvedServiceA() {
+        return serviceA != null ? serviceA : networkA.contracts();
+    }
+
+    /** @return the resolved side-B CLPR stack — the override if set, else the chain's primary. */
+    public E2eContracts resolvedServiceB() {
+        return serviceB != null ? serviceB : networkB.contracts();
+    }
+
     /** Fluent builder. */
     public static final class Builder {
         private final BesuNetwork networkA;
@@ -92,6 +111,12 @@ public record ChannelSpec(
 
         @Nullable
         private byte[] salt;
+
+        @Nullable
+        private E2eContracts serviceA;
+
+        @Nullable
+        private E2eContracts serviceB;
 
         private Builder(final BesuNetwork networkA, final BesuNetwork networkB) {
             this.networkA = networkA;
@@ -141,8 +166,27 @@ public record ChannelSpec(
             return this;
         }
 
+        /**
+         * Wire this channel against specific {@code ClprService} deployments — one per side —
+         * rather than the primary stack each chain exposes via {@link BesuNetwork#contracts()}.
+         *
+         * <p>The channel's endpoints will pick up matching {@code clprServices[]} entries in their
+         * relay config, each with its own signing key.
+         *
+         * @param a side-A CLPR stack; typically the return value of
+         *     {@link BesuNetwork#deployAdditionalService()}
+         * @param b side-B CLPR stack
+         * @return this builder
+         */
+        public Builder services(final E2eContracts a, final E2eContracts b) {
+            this.serviceA = a;
+            this.serviceB = b;
+            return this;
+        }
+
         public ChannelSpec build() {
-            return new ChannelSpec(networkA, networkB, endpointsA, endpointsB, stake, fundingA, fundingB, salt);
+            return new ChannelSpec(
+                    networkA, networkB, endpointsA, endpointsB, stake, fundingA, fundingB, salt, serviceA, serviceB);
         }
     }
 }

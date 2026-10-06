@@ -51,6 +51,7 @@ final class E2EEnvironmentImpl implements E2EEnvironment {
     @Nullable
     private PeerNetworkShim peerNetworkShim;
 
+    private boolean contractsPrepared;
     private boolean started;
     private boolean closed;
 
@@ -222,17 +223,26 @@ final class E2EEnvironmentImpl implements E2EEnvironment {
     }
 
     @Override
-    public void startAll() {
-        if (started) {
+    public void prepareContracts() {
+        if (contractsPrepared) {
             return;
         }
-        started = true;
+        contractsPrepared = true;
         // The shim must be up before wiring runs so it can hand out proxy addresses to publish on chain.
         if (peerNetworkShim != null) {
             peerNetworkShim.start();
         }
         besuNetworks.startAll();
         besuNetworks.deployAll();
+    }
+
+    @Override
+    public void startAll() {
+        if (started) {
+            return;
+        }
+        started = true;
+        prepareContracts();
         // Channels before endpoints: ClprChannelHandler performs blocking on-chain reads at startup
         // (protocol version, ledger config, peer roster) and aborts a channel that is not registered,
         // so the wiring has to be complete first. It also fills in each endpoint's configuration.

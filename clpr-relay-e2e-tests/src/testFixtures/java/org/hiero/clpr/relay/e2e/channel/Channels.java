@@ -5,6 +5,7 @@ import java.math.BigInteger;
 import java.security.SecureRandom;
 import java.time.Duration;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.IdentityHashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -12,6 +13,7 @@ import java.util.Set;
 import org.hiero.clpr.relay.e2e.chain.Accounts;
 import org.hiero.clpr.relay.e2e.chain.BesuNetwork;
 import org.hiero.clpr.relay.e2e.chain.ChainTx;
+import org.hiero.clpr.relay.e2e.chain.E2eContracts;
 import org.hiero.clpr.relay.e2e.chain.QbftConfigProofBuilder;
 import org.hiero.clpr.relay.e2e.chain.TestAccount;
 import org.hiero.clpr.relay.e2e.endpoint.EvmEndpoint;
@@ -19,6 +21,7 @@ import org.hiero.clpr.relay.e2e.endpoint.EvmEndpointSpec;
 import org.hiero.clpr.relay.e2e.fault.PeerNetworkShim;
 import org.hiero.clpr.relay.evm.AbiCodec;
 import org.hiero.clpr.relay.evm.EthSigner;
+import org.hiero.clpr.relay.integration.ContractInteractor;
 import org.jspecify.annotations.Nullable;
 
 /**
@@ -126,7 +129,9 @@ public final class Channels {
                     template.connectorStakeWei(),
                     template.connectorFundingWeiA(),
                     template.connectorFundingWeiB(),
-                    freshSalt())));
+                    freshSalt(),
+                    template.serviceA(),
+                    template.serviceB())));
         }
         return out;
     }
@@ -208,6 +213,11 @@ public final class Channels {
         final ChannelSpec spec = channel.spec();
         final BesuNetwork netA = spec.networkA();
         final BesuNetwork netB = spec.networkB();
+        // Resolve which CLPR stack each side wires against — the chain's primary by default, or an
+        // additional one deployed via BesuNetwork.deployAdditionalService() when a test wants two
+        // channels on the same chain pair to target distinct ClprService addresses.
+        final E2eContracts contractsA = spec.resolvedServiceA();
+        final E2eContracts contractsB = spec.resolvedServiceB();
         final byte[] salt = channel.salt();
 
         // ONE operator identity for both sides. The channel id is keccak over the two chain ids, the
@@ -220,15 +230,15 @@ public final class Channels {
         // registerEndpoint only posts the bond — it does NOT touch the endpoint manifest, which matters
         // because the manifest proof below asserts the manifest is still the pristine
         // {version:1, service_address, endpoints:[]}.
-        registerEndpoint(netA, operator);
-        registerEndpoint(netB, operator);
+        registerEndpoint(netA, contractsA, operator);
+        registerEndpoint(netB, contractsB, operator);
 
         final byte[] channelId = ClprIds.deriveChannelId(
-                netA.rpc(), netA.contracts().clprService(), netB.caip2(), operator.publicKey64(), salt);
+                netA.rpc(), contractsA.clprService(), netB.caip2(), operator.publicKey64(), salt);
         // Both chains must agree on the id; the derivation sorts the chain ids canonically, so this is
         // a cheap guard against a drift in that ordering rather than a tautology.
         final byte[] channelIdFromB = ClprIds.deriveChannelId(
-                netB.rpc(), netB.contracts().clprService(), netA.caip2(), operator.publicKey64(), salt);
+                netB.rpc(), contractsB.clprService(), netA.caip2(), operator.publicKey64(), salt);
         if (!java.util.Arrays.equals(channelId, channelIdFromB)) {
             throw new IllegalStateException("the two chains derive different channel ids for the same operator and"
                     + " salt: " + AbiCodec.toHex(channelId) + " on " + netA.id() + " vs "
@@ -236,9 +246,12 @@ public final class Channels {
         }
 
         // Per-channel contracts. A verifier wrapper per channel because setSeedEndpoints is per
-        // wrapper and has to name that channel's peer endpoint.
-        final String verifierA = deploy(netA, netA.contracts().qbftVerifier());
-        final String verifierB = deploy(netB, netB.contracts().qbftVerifier());
+        // wrapper and has to name that channel's peer endpoint. The inner QBFTVerifier is the one
+        // belonging to the CLPR stack this channel is wired against, not necessarily the chain's
+        // primary — for override channels the primary verifier and the override verifier are two
+        // separate deployments.
+        final String verifierA = deploy(netA, contractsA.qbftVerifier());
+        final String verifierB = deploy(netB, contractsB.qbftVerifier());
         final String connectorContractA = deployConnector(netA);
         final String connectorContractB = deployConnector(netB);
 
@@ -250,36 +263,45 @@ public final class Channels {
 
         // Commit on both chains, with the same commitment since the operator key is shared.
         final byte[] commitment = ClprIds.channelCommitment(channelId, operator.publicKey64());
-        for (final BesuNetwork net : List.of(netA, netB)) {
-            ChainTx.sendAndAwait(
-                    net.rpc(),
-                    net.rawRpc(),
-                    net.submitterFor(operator),
-                    net.contracts().clprService(),
-                    ClprAbi.registerChannel(channelId, commitment),
-                    BigInteger.ZERO,
-                    "registerChannel on " + net.id(),
-                    wiringReceiptTimeout);
-        }
+        ChainTx.sendAndAwait(
+                netA.rpc(),
+                netA.rawRpc(),
+                netA.submitterFor(operator),
+                contractsA.clprService(),
+                ClprAbi.registerChannel(channelId, commitment),
+                BigInteger.ZERO,
+                "registerChannel on " + netA.id(),
+                wiringReceiptTimeout);
+        ChainTx.sendAndAwait(
+                netB.rpc(),
+                netB.rawRpc(),
+                netB.submitterFor(operator),
+                contractsB.clprService(),
+                ClprAbi.registerChannel(channelId, commitment),
+                BigInteger.ZERO,
+                "registerChannel on " + netB.id(),
+                wiringReceiptTimeout);
 
-        // Cross-wired proofs: each side is completed with a proof of the OTHER chain's state.
-        final byte[] proofOfA = QbftConfigProofBuilder.buildConfigProof(netA);
-        final byte[] proofOfB = QbftConfigProofBuilder.buildConfigProof(netB);
-        final byte[] manifestOfA = QbftConfigProofBuilder.buildManifestProof(netA);
-        final byte[] manifestOfB = QbftConfigProofBuilder.buildManifestProof(netB);
+        // Cross-wired proofs: each side is completed with a proof of the OTHER chain's state. The
+        // proofs must reference the peer chain's ACTUAL service — the one this channel is
+        // registered on — not the peer's primary. Otherwise a channel wired against an override
+        // service would carry a trust anchor pointing at the primary, and every bundle the peer
+        // relay produces would fail to verify.
+        final byte[] proofOfA = QbftConfigProofBuilder.buildConfigProof(netA, contractsA.clprService());
+        final byte[] proofOfB = QbftConfigProofBuilder.buildConfigProof(netB, contractsB.clprService());
+        final byte[] manifestOfA = QbftConfigProofBuilder.buildManifestProof(netA, contractsA.clprService());
+        final byte[] manifestOfB = QbftConfigProofBuilder.buildManifestProof(netB, contractsB.clprService());
 
         final EthSigner operatorSigner = new EthSigner(operator.privateKeyHex());
         // The reveal digest binds the id to the service address, so each chain needs its own signature.
-        final byte[] sigA = operatorSigner.signMessage(
-                ClprIds.revealDigest(channelId, netA.contracts().clprService()));
-        final byte[] sigB = operatorSigner.signMessage(
-                ClprIds.revealDigest(channelId, netB.contracts().clprService()));
+        final byte[] sigA = operatorSigner.signMessage(ClprIds.revealDigest(channelId, contractsA.clprService()));
+        final byte[] sigB = operatorSigner.signMessage(ClprIds.revealDigest(channelId, contractsB.clprService()));
 
         ChainTx.sendAndAwait(
                 netA.rpc(),
                 netA.rawRpc(),
                 netA.submitterFor(operator),
-                netA.contracts().clprService(),
+                contractsA.clprService(),
                 ClprAbi.completeChannel(
                         channelId, operator.publicKey64(), sigA, salt, verifierA, proofOfB, manifestOfB),
                 BigInteger.ZERO,
@@ -289,7 +311,7 @@ public final class Channels {
                 netB.rpc(),
                 netB.rawRpc(),
                 netB.submitterFor(operator),
-                netB.contracts().clprService(),
+                contractsB.clprService(),
                 ClprAbi.completeChannel(
                         channelId, operator.publicKey64(), sigB, salt, verifierB, proofOfA, manifestOfA),
                 BigInteger.ZERO,
@@ -299,25 +321,33 @@ public final class Channels {
         // completeChannel succeeding already proves the manifest proof passed the inner verifier;
         // this confirms the channel actually carries a peer manifest rather than the version-0
         // sentinel, which is what the relay reads to find its peer.
-        requirePeerManifest(netA, channelId);
-        requirePeerManifest(netB, channelId);
+        requirePeerManifest(netA, contractsA.clprService(), channelId);
+        requirePeerManifest(netB, contractsB.clprService(), channelId);
+
+        // A read-only interactor per side, bound to that side's chosen CLPR stack. Used by
+        // ChannelSide.state() for eth_call reads against getChannel — necessary when the channel is
+        // registered on an override service rather than the chain's primary, because the network's
+        // deployer-owned interactor points at the primary and would report "no such channel".
+        final ContractInteractor interactorA = netA.interactorFor(netA.deployerAccount(), contractsA.core());
+        final ContractInteractor interactorB = netB.interactorFor(netB.deployerAccount(), contractsB.core());
 
         final ChannelSide sideA = new ChannelSide(
-                netA, spec.endpointsA(), channelId, verifierA, netA.contracts().e2eApplication());
+                netA, interactorA, contractsA, spec.endpointsA(), channelId, verifierA, contractsA.e2eApplication());
         final ChannelSide sideB = new ChannelSide(
-                netB, spec.endpointsB(), channelId, verifierB, netB.contracts().e2eApplication());
+                netB, interactorB, contractsB, spec.endpointsB(), channelId, verifierB, contractsB.e2eApplication());
 
         sideA.peer(sideB);
         sideB.peer(sideA);
 
-        // Every relay submits bundles with its OWN signing key, and submitBundle is restricted to
-        // registered endpoints — so each endpoint's key has to be admitted on the chain it submits to,
-        // not just the operator's.
-        spec.endpointsA().forEach(e -> registerEndpoint(netA, e.signerAccount()));
-        spec.endpointsB().forEach(e -> registerEndpoint(netB, e.signerAccount()));
+        // Endpoint-signer registration is deferred to Channels.configureEndpoints(), where the
+        // (endpoint, service) → signer assignment is decided. Registering the primary here on every
+        // service the endpoint touches would leave stray registerEndpoint transactions from the
+        // primary signer on services it never actually serves — noise that a signer-scoped routing
+        // assertion cannot distinguish from a real cross-service bundle submission.
 
         sideA.connector(registerConnector(
                 netA,
+                contractsA.clprService(),
                 operator,
                 channelId,
                 salt,
@@ -326,6 +356,7 @@ public final class Channels {
                 spec.connectorFundingWeiA()));
         sideB.connector(registerConnector(
                 netB,
+                contractsB.clprService(),
                 operator,
                 channelId,
                 salt,
@@ -338,32 +369,33 @@ public final class Channels {
 
     private Connector registerConnector(
             final BesuNetwork net,
+            final String clprServiceAddress,
             final TestAccount operator,
             final byte[] channelId,
             final byte[] salt,
             final String connectorContract,
             final BigInteger stakeWei,
             final BigInteger fundingWei) {
-        final byte[] connectorId = ClprIds.deriveConnectorId(
-                net.rpc(), net.contracts().clprService(), channelId, operator.publicKey64(), salt);
+        final byte[] connectorId =
+                ClprIds.deriveConnectorId(net.rpc(), clprServiceAddress, channelId, operator.publicKey64(), salt);
 
         ChainTx.sendAndAwait(
                 net.rpc(),
                 net.rawRpc(),
                 net.submitterFor(operator),
-                net.contracts().clprService(),
+                clprServiceAddress,
                 ClprAbi.registerConnector(ClprIds.connectorCommitment(connectorId, operator.publicKey64())),
                 BigInteger.ZERO,
                 "registerConnector on " + net.id(),
                 wiringReceiptTimeout);
 
         final byte[] sig = new EthSigner(operator.privateKeyHex())
-                .signMessage(ClprIds.revealDigest(connectorId, net.contracts().clprService()));
+                .signMessage(ClprIds.revealDigest(connectorId, clprServiceAddress));
         ChainTx.sendAndAwait(
                 net.rpc(),
                 net.rawRpc(),
                 net.submitterFor(operator),
-                net.contracts().clprService(),
+                clprServiceAddress,
                 ClprAbi.completeConnector(
                         connectorId,
                         operator.publicKey64(),
@@ -400,12 +432,9 @@ public final class Channels {
                 wiringReceiptTimeout);
     }
 
-    private void requirePeerManifest(final BesuNetwork net, final byte[] channelId) {
+    private void requirePeerManifest(final BesuNetwork net, final String clprServiceAddress, final byte[] channelId) {
         final String result = net.rpc()
-                .ethCall(
-                        net.contracts().clprService(),
-                        AbiCodec.toHex(ClprAbi.getPeerEndpointManifest(channelId)),
-                        "latest");
+                .ethCall(clprServiceAddress, AbiCodec.toHex(ClprAbi.getPeerEndpointManifest(channelId)), "latest");
         final byte[] decoded = AbiCodec.fromHex(result);
         if (decoded.length < 32) {
             throw new IllegalStateException(
@@ -434,9 +463,17 @@ public final class Channels {
         return ClprAbi.Endpoint.of(proxy.host(), proxy.port());
     }
 
-    /** Admit an account as an endpoint on {@code net}. Idempotent. */
-    private void registerEndpoint(final BesuNetwork net, final TestAccount account) {
-        final var interactor = net.interactorFor(account);
+    /**
+     * Admit an account as an endpoint on a specific {@code ClprService} deployment on {@code net}.
+     * Idempotent per (account, service).
+     *
+     * @param net the chain
+     * @param contracts the CLPR stack the endpoint is being registered against — the chain's primary
+     *     or an additional one deployed via {@link BesuNetwork#deployAdditionalService()}
+     * @param account the account to admit
+     */
+    private void registerEndpoint(final BesuNetwork net, final E2eContracts contracts, final TestAccount account) {
+        final var interactor = net.interactorFor(account, contracts.core());
         if (!interactor.isEndpointRegistered(account.address())) {
             interactor.registerEndpoint(ENDPOINT_BOND_WEI);
         }
@@ -454,22 +491,27 @@ public final class Channels {
      * Give every endpoint the configuration it needs for the channels it serves: the chain it reads,
      * the service it operates, the channel ids to bring up, and each peer's proof type.
      *
-     * <p>Grouped by (endpoint, chain): an endpoint serving several channels on one chain gets a single
-     * {@code localNetworks} and {@code clprServices} entry carrying all of its channel ids, which is
-     * the shape the relay expects. Emitting one entry per channel would give the same chain several
-     * conflicting definitions.
+     * <p>Grouped by (endpoint, chain, service): an endpoint serving several channels on the same
+     * (chain, service) pair gets one {@code localNetworks} entry and one {@code clprServices} entry
+     * carrying all those channel ids. Two channels sharing the endpoint and chain but pointing at
+     * different {@code ClprService} deployments produce two separate {@code clprServices[]} entries
+     * — with distinct signing keys — which is exactly the shape the multi-service isolation test
+     * asserts against.
      */
     private void configureEndpoints() {
-        record ServiceKey(EvmEndpoint endpoint, BesuNetwork network) {}
+        record ServiceKey(EvmEndpoint endpoint, BesuNetwork network, String serviceAddress) {}
         final var channelIdsByService = new LinkedHashMap<ServiceKey, List<String>>();
+        final var contractsByService = new LinkedHashMap<ServiceKey, E2eContracts>();
 
         for (final Channel channel : channels) {
             for (final ChannelSide side : List.of(channel.a(), channel.b())) {
                 final ChannelSide peer = channel.peerOf(side);
                 for (final EvmEndpoint endpoint : side.endpoints()) {
+                    final ServiceKey key = new ServiceKey(endpoint, side.network(), side.clprServiceAddress());
                     channelIdsByService
-                            .computeIfAbsent(new ServiceKey(endpoint, side.network()), k -> new ArrayList<>())
+                            .computeIfAbsent(key, k -> new ArrayList<>())
                             .add(channel.idHex());
+                    contractsByService.putIfAbsent(key, side.contracts());
                     // The relay resolves a channel's peer proof type from the peer chain id it reads
                     // on-chain; an unmapped peer is skipped without an error.
                     endpoint.addPeerProofType(peer.network().caip2(), "QBFT");
@@ -477,7 +519,41 @@ public final class Channels {
             }
         }
 
-        channelIdsByService.forEach((key, channelIds) -> key.endpoint().serve(key.network(), channelIds));
+        // Track which of an endpoint's signers has already been assigned to a service, so the FIRST
+        // service on an endpoint keeps using the primary signer (backward compat) and each SUBSEQUENT
+        // service is given its own freshly-allocated key. Filtering by from-address on-chain then
+        // maps every submitBundle transaction back to a single (endpoint, service) pair — the
+        // strongest attribution check available without instrumenting the relay.
+        record ServiceSlot(String slotName, TestAccount account) {}
+        final var slotByEndpointService = new HashMap<ServiceKey, ServiceSlot>();
+        final var endpointUsageCount = new IdentityHashMap<EvmEndpoint, Integer>();
+
+        for (final ServiceKey key : channelIdsByService.keySet()) {
+            final int usage = endpointUsageCount.getOrDefault(key.endpoint(), 0);
+            final ServiceSlot slot;
+            if (usage == 0) {
+                slot = new ServiceSlot(
+                        key.endpoint().signingKeySlot(), key.endpoint().signerAccount());
+            } else {
+                final TestAccount extra =
+                        accounts.allocate(key.endpoint().id() + " signer for " + key.serviceAddress());
+                final String slotName = key.endpoint().registerAdditionalSigner(extra);
+                slot = new ServiceSlot(slotName, extra);
+            }
+            // Admit this endpoint's chosen signer on the target service before the container starts.
+            // submitBundle is gated on getEndpointEntry(from) != NONE, so a signer that is not
+            // admitted has every bundle it submits revert. Idempotent. Running this for every
+            // signer — primary and additional alike — keeps the on-chain footprint of each signer
+            // scoped to its own service, which is what the routing attribution check depends on.
+            registerEndpoint(key.network(), contractsByService.get(key), slot.account());
+            slotByEndpointService.put(key, slot);
+            endpointUsageCount.put(key.endpoint(), usage + 1);
+        }
+
+        channelIdsByService.forEach((key, channelIds) -> {
+            final ServiceSlot slot = slotByEndpointService.get(key);
+            key.endpoint().serve(key.network(), key.serviceAddress(), slot.slotName(), channelIds);
+        });
     }
 
     /**
@@ -499,7 +575,14 @@ public final class Channels {
         final BesuNetwork net = side.network();
         final String contract = deployConnector(net);
         final Connector connector = registerConnector(
-                net, channel.operator(), side.channelId(), freshSalt(), contract, stakeWei, fundingWei);
+                net,
+                side.clprServiceAddress(),
+                channel.operator(),
+                side.channelId(),
+                freshSalt(),
+                contract,
+                stakeWei,
+                fundingWei);
         side.connector(connector);
         return connector;
     }

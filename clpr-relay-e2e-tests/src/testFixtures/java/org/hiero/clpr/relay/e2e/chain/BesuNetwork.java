@@ -14,6 +14,7 @@ import org.hiero.clpr.relay.evm.jsonrpc.EvmJsonRpcClient;
 import org.hiero.clpr.relay.evm.testfixtures.TestEvmJsonRpcClient;
 import org.hiero.clpr.relay.integration.AnvilTxSubmitter;
 import org.hiero.clpr.relay.integration.ContractInteractor;
+import org.hiero.clpr.relay.integration.DeployedContracts;
 import org.hiero.clpr.relay.integration.TestConditions;
 import org.jspecify.annotations.Nullable;
 import org.testcontainers.containers.Network;
@@ -331,23 +332,18 @@ public final class BesuNetwork {
     }
 
     /**
-     * An on-chain control surface bound to an arbitrary account on this chain.
+     * Bound to a specific {@link DeployedContracts}
+     * rather than this chain's primary stack. Used by tests that deploy additional
+     * {@code ClprService} instances via {@link #deployAdditionalService()} and need to target them
+     * for endpoint registration, channel wiring, and state reads.
      *
-     * <p>Needed because {@code registerEndpoint} admits {@code msg.sender}: each relay submits with
-     * its own signing key, so that key — not the deployer's — has to be the registered endpoint, or
-     * every {@code submitBundle} reverts.
-     *
-     * @param account the account to act as
-     * @return an interactor signing with that account
+     * @param account the account the interactor signs as
+     * @param deployedContracts the CLPR core the interactor operates against
+     * @return the interactor
      */
-    public ContractInteractor interactorFor(final TestAccount account) {
+    public ContractInteractor interactorFor(final TestAccount account, final DeployedContracts deployedContracts) {
         final EthSigner signer = new EthSigner(account.privateKeyHex());
-        return new ContractInteractor(
-                rpc(),
-                submitterFor(account),
-                signer,
-                account.publicKey64(),
-                contracts().core());
+        return new ContractInteractor(rpc(), submitterFor(account), signer, account.publicKey64(), deployedContracts);
     }
 
     /**
@@ -380,6 +376,27 @@ public final class BesuNetwork {
         this.interactor = new ContractInteractor(
                 rpc(), deployerSubmitter, signer, deployerAccount.publicKey64(), contracts.core());
         interactor.bootstrapDefaults(AbiCodec.fromHex(contracts.clprService()));
+    }
+
+    /**
+     * Deploy a second independent CLPR stack on this chain, alongside {@link #contracts()}.
+     *
+     * <p>Yields a fresh {@code ClprService} + {@code QBFTVerifier} + {@code E2EApplication} triple
+     * at distinct addresses and runs {@code bootstrapDefaults} on the new service so it is enabled
+     * and ready to accept channel wiring, matching what {@link #deployContracts()} does for the
+     * primary stack.
+     *
+     * @return the additional stack's addresses
+     * @throws IllegalStateException if called before {@link #deployContracts()} has run
+     */
+    public E2eContracts deployAdditionalService() {
+        final E2eContractDeployer d = requireStarted(deployer, "deployAdditionalService()");
+        final E2eContracts extra = d.deployChainStack(caip2());
+        final EthSigner signer = new EthSigner(deployerAccount.privateKeyHex());
+        final ContractInteractor extraInteractor =
+                new ContractInteractor(rpc(), deployerSubmitter, signer, deployerAccount.publicKey64(), extra.core());
+        extraInteractor.bootstrapDefaults(AbiCodec.fromHex(extra.clprService()));
+        return extra;
     }
 
     /**
@@ -421,7 +438,7 @@ public final class BesuNetwork {
      * {@link #rpc()}/{@link #inspect()}/{@link #interactor()} pick up the new client.
      *
      * <p>Callers that captured a client or interactor reference before the restart (e.g. through
-     * {@link #interactorFor(TestAccount)}) must re-request theirs; callers that resolve those on
+     * ) must re-request theirs; callers that resolve those on
      * each use pick up the refreshed clients automatically.
      */
     private void refreshHostClients() {

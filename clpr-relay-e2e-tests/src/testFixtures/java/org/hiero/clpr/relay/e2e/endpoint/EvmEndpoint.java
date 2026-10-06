@@ -58,6 +58,15 @@ public final class EvmEndpoint {
     private final LogStream logStream;
     private final HttpClient http;
 
+    /**
+     * All signing accounts this endpoint operates with, in registration order. The first slot is
+     * the primary signer set at construction — the value {@link #signerAccount()} returns for
+     * backward compatibility with callers that expect one key per endpoint. Additional entries
+     * are added by {@link #registerAdditionalSigner(TestAccount)} when the same endpoint operates
+     * multiple {@code clprServices[]}, each with its own key.
+     */
+    private final List<TestAccount> signers = new ArrayList<>();
+
     private final List<RelayYamlWriter.LocalNetwork> localNetworks = new ArrayList<>();
     private final List<RelayYamlWriter.Service> services = new ArrayList<>();
     private final Map<String, String> peerProofTypes = new LinkedHashMap<>();
@@ -78,6 +87,7 @@ public final class EvmEndpoint {
         this.network = network;
         this.image = image;
         this.heapMb = heapMb;
+        this.signers.add(signer);
         this.logStream = new LogStream(spec.id());
         this.http = HttpClient.newBuilder()
                 .version(HttpClient.Version.HTTP_1_1)
@@ -103,6 +113,37 @@ public final class EvmEndpoint {
     /** @return the EVM address the relay submits from. */
     public String signingAddress() {
         return signer.address();
+    }
+
+    /**
+     * Every signing account this endpoint is configured with, in registration order.
+     *
+     * <p>Length 1 for the typical single-service endpoint. Grows to N for an endpoint operating
+     * N separate {@code clprServices[]} entries, each with its own key so channel-to-channel
+     * cross-wiring can be caught by simple {@code from}-address filtering on chain.
+     *
+     * @return an immutable snapshot
+     */
+    public List<TestAccount> signers() {
+        return List.copyOf(signers);
+    }
+
+    /**
+     * Register an additional signing account this endpoint will inject into its container.
+     *
+     * <p>Each {@code clprServices[]} entry in the rendered relay config picks its key by slot
+     * name; this method returns the slot to use for a service configured against the given account.
+     * The primary signer's slot comes from {@link #signingKeySlot()}; additional slots are derived
+     * from it with a numeric suffix (matching the position in {@link #signers()}).
+     *
+     * @param account an already-allocated {@link TestAccount}
+     * @return the slot name to embed in the matching {@link RelayYamlWriter.Service}
+     * @throws IllegalStateException if the endpoint is already running
+     */
+    public String registerAdditionalSigner(final TestAccount account) {
+        throwIfRunning("registerAdditionalSigner");
+        signers.add(account);
+        return signingKeySlotFor(signers.size() - 1);
     }
 
     /** @return the pinned container address, which peers dial and the on-chain roster carries. */
@@ -174,29 +215,59 @@ public final class EvmEndpoint {
      * @return this endpoint
      */
     public EvmEndpoint serve(final BesuNetwork local, final List<String> channelIds) {
-        return addLocalNetwork(new RelayYamlWriter.LocalNetwork(
-                        local.id(),
-                        local.chainId(),
-                        // The in-network URL: the relay dials the node from inside the Docker network.
-                        // Resolves to the RPC filter proxy's alias when the spec opted in, so a test can
-                        // block specific methods without freezing the whole chain.
-                        local.endpointRpcUrl(),
-                        spec.pollInterval().toMillis(),
-                        spec.requestTimeoutMs(),
-                        spec.maxRpcRetries(),
-                        spec.maxGasPriceCapWei(),
-                        spec.maxMessagesPerBundle()))
-                .addService(new RelayYamlWriter.Service(
-                        local.contracts().clprService(),
-                        local.id(),
-                        signingKeySlot(),
-                        spec.discoverChannels(),
-                        channelIds));
+        return serve(local, local.contracts().clprService(), signingKeySlot(), channelIds);
     }
 
-    /** @return the signing-key slot name used in the config sentinel and the env var. */
+    /**
+     * Declare that this endpoint operates a specific {@code ClprService} deployment on {@code local}
+     * and signs with the account associated with {@code signingSlot}.
+     *
+     * <p>Each call appends one {@code clprServices[]} entry to the rendered relay YAML — one per
+     * (chain, service) pair. The {@code localNetworks} entry for {@code local} is added on the
+     * first call for that chain and skipped on subsequent calls, so the same chain can carry
+     * multiple services without producing conflicting network definitions.
+     *
+     * @param local the chain whose service this endpoint operates
+     * @param serviceAddress the specific {@code ClprService} address
+     * @param signingSlot the slot naming the signing key for this service; obtain from
+     *     {@link #signingKeySlot()} or {@link #registerAdditionalSigner(TestAccount)}
+     * @param channelIds channel ids to bring up at startup, {@code 0x}-prefixed
+     * @return this endpoint
+     */
+    public EvmEndpoint serve(
+            final BesuNetwork local,
+            final String serviceAddress,
+            final String signingSlot,
+            final List<String> channelIds) {
+        // Only add a localNetworks entry the first time this chain is served; a second call for
+        // the same chain would give the relay two conflicting entries for one id.
+        final boolean alreadyKnown = localNetworks.stream().anyMatch(n -> n.id().equals(local.id()));
+        if (!alreadyKnown) {
+            addLocalNetwork(new RelayYamlWriter.LocalNetwork(
+                    local.id(),
+                    local.chainId(),
+                    // The in-network URL: the relay dials the node from inside the Docker network.
+                    // Resolves to the RPC filter proxy's alias when the spec opted in, so a test can
+                    // block specific methods without freezing the whole chain.
+                    local.endpointRpcUrl(),
+                    spec.pollInterval().toMillis(),
+                    spec.requestTimeoutMs(),
+                    spec.maxRpcRetries(),
+                    spec.maxGasPriceCapWei(),
+                    spec.maxMessagesPerBundle()));
+        }
+        return addService(new RelayYamlWriter.Service(
+                serviceAddress, local.id(), signingSlot, spec.discoverChannels(), channelIds));
+    }
+
+    /** @return the primary signing-key slot name used in the config sentinel and the env var. */
     public String signingKeySlot() {
-        return spec.id().replaceAll("[^A-Za-z0-9]", "_").toUpperCase(Locale.ROOT);
+        return signingKeySlotFor(0);
+    }
+
+    private String signingKeySlotFor(final int signerIndex) {
+        final String base = spec.id().replaceAll("[^A-Za-z0-9]", "_").toUpperCase(Locale.ROOT);
+        return signerIndex == 0 ? base : base + "_S" + signerIndex;
     }
 
     /** @return the {@code relay.yaml} this endpoint would start with. */
@@ -236,15 +307,18 @@ public final class EvmEndpoint {
                 .withNetworkAliases(spec.id())
                 .withExposedPorts(SYNC_PORT, INFO_PORT, METRICS_PORT)
                 .withCopyToContainer(Transferable.of(configYaml), "/app/relay.yaml")
-                // The production entrypoint substitutes SIGNING_KEY_* into the matching
-                // __SIGNING_KEY_*__ sentinel, so the key never appears in the config document.
-                .withEnv("SIGNING_KEY_" + signingKeySlot(), signer.privateKeyHex())
                 .withEnv("JAVA_OPTS", javaOpts())
                 .withLogConsumer(logStream.consumer())
                 .waitingFor(Wait.forHttp("/healthz")
                         .forPort(METRICS_PORT)
                         .forStatusCode(200)
                         .withStartupTimeout(Duration.ofMinutes(2)));
+        // The production entrypoint substitutes SIGNING_KEY_* into the matching __SIGNING_KEY_*__
+        // sentinel, so the key never appears in the config document. One env var per registered
+        // signer — the endpoint may operate several clprServices[] entries, each with its own key.
+        for (int i = 0; i < signers.size(); i++) {
+            c.withEnv("SIGNING_KEY_" + signingKeySlotFor(i), signers.get(i).privateKeyHex());
+        }
         c.start();
         this.container = c;
     }

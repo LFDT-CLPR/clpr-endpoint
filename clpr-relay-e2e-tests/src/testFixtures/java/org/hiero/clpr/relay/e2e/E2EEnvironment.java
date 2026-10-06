@@ -83,6 +83,16 @@ public interface E2EEnvironment extends AutoCloseable {
     void enablePeerNetworkShim();
 
     /**
+     * Bring the chains up and deploy the primary CLPR stack on each, without wiring channels or
+     * starting endpoints yet. Idempotent — folded into {@link #startAll()} automatically.
+     *
+     * <p>Exposed as a separate step so additional {@code ClprService} deployments (see
+     * {@link org.hiero.clpr.relay.e2e.chain.BesuNetwork#deployAdditionalService()}) can be made
+     * against a running chain before {@link #startAll()} wires the channels that reference them.
+     */
+    void prepareContracts();
+
+    /**
      * Bring up everything declared so far, in dependency order: chains, then contracts, then
      * channel wiring, then endpoints. Idempotent — objects declared afterwards are started
      * individually.
