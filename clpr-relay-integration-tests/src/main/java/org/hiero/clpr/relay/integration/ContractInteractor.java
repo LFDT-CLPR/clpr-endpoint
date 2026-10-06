@@ -789,19 +789,19 @@ public final class ContractInteractor {
      * {@code verifyBundle}. This must be called before poking a bundle if the default zero metadata
      * would fail the contract's step-4 replay check:
      * <pre>
-     *   expectedCount = metadata.nextMessageId - (conn.receivedMessageId + 1)
-     *   if (expectedCount &lt; 0) revert ClprReplayDetected()
+     *   if (metadata.nextMessageId &lt; channel.receivedMessageId + 1) revert ClprReplayDetected()
      * </pre>
-     * For a fresh channel ({@code conn.receivedMessageId = 0}) set {@code nextMessageId = 1} so
-     * {@code expectedCount = 0} (no new messages, no replay). Pass {@code status = 1} (ACTIVE) to
-     * avoid triggering an unintended status transition.
+     * For a fresh channel ({@code channel.receivedMessageId = 0}) set {@code nextMessageId = 1}
+     * (no new messages, no replay). Pass {@code status = 1} (ACTIVE) to avoid triggering an
+     * unintended status transition.
      *
-     * <p>ABI: {@code setVerifyBundleResult((uint64,bytes32,uint64,bytes32,uint8,uint64),bytes[])}.
-     * {@code QueueMetadata} is a fully static struct (6 × 32-byte ABI slots). The {@code bytes[]}
-     * message-payload list is always empty.
+     * <p>ABI: {@code setVerifyBundleResult((uint64,bytes32,uint64,bytes32,uint8,uint64,uint64,bytes32),bytes[])}.
+     * {@code QueueMetadata} is a fully static struct (8 × 32-byte ABI slots). The {@code bytes[]}
+     * message-payload list is always empty, so {@code lastMessageId} and {@code lastMessageRunningHash}
+     * stay zero.
      *
      * @param verifierAddress   the {@code MockClprVerifier} contract address
-     * @param nextMessageId     the peer's next-message-id (≥ {@code conn.receivedMessageId + 1})
+     * @param nextMessageId     the peer's next-message-id (≥ {@code channel.receivedMessageId + 1})
      * @param receivedMessageId the peer's ack of our outbound (0 = no ack)
      * @param statusOrdinal     {@code ChannelStatus} ordinal (0=PENDING, 1=ACTIVE, 2=CLOSING…)
      */
@@ -810,10 +810,10 @@ public final class ContractInteractor {
             final long nextMessageId,
             final long receivedMessageId,
             final int statusOrdinal) {
-        // QueueMetadata is a static struct encoded as 6 × 32-byte slots in-place.
-        // Then the bytes[] offset points to the empty-array tail (6×32 + 32 = 224).
+        // QueueMetadata is a static struct encoded as 8 × 32-byte slots in-place.
+        // Then the bytes[] offset points to the empty-array tail (8×32 + 32 = 288).
         final byte[] selector = AbiCodec.functionSelector(
-                "setVerifyBundleResult((uint64,bytes32,uint64,bytes32,uint8,uint64),bytes[])");
+                "setVerifyBundleResult((uint64,bytes32,uint64,bytes32,uint8,uint64,uint64,bytes32),bytes[])");
         final byte[] callData = AbiCodec.concat(
                 selector,
                 AbiCodec.encodeUint(nextMessageId), // nextMessageId (uint64)
@@ -822,7 +822,9 @@ public final class ContractInteractor {
                 new byte[32], // receivedRunningHash (bytes32 = 0)
                 AbiCodec.encodeUint(statusOrdinal), // state (uint8 ordinal)
                 AbiCodec.encodeUint(0L), // endpointManifestVersion (uint64)
-                AbiCodec.encodeUint(224L), // offset to bytes[] = 6×32 + 32 = 224
+                AbiCodec.encodeUint(0L), // lastMessageId (uint64 = 0, no messages)
+                new byte[32], // lastMessageRunningHash (bytes32 = 0)
+                AbiCodec.encodeUint(288L), // offset to bytes[] = 8×32 + 32 = 288
                 AbiCodec.encodeUint(0L)); // bytes[].length = 0 (empty)
         sendTxAndWait(verifierAddress, callData, null);
     }

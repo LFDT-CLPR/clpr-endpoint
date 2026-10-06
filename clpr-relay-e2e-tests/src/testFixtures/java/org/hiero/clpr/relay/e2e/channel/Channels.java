@@ -21,7 +21,6 @@ import org.hiero.clpr.relay.e2e.endpoint.EvmEndpointSpec;
 import org.hiero.clpr.relay.e2e.fault.PeerNetworkShim;
 import org.hiero.clpr.relay.evm.AbiCodec;
 import org.hiero.clpr.relay.evm.EthSigner;
-import org.hiero.clpr.relay.integration.ContractInteractor;
 import org.jspecify.annotations.Nullable;
 
 /**
@@ -324,17 +323,10 @@ public final class Channels {
         requirePeerManifest(netA, contractsA.clprService(), channelId);
         requirePeerManifest(netB, contractsB.clprService(), channelId);
 
-        // A read-only interactor per side, bound to that side's chosen CLPR stack. Used by
-        // ChannelSide.state() for eth_call reads against getChannel — necessary when the channel is
-        // registered on an override service rather than the chain's primary, because the network's
-        // deployer-owned interactor points at the primary and would report "no such channel".
-        final ContractInteractor interactorA = netA.interactorFor(netA.deployerAccount(), contractsA.core());
-        final ContractInteractor interactorB = netB.interactorFor(netB.deployerAccount(), contractsB.core());
-
-        final ChannelSide sideA = new ChannelSide(
-                netA, interactorA, contractsA, spec.endpointsA(), channelId, verifierA, contractsA.e2eApplication());
-        final ChannelSide sideB = new ChannelSide(
-                netB, interactorB, contractsB, spec.endpointsB(), channelId, verifierB, contractsB.e2eApplication());
+        final ChannelSide sideA =
+                new ChannelSide(netA, contractsA, spec.endpointsA(), channelId, verifierA, contractsA.e2eApplication());
+        final ChannelSide sideB =
+                new ChannelSide(netB, contractsB, spec.endpointsB(), channelId, verifierB, contractsB.e2eApplication());
 
         sideA.peer(sideB);
         sideB.peer(sideA);

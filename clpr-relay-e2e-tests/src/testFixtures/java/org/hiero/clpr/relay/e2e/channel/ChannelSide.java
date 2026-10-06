@@ -14,7 +14,6 @@ import org.jspecify.annotations.Nullable;
 public final class ChannelSide {
 
     private final BesuNetwork network;
-    private final ContractInteractor interactor;
     private final E2eContracts contracts;
     private final List<EvmEndpoint> endpoints;
     private final byte[] channelId;
@@ -29,14 +28,12 @@ public final class ChannelSide {
 
     ChannelSide(
             final BesuNetwork network,
-            final ContractInteractor interactor,
             final E2eContracts contracts,
             final List<EvmEndpoint> endpoints,
             final byte[] channelId,
             final String verifierAddress,
             final String applicationAddress) {
         this.network = network;
-        this.interactor = interactor;
         this.contracts = contracts;
         this.endpoints = List.copyOf(endpoints);
         this.channelId = channelId.clone();
@@ -128,9 +125,19 @@ public final class ChannelSide {
         return channelId.clone();
     }
 
-    /** @return the decoded on-chain channel record. */
+    /**
+     * The decoded on-chain channel record, read from this side's CLPR stack (which may be an override
+     * service rather than the chain's primary).
+     *
+     * <p>The interactor is resolved on every call: a node restart rebuilds the network's host JSON-RPC
+     * clients, so an interactor captured earlier would keep reading through the closed pre-restart
+     * client.
+     *
+     * @return the decoded on-chain channel record
+     */
     public ContractInteractor.ChannelState state() {
-        return interactor.requireChannelState(channelId);
+        return network.interactorFor(network.deployerAccount(), contracts.core())
+                .requireChannelState(channelId);
     }
 
     /**
