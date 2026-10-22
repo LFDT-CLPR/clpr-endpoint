@@ -4,6 +4,7 @@ package org.hiero.clpr.relay.app;
 import com.swirlds.config.api.ConfigData;
 import com.swirlds.config.api.ConfigProperty;
 import com.swirlds.config.api.validation.annotation.Positive;
+import java.math.BigInteger;
 import java.util.List;
 import java.util.Map;
 import org.jspecify.annotations.Nullable;
@@ -96,21 +97,25 @@ public record RelayConfig(
      *
      * <p>The {@code proofType} selects the correct {@code BundlePayloadCodec} for inbound sync payloads
      * and the {@code getLedgerConfiguration} payload type. The typed sub-blocks ({@code evm},
-     * {@code cometBft}, {@code qbft}, {@code beacon}) carry the network connection and proof
-     * parameters required to make RPC calls and build bundles.
+     * {@code cometBft}, {@code qbft}, {@code qbftContractMode}, {@code beacon}) carry the network
+     * connection and proof parameters required to make RPC calls and build bundles.
      *
-     * @param id        unique identifier for this network (referenced by {@link ClprServiceConfig})
-     * @param proofType proof format discriminator used to build the implementation bundle and to
-     *                  select the {@code BundlePayloadCodec} for inbound bundles
-     * @param evm       EVM network connection parameters; non-null when {@code proofType} is
-     *                  {@link ProofType#QBFT}, {@link ProofType#CometBFT}, or
-     *                  {@link ProofType#EthereumPOS}
-     * @param cometBft  CometBFT proof parameters; non-null when {@code proofType} is
-     *                  {@link ProofType#CometBFT}, otherwise {@code null}
-     * @param qbft      QBFT proof parameters; non-null when {@code proofType} is
-     *                  {@link ProofType#QBFT}, otherwise {@code null}
-     * @param beacon    Ethereum-PoS beacon (consensus-layer) proof parameters; non-null when
-     *                  {@code proofType} is {@link ProofType#EthereumPOS}, otherwise {@code null}
+     * @param id               unique identifier for this network (referenced by
+     *                         {@link ClprServiceConfig})
+     * @param proofType        proof format discriminator used to build the implementation bundle and
+     *                         to select the {@code BundlePayloadCodec} for inbound bundles
+     * @param evm              EVM network connection parameters; non-null when {@code proofType} is
+     *                         {@link ProofType#QBFT}, {@link ProofType#QBFTContractMode},
+     *                         {@link ProofType#CometBFT}, or {@link ProofType#EthereumPOS}
+     * @param cometBft         CometBFT proof parameters; non-null when {@code proofType} is
+     *                         {@link ProofType#CometBFT}, otherwise {@code null}
+     * @param qbft             QBFT header-mode proof parameters; non-null when {@code proofType} is
+     *                         {@link ProofType#QBFT}, otherwise {@code null}
+     * @param beacon           Ethereum-PoS beacon (consensus-layer) proof parameters; non-null when
+     *                         {@code proofType} is {@link ProofType#EthereumPOS}, otherwise
+     *                         {@code null}
+     * @param qbftContractMode QBFT contract-mode proof parameters; non-null when {@code proofType} is
+     *                         {@link ProofType#QBFTContractMode}, otherwise {@code null}
      */
     public record LocalNetworkConfig(
             String id,
@@ -118,13 +123,15 @@ public record RelayConfig(
             CommonEvmParams evm,
             @Nullable CometBftConfig cometBft,
             @Nullable QbftConfig qbft,
-            @Nullable BeaconConfig beacon) {}
+            @Nullable BeaconConfig beacon,
+            @Nullable QbftContractModeConfig qbftContractMode) {}
 
     /**
      * Common EVM network connection parameters. Present on {@link LocalNetworkConfig} entries whose
-     * {@code proofType} is {@link ProofType#QBFT} or {@link ProofType#CometBFT} — both run an EVM
-     * JSON-RPC and the {@code ClprService} contract. Proof-format-specific parameters live in the
-     * separate {@link QbftConfig} and {@link CometBftConfig} blocks.
+     * {@code proofType} is {@link ProofType#QBFT}, {@link ProofType#QBFTContractMode}, or
+     * {@link ProofType#CometBFT} — all run an EVM JSON-RPC and the {@code ClprService} contract.
+     * Proof-format-specific parameters live in the separate {@link QbftConfig},
+     * {@link QbftContractModeConfig}, and {@link CometBftConfig} blocks.
      *
      * @param jsonRpcUrl          HTTP URL of the EVM JSON-RPC endpoint
      *                            (default: {@code http://localhost:8545})
@@ -154,8 +161,8 @@ public record RelayConfig(
             int maxRpcRetries) {}
 
     /**
-     * QBFT proof parameters. Present on {@link LocalNetworkConfig} entries whose {@code proofType} is
-     * {@link ProofType#QBFT}. These drive the epoch-boundary computation for the
+     * QBFT header-mode proof parameters. Present on {@link LocalNetworkConfig} entries whose
+     * {@code proofType} is {@link ProofType#QBFT}. These drive the epoch-boundary computation for the
      * {@code getLedgerConfiguration} payload and bound bundle size.
      *
      * @param epochLength                   QBFT epoch length used to compute the epoch-boundary block
@@ -178,6 +185,54 @@ public record RelayConfig(
             if (maxBundleSize < 1) {
                 throw new IllegalArgumentException("qbft.maxBundleSize must be at least 1 byte");
             }
+        }
+    }
+
+    /**
+     * QBFT "contract" validator-selection mode proof parameters. Present on
+     * {@link LocalNetworkConfig} entries whose {@code proofType} is
+     * {@link ProofType#QBFTContractMode}: the network's validator set is held by a validator smart
+     * contract (e.g. the Consensys
+     * <a href="https://github.com/Consensys/validator-smart-contracts">validator-smart-contracts</a>
+     * reference implementation) rather than encoded in every block header. Wired to a
+     * {@code ValidatorContractProofSource} implementation in {@code ClprChannelHandler}'s
+     * {@code QBFTContractMode} branch — a customized network can supply its own implementation there
+     * without touching this config shape, as long as it produces the {@code ContractProof} form the
+     * on-chain verifier checks.
+     *
+     * <p>{@code arraySlotHex} depends on the deployed validator contract's storage layout — the
+     * default {@code StandardValidatorContractProofSource} assumes a plain Solidity
+     * {@code address[]} state variable (length at the slot, elements at
+     * {@code keccak256(slot) + i}); read the deployed contract's storage layout to find the slot for
+     * a customized implementation.
+     *
+     * @param validatorContractAddress hex address of the deployed validator contract
+     * @param arraySlotHex             hex-encoded storage slot of the validator contract's
+     *                                 {@code address[]} array (32 bytes, {@code 0x}-prefixed or not)
+     * @param maxMessagesPerBundle     maximum number of messages to include in a single bundle
+     *                                 (default: {@code 10})
+     */
+    public record QbftContractModeConfig(
+            String validatorContractAddress, String arraySlotHex, int maxMessagesPerBundle) {
+
+        /**
+         * Parses {@link #arraySlotHex} into the storage slot it names. The single parse point for
+         * this value — both {@code RelayConfigLoader} (validation) and {@code ClprChannelHandler}
+         * (wiring) call this rather than parsing the hex string themselves.
+         *
+         * @return the parsed slot
+         * @throws IllegalArgumentException if the value is not valid hex, is negative, or exceeds 256 bits
+         */
+        public BigInteger arraySlot() {
+            final String stripped = arraySlotHex.startsWith("0x") || arraySlotHex.startsWith("0X")
+                    ? arraySlotHex.substring(2)
+                    : arraySlotHex;
+            final BigInteger slot = new BigInteger(stripped, 16);
+            if (slot.signum() < 0 || slot.bitLength() > 256) {
+                throw new IllegalArgumentException(
+                        "arraySlotHex '" + arraySlotHex + "' must be a non-negative value not exceeding 256 bits");
+            }
+            return slot;
         }
     }
 

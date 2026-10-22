@@ -45,6 +45,7 @@ import org.hiero.clpr.relay.evm.beacon.SyncAggregate;
 import org.hiero.clpr.relay.evm.beacon.SyncCommittee;
 import org.hiero.clpr.relay.evm.jsonrpc.EvmJsonRpcClient;
 import org.hiero.clpr.relay.evm.model.Address;
+import org.hiero.clpr.relay.evm.model.EvmStorageMerkleProof;
 import org.hiero.clpr.relay.evm.model.ProofResponse;
 import org.hiero.clpr.relay.evm.ssz.Ssz;
 import org.jspecify.annotations.Nullable;
@@ -121,24 +122,21 @@ public final class EthereumPosBundleConstructor implements BundleConstructor {
     /** Bytes per non-signer proof entry: 128-byte EIP-2537 uncompressed G1 + 9 × 32-byte siblings. */
     private static final int NON_SIGNER_ENTRY_BYTES = 128 + PUBKEY_TREE_DEPTH * 32;
 
-    /** One {@code [key, proofNodes]} storage entry, as the Hiero verifier expects (no value). */
-    private record EthStorageProofEntry(Bytes key, List<Bytes> proof) {}
-
     private record EthBundlePayload(
             LightClientHeader attestedHeader,
             SyncAggregate syncAggregate,
             @Nullable SyncCommittee nextCommittee,
             @Nullable List<Bytes> nextCommitteeBranch,
             List<Bytes> clprServiceAccountProof,
-            List<EthStorageProofEntry> clprServiceStorageProofs,
+            List<EvmStorageMerkleProof> clprServiceStorageProofs,
             Bytes serializedBundleContent,
             List<byte[]> nonSignerProofs,
-            @Nullable EthStorageProofEntry manifestStorageProof,
+            @Nullable EvmStorageMerkleProof manifestStorageProof,
             @Nullable Bytes serializedEndpointManifest) {}
 
     /** The optional Step-3 endpoint-manifest proof; {@link #NONE} when none is due or available. */
     private record ManifestProof(
-            @Nullable EthStorageProofEntry storageProof,
+            @Nullable EvmStorageMerkleProof storageProof,
             @Nullable Bytes preimage) {
         private static final ManifestProof NONE = new ManifestProof(null, null);
     }
@@ -255,7 +253,7 @@ public final class EthereumPosBundleConstructor implements BundleConstructor {
         }
         final ProofResponse proofResp = maybeProof.get();
         final var storageEntries = proofResp.storageProof().stream()
-                .map(e -> new EthStorageProofEntry(e.key(), e.proof()))
+                .map(e -> new EvmStorageMerkleProof(e.key(), e.proof()))
                 .toList();
 
         final ManifestProof manifestProof =
@@ -435,7 +433,7 @@ public final class EthereumPosBundleConstructor implements BundleConstructor {
             }
             final var manifestSp = manifestProofResp.storageProof().get(0);
             return new ManifestProof(
-                    new EthStorageProofEntry(manifestSp.key(), manifestSp.proof()),
+                    new EvmStorageMerkleProof(manifestSp.key(), manifestSp.proof()),
                     ClprEndpointManifest.PROTOBUF.toBytes(manifest));
         } catch (final Exception e) {
             log.warn(
@@ -598,7 +596,8 @@ public final class EthereumPosBundleConstructor implements BundleConstructor {
                     nonSignerProofsRlp);
         }
 
-        private static byte[] encodeStorageEntry(final EthStorageProofEntry e) {
+        /** Like {@link EvmStorageMerkleProof#encodeRlp()}, but with the slot key left-padded to 32 bytes. */
+        private static byte[] encodeStorageEntry(final EvmStorageMerkleProof e) {
             return rlpList(
                     rlpBytes(leftPad32(e.key()).toByteArray()),
                     rlpList(e.proof().stream()

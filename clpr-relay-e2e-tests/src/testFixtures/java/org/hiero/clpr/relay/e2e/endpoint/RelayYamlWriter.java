@@ -5,6 +5,7 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import org.jspecify.annotations.Nullable;
 
 /**
  * Renders the {@code relay.yaml} an endpoint container is started with.
@@ -33,7 +34,38 @@ public final class RelayYamlWriter {
             long requestTimeoutMs,
             int maxRpcRetries,
             long maxGasPriceCapWei,
-            int maxMessagesPerBundle) {}
+            int maxMessagesPerBundle,
+            @Nullable ContractValidators contractValidators) {
+
+        public LocalNetwork(
+                final String id,
+                final long chainId,
+                final String jsonRpcUrl,
+                final long pollIntervalMs,
+                final long requestTimeoutMs,
+                final int maxRpcRetries,
+                final long maxGasPriceCapWei,
+                final int maxMessagesPerBundle) {
+            this(
+                    id,
+                    chainId,
+                    jsonRpcUrl,
+                    pollIntervalMs,
+                    requestTimeoutMs,
+                    maxRpcRetries,
+                    maxGasPriceCapWei,
+                    maxMessagesPerBundle,
+                    null);
+        }
+    }
+
+    /**
+     * QBFT "contract" validator-selection mode parameters — see
+     * {@code RelayConfig.QbftContractModeConfig}. Presence on a {@link LocalNetwork} selects
+     * {@code proofType: QBFTContractMode} and a top-level {@code qbftContractMode:} block instead of
+     * {@code proofType: QBFT} and a {@code qbft:} block.
+     */
+    public record ContractValidators(String validatorContractAddress, String arraySlotHex) {}
 
     /** One {@code ClprService} deployment the endpoint operates, with the channels it serves. */
     public record Service(
@@ -134,7 +166,10 @@ public final class RelayYamlWriter {
             out.append("  - id: ")
                     .append(plain("localNetworks[].id", network.id()))
                     .append('\n');
-            out.append("    proofType: QBFT\n");
+            final ContractValidators cv = network.contractValidators();
+            out.append("    proofType: ")
+                    .append(cv != null ? "QBFTContractMode" : "QBFT")
+                    .append('\n');
             out.append("    evm:\n");
             out.append("      jsonRpcUrl: ")
                     .append(plain("evm.jsonRpcUrl", network.jsonRpcUrl()))
@@ -152,12 +187,25 @@ public final class RelayYamlWriter {
                     .append(network.requestTimeoutMs())
                     .append('\n');
             out.append("      maxRpcRetries: ").append(network.maxRpcRetries()).append('\n');
-            out.append("    qbft:\n");
-            out.append("      epochLength: 30000\n");
-            out.append("      maxEpochBlockHeadersPerBundle: 5\n");
-            out.append("      maxMessagesPerBundle: ")
-                    .append(network.maxMessagesPerBundle())
-                    .append('\n');
+            if (cv == null) {
+                out.append("    qbft:\n");
+                out.append("      epochLength: 30000\n");
+                out.append("      maxEpochBlockHeadersPerBundle: 5\n");
+                out.append("      maxMessagesPerBundle: ")
+                        .append(network.maxMessagesPerBundle())
+                        .append('\n');
+            } else {
+                out.append("    qbftContractMode:\n");
+                out.append("      validatorContractAddress: \"")
+                        .append(plain("qbftContractMode.validatorContractAddress", cv.validatorContractAddress()))
+                        .append("\"\n");
+                out.append("      arraySlotHex: \"")
+                        .append(plain("qbftContractMode.arraySlotHex", cv.arraySlotHex()))
+                        .append("\"\n");
+                out.append("      maxMessagesPerBundle: ")
+                        .append(network.maxMessagesPerBundle())
+                        .append('\n');
+            }
         }
         out.append('\n');
 

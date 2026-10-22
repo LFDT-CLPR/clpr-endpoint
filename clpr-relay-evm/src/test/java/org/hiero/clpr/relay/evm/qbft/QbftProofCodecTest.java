@@ -16,6 +16,9 @@ import org.hiero.clpr.relay.evm.AbiCodec;
 import org.hiero.clpr.relay.evm.ByteUtils;
 import org.hiero.clpr.relay.evm.EvmUtils;
 import org.hiero.clpr.relay.evm.RlpReader;
+import org.hiero.clpr.relay.evm.model.Address;
+import org.hiero.clpr.relay.evm.model.EvmStorageMerkleProof;
+import org.hiero.clpr.relay.evm.qbft.ValidatorContractProofSource.ContractProof;
 import org.hiero.clpr.relay.evm.storage.ClprServiceStorageLayout;
 import org.junit.jupiter.api.Test;
 
@@ -191,5 +194,88 @@ class QbftProofCodecTest {
         assertThat(storageEntries).noneMatch(e -> ByteUtils.leftPad32(
                         RlpReader.bytesValue(RlpReader.splitList(e).getFirst()))
                 .equals(droppedKey));
+    }
+
+    // ── QBFT contract validator mode ─────────────────────────────────────────────
+
+    /**
+     * A contract-mode field 1 {@code [trustedSet, hops[], contractProof]} with one hop, its contract
+     * proofs encoded by the production {@link ValidatorContractProofRlp}.
+     */
+    private static byte[] contractModeValidatorSource() {
+        final byte[] contractProof = ValidatorContractProofRlp.encodeWrapped(new ContractProof(
+                Address.fromHexString("0x" + "ee".repeat(20)),
+                List.of(Bytes.wrap(new byte[] {0x01})),
+                Bytes.wrap(new byte[32]),
+                List.of(new EvmStorageMerkleProof(Bytes.wrap(new byte[32]), List.of(Bytes.wrap(new byte[] {0x02}))))));
+        final byte[] hop = AbiCodec.rlpList(AbiCodec.rlpList() /* change-block header placeholder */, contractProof);
+        return AbiCodec.rlpList(
+                AbiCodec.rlpList(AbiCodec.rlpBytes(
+                        Address.fromHexString("0x" + "aa".repeat(20)).value())), // trustedSet
+                AbiCodec.rlpList(hop), // hops
+                contractProof); // contract proof at the current block
+    }
+
+    /** Build a contract-mode proof: header mode's outer tuple, with a contract-mode field 1. */
+    private static Bytes contractModeProof(
+            final ClprBundleContent content, final byte[] storageProofsRlp, final boolean withManifest) {
+        final byte[] header = AbiCodec.rlpList(); // currentBlockHeader (placeholder — not parsed by the codec)
+        final byte[] accountProof = AbiCodec.rlpList(AbiCodec.rlpBytes(new byte[] {0x03}));
+        final byte[] contentElem =
+                AbiCodec.rlpBytes(ClprBundleContent.PROTOBUF.toBytes(content).toByteArray());
+        if (withManifest) {
+            return Bytes.wrap(AbiCodec.rlpList(
+                    header,
+                    contractModeValidatorSource(),
+                    accountProof,
+                    storageProofsRlp,
+                    contentElem,
+                    AbiCodec.rlpList(dummyProofEntry(9)), // manifestStorageProof
+                    AbiCodec.rlpBytes(new byte[] {0x01}))); // serializedEndpointManifest
+        }
+        return Bytes.wrap(
+                AbiCodec.rlpList(header, contractModeValidatorSource(), accountProof, storageProofsRlp, contentElem));
+    }
+
+    @Test
+    void contractModeTrimKeepsEveryElementButTheContentByteIdentical() {
+        // ids [3,4,5]; receiver already has up to 4 — keep only message 5. Message 5 is still the last
+        // one, so its running-hash proof stays valid and only the content element (index 4) changes.
+        final byte[] storage = AbiCodec.rlpList(dummyProofEntry(1), runningHashProofEntry(5L));
+        final Bytes proof = contractModeProof(content(6L, List.of(msg("m3"), msg("m4"), msg("m5"))), storage, true);
+
+        final ParsedBundle parsed = trim(proof, 4L);
+
+        assertThat(parsed.messages()).hasSize(1);
+        assertThat(parsed.messages().getFirst().message().messageData()).isEqualTo(Bytes.wrap("m5".getBytes()));
+        final List<Bytes> before = RlpReader.splitList(proof);
+        final List<Bytes> after = RlpReader.splitList(parsed.rawBundleBytes());
+        assertThat(after).hasSize(7);
+        for (final int i : new int[] {0, 1, 2, 3, 5, 6}) {
+            assertThat(after.get(i)).as("tuple element %d", i).isEqualTo(before.get(i));
+        }
+        final ParsedBundle reparsed = codec.decodeBundle(parsed.rawBundleBytes());
+        assertThat(reparsed.messages()).hasSize(1);
+        assertThat(reparsed.metadata().nextMessageId()).isEqualTo(6L);
+    }
+
+    @Test
+    void contractModeTrimToAckOnlyDropsRunningHashProofAndKeepsValidatorSource() {
+        // ids [1]; receiver already has 1 — fully trimmed to an ack-only bundle.
+        final byte[] storage = AbiCodec.rlpList(dummyProofEntry(1), runningHashProofEntry(1L), dummyProofEntry(2));
+        final Bytes proof = contractModeProof(content(2L, List.of(msg("m1"))), storage, false);
+
+        final ParsedBundle parsed = trim(proof, 1L);
+
+        assertThat(parsed.messages()).isEmpty();
+        final List<Bytes> before = RlpReader.splitList(proof);
+        final List<Bytes> after = RlpReader.splitList(parsed.rawBundleBytes());
+        assertThat(after).hasSize(5);
+        assertThat(after.get(1)).isEqualTo(before.get(1));
+        // Only the running-hash entry is dropped; the two unrelated entries survive in order.
+        assertThat(RlpReader.splitList(after.get(3)))
+                .containsExactly(Bytes.wrap(dummyProofEntry(1)), Bytes.wrap(dummyProofEntry(2)));
+        assertThat(codec.decodeBundle(parsed.rawBundleBytes()).metadata().nextMessageId())
+                .isEqualTo(2L);
     }
 }

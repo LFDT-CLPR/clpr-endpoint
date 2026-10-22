@@ -6,6 +6,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.assertj.core.api.Assertions.entry;
 
 import com.swirlds.config.api.validation.ConfigViolationException;
+import java.math.BigInteger;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Properties;
@@ -139,6 +140,178 @@ class RelayConfigLoaderTest {
         assertThat(net.qbft().epochLength()).isEqualTo(30_000L);
         assertThat(net.qbft().maxEpochBlockHeadersPerBundle()).isEqualTo(5);
         assertThat(net.qbft().maxMessagesPerBundle()).isEqualTo(10);
+        assertThat(net.qbftContractMode()).isNull();
+    }
+
+    @Test
+    void localNetwork_qbftContractMode_parsed(@TempDir final Path tmp) throws Exception {
+        final var yaml = tmp.resolve("qbft-contract-mode.yaml");
+        Files.writeString(yaml, """
+                localNetworks:
+                  - id: minimal
+                    proofType: QBFTContractMode
+                    evm: {}
+                    qbftContractMode:
+                      validatorContractAddress: "0xdeaddeaddeaddeaddeaddeaddeaddeaddeaddead"
+                      arraySlotHex: "0x02"
+                      maxMessagesPerBundle: 7
+                """);
+
+        final var config = RelayConfigLoader.load(yaml, new Properties());
+
+        final var net = config.localNetworks().getFirst();
+        assertThat(net.proofType()).isEqualTo(ProofType.QBFTContractMode);
+        assertThat(net.qbft()).isNull();
+        final var qbftContractMode = net.qbftContractMode();
+        assertThat(qbftContractMode).isNotNull();
+        assertThat(qbftContractMode.validatorContractAddress()).isEqualTo("0xdeaddeaddeaddeaddeaddeaddeaddeaddeaddead");
+        assertThat(qbftContractMode.arraySlotHex()).isEqualTo("0x02");
+        assertThat(qbftContractMode.arraySlot()).isEqualTo(BigInteger.TWO);
+        assertThat(qbftContractMode.maxMessagesPerBundle()).isEqualTo(7);
+    }
+
+    @Test
+    void localNetwork_qbftContractMode_defaultMaxMessagesPerBundle_whenOmitted(@TempDir final Path tmp)
+            throws Exception {
+        final var yaml = tmp.resolve("qbft-contract-mode-defaults.yaml");
+        Files.writeString(yaml, """
+                localNetworks:
+                  - id: minimal
+                    proofType: QBFTContractMode
+                    evm: {}
+                    qbftContractMode:
+                      validatorContractAddress: "0xdeaddeaddeaddeaddeaddeaddeaddeaddeaddead"
+                      arraySlotHex: "0x02"
+                """);
+
+        final var config = RelayConfigLoader.load(yaml, new Properties());
+
+        assertThat(config.localNetworks().getFirst().qbftContractMode().maxMessagesPerBundle())
+                .isEqualTo(10);
+    }
+
+    @Test
+    void localNetwork_qbftContractMode_missingBlock_failsFast(@TempDir final Path tmp) throws Exception {
+        final var yaml = tmp.resolve("qbft-contract-mode-missing-block.yaml");
+        Files.writeString(yaml, """
+                localNetworks:
+                  - id: minimal
+                    proofType: QBFTContractMode
+                    evm: {}
+                """);
+
+        assertThatThrownBy(() -> RelayConfigLoader.load(yaml, new Properties()))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("qbftContractMode");
+    }
+
+    @Test
+    void localNetwork_qbftContractMode_missingAddress_failsFast(@TempDir final Path tmp) throws Exception {
+        final var yaml = tmp.resolve("qbft-contract-mode-missing-address.yaml");
+        Files.writeString(yaml, """
+                localNetworks:
+                  - id: minimal
+                    proofType: QBFTContractMode
+                    evm: {}
+                    qbftContractMode:
+                      arraySlotHex: "0x02"
+                """);
+
+        assertThatThrownBy(() -> RelayConfigLoader.load(yaml, new Properties()))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("validatorContractAddress");
+    }
+
+    @Test
+    void localNetwork_qbftContractMode_invalidAddress_failsFast(@TempDir final Path tmp) throws Exception {
+        final var yaml = tmp.resolve("qbft-contract-mode-invalid-address.yaml");
+        Files.writeString(yaml, """
+                localNetworks:
+                  - id: minimal
+                    proofType: QBFTContractMode
+                    evm: {}
+                    qbftContractMode:
+                      validatorContractAddress: "not-an-address"
+                      arraySlotHex: "0x02"
+                """);
+
+        assertThatThrownBy(() -> RelayConfigLoader.load(yaml, new Properties()))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("validatorContractAddress");
+    }
+
+    @Test
+    void localNetwork_qbftContractMode_missingArraySlot_failsFast(@TempDir final Path tmp) throws Exception {
+        final var yaml = tmp.resolve("qbft-contract-mode-missing-slot.yaml");
+        Files.writeString(yaml, """
+                localNetworks:
+                  - id: minimal
+                    proofType: QBFTContractMode
+                    evm: {}
+                    qbftContractMode:
+                      validatorContractAddress: "0xdeaddeaddeaddeaddeaddeaddeaddeaddeaddead"
+                """);
+
+        assertThatThrownBy(() -> RelayConfigLoader.load(yaml, new Properties()))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("arraySlotHex");
+    }
+
+    @Test
+    void localNetwork_qbftContractMode_invalidArraySlotHex_failsFast(@TempDir final Path tmp) throws Exception {
+        final var yaml = tmp.resolve("qbft-contract-mode-invalid-slot.yaml");
+        Files.writeString(yaml, """
+                localNetworks:
+                  - id: minimal
+                    proofType: QBFTContractMode
+                    evm: {}
+                    qbftContractMode:
+                      validatorContractAddress: "0xdeaddeaddeaddeaddeaddeaddeaddeaddeaddead"
+                      arraySlotHex: "0xzz"
+                """);
+
+        assertThatThrownBy(() -> RelayConfigLoader.load(yaml, new Properties()))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("arraySlotHex")
+                .hasMessageContaining("not a valid storage slot");
+    }
+
+    @Test
+    void localNetwork_qbftContractMode_arraySlotHexTooLarge_failsFast(@TempDir final Path tmp) throws Exception {
+        final var yaml = tmp.resolve("qbft-contract-mode-slot-too-large.yaml");
+        Files.writeString(yaml, """
+                localNetworks:
+                  - id: minimal
+                    proofType: QBFTContractMode
+                    evm: {}
+                    qbftContractMode:
+                      validatorContractAddress: "0xdeaddeaddeaddeaddeaddeaddeaddeaddeaddead"
+                      arraySlotHex: "0x1%s"
+                """.formatted("0".repeat(64)));
+
+        assertThatThrownBy(() -> RelayConfigLoader.load(yaml, new Properties()))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("arraySlotHex")
+                .hasMessageContaining("not a valid storage slot");
+    }
+
+    @Test
+    void localNetwork_qbftContractMode_negativeArraySlot_failsFast(@TempDir final Path tmp) throws Exception {
+        final var yaml = tmp.resolve("qbft-contract-mode-negative-slot.yaml");
+        Files.writeString(yaml, """
+                localNetworks:
+                  - id: minimal
+                    proofType: QBFTContractMode
+                    evm: {}
+                    qbftContractMode:
+                      validatorContractAddress: "0xdeaddeaddeaddeaddeaddeaddeaddeaddeaddead"
+                      arraySlotHex: "-2"
+                """);
+
+        assertThatThrownBy(() -> RelayConfigLoader.load(yaml, new Properties()))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("arraySlotHex")
+                .hasMessageContaining("not a valid storage slot");
     }
 
     @Test

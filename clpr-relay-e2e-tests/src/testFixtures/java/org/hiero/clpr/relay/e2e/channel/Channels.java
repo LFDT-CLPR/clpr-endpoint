@@ -10,17 +10,20 @@ import java.util.IdentityHashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Set;
+import java.util.function.BiFunction;
 import org.hiero.clpr.relay.e2e.chain.Accounts;
 import org.hiero.clpr.relay.e2e.chain.BesuNetwork;
 import org.hiero.clpr.relay.e2e.chain.ChainTx;
 import org.hiero.clpr.relay.e2e.chain.E2eContracts;
 import org.hiero.clpr.relay.e2e.chain.QbftConfigProofBuilder;
+import org.hiero.clpr.relay.e2e.chain.QbftContractModeConfigProofBuilder;
 import org.hiero.clpr.relay.e2e.chain.TestAccount;
 import org.hiero.clpr.relay.e2e.endpoint.EvmEndpoint;
 import org.hiero.clpr.relay.e2e.endpoint.EvmEndpointSpec;
 import org.hiero.clpr.relay.e2e.fault.PeerNetworkShim;
 import org.hiero.clpr.relay.evm.AbiCodec;
 import org.hiero.clpr.relay.evm.EthSigner;
+import org.hiero.clpr.relay.evm.model.Address;
 import org.jspecify.annotations.Nullable;
 
 /**
@@ -194,10 +197,93 @@ public final class Channels {
         wire(channel);
     }
 
+    /**
+     * Per-side result of {@link #wireContractMode}: the deployed validator contract and the storage
+     * slot of its {@code address[]} array — the two pieces of information a serving endpoint's
+     * {@code qbftContractMode} relay-config block needs that the standard {@link #wireAll}
+     * path has no use for.
+     */
+    public record ContractModeSide(Address validatorContract, BigInteger arraySlot) {}
+
+    /** Both sides' {@link ContractModeSide}, returned by {@link #wireContractMode}. */
+    public record ContractModeWiring(ContractModeSide a, ContractModeSide b) {}
+
+    /**
+     * Wire one channel using {@code QbftContractModeVerifier} on both sides, instead of the legacy
+     * {@code QBFTVerifier} the default {@link #wire(Channel)} uses.
+     *
+     * <p>Exists to exercise the new contract-mode relay code ({@code QbftContractModeBundleConstructor})
+     * against the real on-chain verifier, sharing every wiring step but the inner-verifier and
+     * config-proof source with the header-mode path (see
+     * {@link #wire(Channel, BiFunction, BiFunction)}). Deploys a
+     * {@link org.hiero.clpr.relay.e2e.chain.E2eContractDeployer#deployStandardValidatorContract
+     * StandardValidatorContract} per side, seeded with that chain's real sole QBFT validator address —
+     * the validator contract does not influence which key actually seals blocks (this suite's Besu
+     * chains stay in header/extra_data consensus mode throughout), it only has to agree with it, since
+     * {@code QbftContractModeVerifier}'s quorum check is against the header's real committed seals.
+     *
+     * @param channel a declared, not-yet-wired channel
+     * @return each side's deployed validator contract and array slot, for
+     *     {@link RelayYamlWriter.ContractValidators} construction
+     * @throws IllegalStateException if the channel is already wired
+     */
+    public ContractModeWiring wireContractMode(final Channel channel) {
+        if (!channels.contains(channel)) {
+            throw new IllegalStateException("channel was not created through this Channels instance");
+        }
+        if (!wired.add(channel)) {
+            throw new IllegalStateException("channel " + channel.idHex() + " is already wired");
+        }
+
+        final ChannelSpec spec = channel.spec();
+        final BesuNetwork netA = spec.networkA();
+        final BesuNetwork netB = spec.networkB();
+
+        final BigInteger arraySlot = BigInteger.ZERO; // StandardValidatorContract's sole state variable
+        final Address validatorContractA = deployValidatorContract(netA, validatorSetOf(netA), wiringReceiptTimeout);
+        final Address validatorContractB = deployValidatorContract(netB, validatorSetOf(netB), wiringReceiptTimeout);
+
+        wire(
+                channel,
+                (net, contracts) -> net.deployer().deployQbftContractModeVerifier(wiringReceiptTimeout),
+                (net, contracts) -> QbftContractModeConfigProofBuilder.buildConfigProof(
+                        net,
+                        contracts.clprService(),
+                        net == netA ? validatorContractA : validatorContractB,
+                        arraySlot));
+
+        return new ContractModeWiring(
+                new ContractModeSide(validatorContractA, arraySlot),
+                new ContractModeSide(validatorContractB, arraySlot));
+    }
+
+    private static List<String> validatorSetOf(final BesuNetwork net) {
+        return List.of(net.validatorAddress());
+    }
+
+    private static Address deployValidatorContract(
+            final BesuNetwork net, final List<String> initialValidators, final Duration receiptTimeout) {
+        return Address.fromHexString(net.deployer().deployStandardValidatorContract(initialValidators, receiptTimeout));
+    }
+
     private List<EvmEndpoint> servingEndpoints(final ChannelSpec spec) {
         final List<EvmEndpoint> all = new ArrayList<>(spec.endpointsA());
         all.addAll(spec.endpointsB());
         return all;
+    }
+
+    /**
+     * Register one channel on both chains and give it a funded connector on each side, using the
+     * legacy {@code QBFTVerifier} and its header-mode config proof.
+     *
+     * <p>A one-line default over {@link #wire(Channel, BiFunction, BiFunction)}, which every other
+     * detail of channel wiring is shared through — see that method for the full sequence.
+     */
+    private void wire(final Channel channel) {
+        wire(
+                channel,
+                (net, contracts) -> contracts.qbftVerifier(),
+                (net, contracts) -> QbftConfigProofBuilder.buildConfigProof(net, contracts.clprService()));
     }
 
     /**
@@ -207,8 +293,20 @@ public final class Channels {
      * a channel; the verifier wrapper's peer roster must be seeded before {@code completeChannel}
      * reads it; and the commit must land before the reveal that proves knowledge of the same
      * {@code (id, pubKey, salt)} triple.
+     *
+     * <p>{@code innerVerifier} resolves each chain's inner (unwrapped) verifier address — the CLPR
+     * stack's existing one for the legacy header-mode path, or a freshly deployed one for
+     * {@link #wireContractMode}; either way it is wrapped in a {@code QbftE2EVerifier} below, exactly
+     * the same way. {@code configProof} builds the RLP proof of one chain's own state that the
+     * <em>other</em> chain's {@code completeChannel} call is given — the trust anchor derivation this
+     * produces has to match the mode {@code innerVerifier} deploys, which callers are responsible for
+     * keeping in sync. Both receive the chain together with the CLPR stack this channel is wired
+     * against on it, so the proof names the channel's actual {@code ClprService}, not the primary.
      */
-    private void wire(final Channel channel) {
+    private void wire(
+            final Channel channel,
+            final BiFunction<BesuNetwork, E2eContracts, String> innerVerifier,
+            final BiFunction<BesuNetwork, E2eContracts, byte[]> configProof) {
         final ChannelSpec spec = channel.spec();
         final BesuNetwork netA = spec.networkA();
         final BesuNetwork netB = spec.networkB();
@@ -245,12 +343,11 @@ public final class Channels {
         }
 
         // Per-channel contracts. A verifier wrapper per channel because setSeedEndpoints is per
-        // wrapper and has to name that channel's peer endpoint. The inner QBFTVerifier is the one
-        // belonging to the CLPR stack this channel is wired against, not necessarily the chain's
-        // primary — for override channels the primary verifier and the override verifier are two
-        // separate deployments.
-        final String verifierA = deploy(netA, contractsA.qbftVerifier());
-        final String verifierB = deploy(netB, contractsB.qbftVerifier());
+        // wrapper and has to name that channel's peer endpoint. The inner verifier is resolved against
+        // the CLPR stack this channel is wired against, not necessarily the chain's primary — for
+        // override channels the primary verifier and the override verifier are two separate deployments.
+        final String verifierA = deploy(netA, innerVerifier.apply(netA, contractsA));
+        final String verifierB = deploy(netB, innerVerifier.apply(netB, contractsB));
         final String connectorContractA = deployConnector(netA);
         final String connectorContractB = deployConnector(netB);
 
@@ -286,8 +383,8 @@ public final class Channels {
         // registered on — not the peer's primary. Otherwise a channel wired against an override
         // service would carry a trust anchor pointing at the primary, and every bundle the peer
         // relay produces would fail to verify.
-        final byte[] proofOfA = QbftConfigProofBuilder.buildConfigProof(netA, contractsA.clprService());
-        final byte[] proofOfB = QbftConfigProofBuilder.buildConfigProof(netB, contractsB.clprService());
+        final byte[] proofOfA = configProof.apply(netA, contractsA);
+        final byte[] proofOfB = configProof.apply(netB, contractsB);
         final byte[] manifestOfA = QbftConfigProofBuilder.buildManifestProof(netA, contractsA.clprService());
         final byte[] manifestOfB = QbftConfigProofBuilder.buildManifestProof(netB, contractsB.clprService());
 

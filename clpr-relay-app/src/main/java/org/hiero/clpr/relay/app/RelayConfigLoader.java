@@ -20,6 +20,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Properties;
+import org.hiero.clpr.relay.evm.model.Address;
 import org.jspecify.annotations.Nullable;
 
 /**
@@ -386,13 +387,24 @@ final class RelayConfigLoader {
                             parseRequiredEvm(netMap, id),
                             null,
                             parseQbftConfig(asMap(netMap.get("qbft"))),
+                            null,
                             null);
+                case QBFTContractMode ->
+                    new RelayConfig.LocalNetworkConfig(
+                            id,
+                            proofType,
+                            parseRequiredEvm(netMap, id),
+                            null,
+                            null,
+                            null,
+                            parseQbftContractModeConfig(asMap(netMap.get("qbftContractMode")), id));
                 case CometBFT ->
                     new RelayConfig.LocalNetworkConfig(
                             id,
                             proofType,
                             parseRequiredEvm(netMap, id),
                             parseCometBftConfig(asMap(netMap.get("cometBft"))),
+                            null,
                             null,
                             null);
                 case EthereumPOS ->
@@ -402,17 +414,20 @@ final class RelayConfigLoader {
                             parseRequiredEvm(netMap, id),
                             null,
                             null,
-                            parseBeaconConfig(asMap(netMap.get("beacon"))));
+                            parseBeaconConfig(asMap(netMap.get("beacon"))),
+                            null);
                 case Hiero ->
-                    throw new IllegalArgumentException(
-                            "localNetworks['" + id
-                                    + "'].proofType=Hiero is not supported for a local network; the EVM relay only submits to"
-                                    + " QBFT, CometBFT or EthereumPOS chains (Hiero may still be used as a channel's peerProofType)");
+                    throw new IllegalArgumentException("localNetworks['" + id
+                            + "'].proofType=Hiero is not supported for a local network; the EVM relay only submits to"
+                            + " QBFT, QBFTContractMode, CometBFT or EthereumPOS chains (Hiero may still be used as a"
+                            + " channel's peerProofType)");
                 case Stub ->
                     // Test-only: a Stub local network builds CLPRSTUB bundles from real channel state
                     // for the StubClprVerifier (integration tests), so it needs only the EVM block —
-                    // no qbft/cometBft/beacon proof parameters. Never valid against a real production chain.
-                    new RelayConfig.LocalNetworkConfig(id, proofType, parseRequiredEvm(netMap, id), null, null, null);
+                    // no qbft/qbftContractMode/cometBft/beacon proof parameters. Never valid against a real
+                    // production chain.
+                    new RelayConfig.LocalNetworkConfig(
+                            id, proofType, parseRequiredEvm(netMap, id), null, null, null, null);
             };
         }
 
@@ -507,8 +522,8 @@ final class RelayConfigLoader {
         }
 
         /**
-         * Parse the optional per-network {@code qbft} block (present for QBFT networks). Missing
-         * fields fall back to their defaults; {@code null} input yields an all-defaults block.
+         * Parse the optional per-network {@code qbft} block (present for QBFT header-mode networks).
+         * Missing fields fall back to their defaults; {@code null} input yields an all-defaults block.
          */
         private static RelayConfig.QbftConfig parseQbftConfig(@Nullable final Map<String, Object> qbft) {
             final Map<String, Object> q = qbft != null ? qbft : Map.of();
@@ -521,6 +536,49 @@ final class RelayConfigLoader {
                     maxEpochBlockHeadersPerBundle != null ? maxEpochBlockHeadersPerBundle : 5,
                     maxMessagesPerBundle != null ? maxMessagesPerBundle : 10,
                     maxBundleSize != null ? maxBundleSize : 1_048_576L);
+        }
+
+        /**
+         * Parse the required per-network {@code qbftContractMode} block (present for
+         * {@code QBFTContractMode} networks). {@code validatorContractAddress} and
+         * {@code arraySlotHex} have no sensible default and fail fast when absent or malformed;
+         * {@code maxMessagesPerBundle} falls back to its default when omitted.
+         */
+        private static RelayConfig.QbftContractModeConfig parseQbftContractModeConfig(
+                @Nullable final Map<String, Object> qbftContractMode, final String id) {
+            if (qbftContractMode == null) {
+                throw new IllegalArgumentException("localNetworks['" + id + "'] requires a 'qbftContractMode' block");
+            }
+            final var validatorContractAddress = asString(qbftContractMode.get("validatorContractAddress"));
+            if (validatorContractAddress == null || validatorContractAddress.isBlank()) {
+                throw new IllegalArgumentException(
+                        "localNetworks['" + id + "'].qbftContractMode.validatorContractAddress is required");
+            }
+            try {
+                Address.fromHexString(validatorContractAddress);
+            } catch (final IllegalArgumentException e) {
+                throw new IllegalArgumentException(
+                        "localNetworks['" + id + "'].qbftContractMode.validatorContractAddress='"
+                                + validatorContractAddress + "' is not a valid EVM address",
+                        e);
+            }
+            final var arraySlotHex = asString(qbftContractMode.get("arraySlotHex"));
+            if (arraySlotHex == null || arraySlotHex.isBlank()) {
+                throw new IllegalArgumentException(
+                        "localNetworks['" + id + "'].qbftContractMode.arraySlotHex is required");
+            }
+            final Integer maxMessagesPerBundle = asInt(qbftContractMode.get("maxMessagesPerBundle"));
+            final var config = new RelayConfig.QbftContractModeConfig(
+                    validatorContractAddress, arraySlotHex, maxMessagesPerBundle != null ? maxMessagesPerBundle : 10);
+            try {
+                config.arraySlot();
+            } catch (final IllegalArgumentException e) {
+                throw new IllegalArgumentException(
+                        "localNetworks['" + id + "'].qbftContractMode.arraySlotHex='" + arraySlotHex
+                                + "' is not a valid storage slot",
+                        e);
+            }
+            return config;
         }
 
         /**

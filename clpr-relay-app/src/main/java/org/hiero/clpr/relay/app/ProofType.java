@@ -18,11 +18,24 @@ package org.hiero.clpr.relay.app;
  */
 public enum ProofType {
     /**
-     * EVM chain using QBFT consensus (e.g. Hyperledger Besu).
-     * {@code getLedgerConfiguration} returns a {@code QbftLedgerConfigurationPayload} carrying
-     * the epoch-boundary block header whose {@code extra_data} encodes the validator set.
+     * EVM chain using QBFT consensus (e.g. Hyperledger Besu) in the default header-based
+     * validator-selection mode. {@code getLedgerConfiguration} returns a
+     * {@code QbftLedgerConfigurationPayload} carrying the epoch-boundary block header whose
+     * {@code extra_data} encodes the validator set.
      */
     QBFT,
+    /**
+     * EVM chain using QBFT consensus (e.g. Hyperledger Besu) in Besu's "contract"
+     * validator-selection mode: the validator set is held by a validator smart contract (e.g. the
+     * Consensys <a href="https://github.com/Consensys/validator-smart-contracts">validator-smart-contracts</a>
+     * reference implementation) rather than encoded in each block header's {@code extra_data}.
+     * Distinct from {@link #QBFT} because the two modes are structurally different "networks" that
+     * just happen to both be implemented by Besu — a channel keeps one mode for its full life, and
+     * there is no in-place migration between them. {@code getLedgerConfiguration} still returns a
+     * {@code QbftLedgerConfigurationPayload}, with its {@code contract_mode_validator_source} field
+     * set instead of the header-derived validator set.
+     */
+    QBFTContractMode,
     CometBFT,
     Hiero,
 

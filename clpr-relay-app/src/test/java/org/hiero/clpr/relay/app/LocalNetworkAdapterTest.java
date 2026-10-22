@@ -64,6 +64,7 @@ class LocalNetworkAdapterTest {
                 evm("http://localhost:8545"),
                 null,
                 new RelayConfig.QbftConfig(30_000L, 5, 10, 1_048_576L),
+                null,
                 null);
     }
 
@@ -92,6 +93,7 @@ class LocalNetworkAdapterTest {
                 ProofType.CometBFT,
                 evm("http://localhost:8545"),
                 new RelayConfig.CometBftConfig("http://localhost:26657", 10, 10, 3, 30_000L, 1_048_576L),
+                null,
                 null,
                 null);
         adapter = LocalNetworkAdapter.create(config, new SimpleMetrics());

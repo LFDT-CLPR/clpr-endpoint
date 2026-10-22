@@ -1,7 +1,8 @@
 # CLPR EVM Endpoint — E2E Test Framework
 
 Black-box end-to-end tests for the `clpr-evm-endpoint`. The endpoint runs as a **container**; real
-Besu QBFT chains run beside it; the **production** `QBFTVerifier` validates every bundle. Nothing is
+Besu QBFT chains run beside it; the **production** verifier (`QBFTVerifier`, or
+`QbftContractModeVerifier` in `ContractModeChannelE2ETest`) validates every bundle. Nothing is
 stubbed on the path under test.
 
 ```bash
@@ -185,17 +186,18 @@ histograms (duplicate nonce ⇒ two submitters raced one account; gap ⇒ a tran
 
 ## Test suites
 
-|             Suite             |                                                   What it establishes                                                   |
-|-------------------------------|-------------------------------------------------------------------------------------------------------------------------|
-| `BesuNetworkE2ETest`          | generated QBFT genesis actually mines; multi-node networks form; chains get distinct ids                                |
-| `ContractStackE2ETest`        | the real verifier stack deploys and the service accepts mutating calls                                                  |
-| `EndpointContainerE2ETest`    | the container runs the shipped relay; restart keeps IP and key; scrape semantics                                        |
-| `SingleChannelSmokeE2ETest`   | a channel comes up across two chains against the real verifier                                                          |
-| `BacklogDrainE2ETest`         | sub-batch backlog drains; rolling restarts under load lose nothing; over-batch case is the disabled canary              |
-| `UnderfundedConnectorE2ETest` | a starved connector is a business outcome, not a relay failure, and the channel recovers; relay survives a chain outage |
-| `ChannelDiscoveryE2ETest`     | a running endpoint picks up a channel wired after it started, and delivers over it                                      |
-| `TwoChannelIsolationE2ETest`  | two channels across the same chain pair stay isolated — one channel's traffic never moves the other's watermark         |
-| `ManyChannelsE2ETest`         | scale canary: many parallel channels drain without nonce contention or silent drops. `HIGH_LOAD`, so not run in CI      |
+|             Suite             |                                                                        What it establishes                                                                         |
+|-------------------------------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `BesuNetworkE2ETest`          | generated QBFT genesis actually mines; multi-node networks form; chains get distinct ids                                                                           |
+| `ContractStackE2ETest`        | the real verifier stack deploys and the service accepts mutating calls                                                                                             |
+| `EndpointContainerE2ETest`    | the container runs the shipped relay; restart keeps IP and key; scrape semantics                                                                                   |
+| `SingleChannelSmokeE2ETest`   | a channel comes up across two chains against the real verifier                                                                                                     |
+| `ContractModeChannelE2ETest`  | a channel completed against the real `QbftContractModeVerifier` delivers messages both ways (steady state, no rotation — the chains stay in header consensus mode) |
+| `BacklogDrainE2ETest`         | sub-batch backlog drains; rolling restarts under load lose nothing; over-batch case is the disabled canary                                                         |
+| `UnderfundedConnectorE2ETest` | a starved connector is a business outcome, not a relay failure, and the channel recovers; relay survives a chain outage                                            |
+| `ChannelDiscoveryE2ETest`     | a running endpoint picks up a channel wired after it started, and delivers over it                                                                                 |
+| `TwoChannelIsolationE2ETest`  | two channels across the same chain pair stay isolated — one channel's traffic never moves the other's watermark                                                    |
+| `ManyChannelsE2ETest`         | scale canary: many parallel channels drain without nonce contention or silent drops. `HIGH_LOAD`, so not run in CI                                                 |
 
 Assertions target the hard property, not the convenient one: block production rather than port
 reachability, bytecode at the deploy target rather than "an address came back", and a sync cycle

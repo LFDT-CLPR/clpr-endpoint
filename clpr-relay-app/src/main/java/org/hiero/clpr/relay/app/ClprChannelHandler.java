@@ -40,8 +40,11 @@ import org.hiero.clpr.relay.evm.EvmContractStateReader;
 import org.hiero.clpr.relay.evm.beacon.BeaconApiClient;
 import org.hiero.clpr.relay.evm.model.Address;
 import org.hiero.clpr.relay.evm.qbft.QbftBundleConstructor;
+import org.hiero.clpr.relay.evm.qbft.QbftContractModeBundleConstructor;
+import org.hiero.clpr.relay.evm.qbft.QbftContractModeLedgerConfigurationProvider;
 import org.hiero.clpr.relay.evm.qbft.QbftLedgerConfigurationProvider;
 import org.hiero.clpr.relay.evm.qbft.QbftProofCodec;
+import org.hiero.clpr.relay.evm.qbft.StandardValidatorContractProofSource;
 import org.hiero.clpr.relay.evm.sei.SeiBundleConstructor;
 import org.hiero.clpr.relay.evm.sei.SeiLedgerConfigurationProvider;
 import org.hiero.clpr.relay.evm.sei.SeiProofCodec;
@@ -198,6 +201,9 @@ public final class ClprChannelHandler implements ClprChannelOps {
         switch (network.proofType()) {
             case QBFT -> {
                 final var qbft = network.config().qbft();
+                if (qbft == null) {
+                    throw new IllegalStateException("No qbft configuration provided");
+                }
                 rawBundleConstructor = new QbftBundleConstructor(
                         clprServiceAddress,
                         qbft.epochLength(),
@@ -213,6 +219,32 @@ public final class ClprChannelHandler implements ClprChannelOps {
                         .longValueExact();
                 ledgerConfigProvider = new QbftLedgerConfigurationProvider(
                         rpcClient, stateReader, clprServiceAddress, qbft.epochLength());
+            }
+            case QBFTContractMode -> {
+                final var qbftContractMode = network.config().qbftContractMode();
+                if (qbftContractMode == null) {
+                    throw new IllegalStateException("No qbftContractMode configuration provided");
+                }
+                // Besu QBFT "contract" validator-selection mode: the validator set is held by a
+                // validator smart contract rather than encoded in extra_data.
+                final var validatorSource = new StandardValidatorContractProofSource(
+                        rpcClient,
+                        Address.fromHexString(qbftContractMode.validatorContractAddress()),
+                        qbftContractMode.arraySlot());
+                rawBundleConstructor = new QbftContractModeBundleConstructor(
+                        clprServiceAddress,
+                        validatorSource,
+                        qbftContractMode.maxMessagesPerBundle(),
+                        rpcClient,
+                        stateReader,
+                        commitmentLevel);
+                // Proves against the commitment head like header mode (no lag).
+                localChainHeight = () -> rpcClient
+                        .ethGetBlockHeaderByNumber(commitmentLevel.toBlockTag())
+                        .number()
+                        .longValueExact();
+                ledgerConfigProvider = new QbftContractModeLedgerConfigurationProvider(
+                        rpcClient, stateReader, clprServiceAddress, validatorSource);
             }
             case CometBFT -> {
                 final var cometBft = network.config().cometBft();
@@ -396,7 +428,8 @@ public final class ClprChannelHandler implements ClprChannelOps {
     /** Select the inbound {@link BundlePayloadCodec} implementation for a peer's proof format. */
     private static BundlePayloadCodec codecFor(final ProofType peerProofType, final Bytes channelId) {
         return switch (peerProofType) {
-            case QBFT -> new QbftProofCodec(channelId);
+            // QbftProofCodec treats field 1 (validatorSource) opaquely, so it serves both QBFT modes.
+            case QBFT, QBFTContractMode -> new QbftProofCodec(channelId);
             case Hiero -> new HieroProofCodec();
             case CometBFT -> new SeiProofCodec(channelId);
             case EthereumPOS -> new EthereumPosProofCodec();

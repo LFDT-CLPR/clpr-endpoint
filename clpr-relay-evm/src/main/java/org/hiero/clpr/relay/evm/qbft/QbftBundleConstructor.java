@@ -43,6 +43,7 @@ import org.hiero.clpr.relay.evm.EvmUtils;
 import org.hiero.clpr.relay.evm.jsonrpc.EvmJsonRpcClient;
 import org.hiero.clpr.relay.evm.model.Address;
 import org.hiero.clpr.relay.evm.model.BlockHeader;
+import org.hiero.clpr.relay.evm.model.EvmStorageMerkleProof;
 import org.hiero.clpr.relay.evm.model.ProofResponse;
 import org.jspecify.annotations.Nullable;
 
@@ -62,15 +63,13 @@ public final class QbftBundleConstructor implements BundleConstructor {
 
     private static final int ENCODED_TRUST_ANCHOR_ID_LENGTH = Long.BYTES;
 
-    public record QbftStorageProofEntry(Bytes key, List<Bytes> proof) {}
-
     public record QbftBundlePayload(
             List<BlockHeader> epochBlockHeaders,
             BlockHeader currentBlockHeader,
             List<Bytes> clprServiceAccountProof,
-            List<QbftStorageProofEntry> clprServiceStorageProofs,
+            List<EvmStorageMerkleProof> clprServiceStorageProofs,
             Bytes serializedBundleContent,
-            @Nullable QbftStorageProofEntry manifestStorageProof,
+            @Nullable EvmStorageMerkleProof manifestStorageProof,
             @Nullable Bytes serializedEndpointManifest) {}
 
     /** Default assembled bundle-proof size ceiling (bytes) when none is configured; matches gRPC 1 MiB. */
@@ -399,7 +398,7 @@ public final class QbftBundleConstructor implements BundleConstructor {
         // manifest cached locally, an unrelated quantity, so it must not gate our own manifest proof.
         // The manifest commitment is proven via ENDPOINT_MANIFEST_COMMITMENT_SLOT (slot 18) — a separate
         // ethGetProof call so the channel-slots sanity check above stays simple.
-        QbftStorageProofEntry manifestStorageProof = null;
+        EvmStorageMerkleProof manifestStorageProof = null;
         Bytes manifestPreimage = null;
         final Optional<ClprEndpointManifest> manifestDue =
                 ManifestProofPolicy.manifestToAttach(stateReader, peerManifestVersion, currentBlockTag);
@@ -415,7 +414,7 @@ public final class QbftBundleConstructor implements BundleConstructor {
                     final var manifestSp = manifestProofResp.storageProof().get(0);
                     // Keep the slot key alongside the nodes so the proof can be encoded entry-
                     // wrapped ([slotKey, [nodes]]) — the shape SC-189's verifyProvenSlots expects.
-                    manifestStorageProof = new QbftStorageProofEntry(manifestSp.key(), manifestSp.proof());
+                    manifestStorageProof = new EvmStorageMerkleProof(manifestSp.key(), manifestSp.proof());
                     manifestPreimage = ClprEndpointManifest.PROTOBUF.toBytes(manifest);
                 }
             } catch (final Exception e) {
@@ -488,9 +487,9 @@ public final class QbftBundleConstructor implements BundleConstructor {
                 extraInfo);
     }
 
-    private List<QbftStorageProofEntry> toBundleStorageProof(List<ProofResponse.StorageProofEntry> entries) {
+    private List<EvmStorageMerkleProof> toBundleStorageProof(List<ProofResponse.StorageProofEntry> entries) {
         return entries.stream()
-                .map(e -> new QbftStorageProofEntry(e.key(), e.proof()))
+                .map(e -> new EvmStorageMerkleProof(e.key(), e.proof()))
                 .toList();
     }
 
@@ -534,7 +533,7 @@ public final class QbftBundleConstructor implements BundleConstructor {
                     .map(b -> rlpBytes(b.toByteArray()))
                     .toArray(byte[][]::new));
             final byte[] storageProofsElem = rlpList(payload.clprServiceStorageProofs().stream()
-                    .map(PayloadRlpEncoder::encodeStorageProofEntry)
+                    .map(EvmStorageMerkleProof::encodeRlp)
                     .toArray(byte[][]::new));
             final byte[] contentElem =
                     rlpBytes(payload.serializedBundleContent().toByteArray());
@@ -545,7 +544,8 @@ public final class QbftBundleConstructor implements BundleConstructor {
                 // channel storage proof — and calls RLP.readList on each entry. Encode it entry-
                 // wrapped (a single [commitmentSlotKey, [nodes]] entry), NOT a flat list of node
                 // strings: a string element makes the on-chain readList revert RLPInvalidEncoding.
-                final byte[] manifestProofElem = rlpList(encodeStorageProofEntry(payload.manifestStorageProof()));
+                final byte[] manifestProofElem =
+                        rlpList(payload.manifestStorageProof().encodeRlp());
                 final byte[] manifestPreimageElem =
                         rlpBytes(payload.serializedEndpointManifest().toByteArray());
                 return rlpList(
@@ -558,14 +558,6 @@ public final class QbftBundleConstructor implements BundleConstructor {
                         manifestPreimageElem);
             }
             return rlpList(blockHeaderElem, epochHeadersElem, accountProofElem, storageProofsElem, contentElem);
-        }
-
-        private static byte[] encodeStorageProofEntry(QbftStorageProofEntry e) {
-            return rlpList(
-                    rlpBytes(e.key().toByteArray()),
-                    rlpList(e.proof().stream()
-                            .map(b -> rlpBytes(b.toByteArray()))
-                            .toArray(byte[][]::new)));
         }
     }
 }

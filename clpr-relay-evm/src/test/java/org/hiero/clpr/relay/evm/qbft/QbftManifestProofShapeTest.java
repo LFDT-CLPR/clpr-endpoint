@@ -9,8 +9,8 @@ import java.math.BigInteger;
 import java.util.List;
 import org.hiero.clpr.relay.evm.model.Address;
 import org.hiero.clpr.relay.evm.model.BlockHeader;
+import org.hiero.clpr.relay.evm.model.EvmStorageMerkleProof;
 import org.hiero.clpr.relay.evm.qbft.QbftBundleConstructor.QbftBundlePayload;
-import org.hiero.clpr.relay.evm.qbft.QbftBundleConstructor.QbftStorageProofEntry;
 import org.junit.jupiter.api.Test;
 
 /**
@@ -105,13 +105,13 @@ class QbftManifestProofShapeTest {
         final Bytes key = slotKey(18); // ENDPOINT_MANIFEST_COMMITMENT_SLOT
         final Bytes n0 = node(532, 1);
         final Bytes n1 = node(83, 2);
-        final QbftStorageProofEntry manifestEntry = new QbftStorageProofEntry(key, List.of(n0, n1));
+        final EvmStorageMerkleProof manifestEntry = new EvmStorageMerkleProof(key, List.of(n0, n1));
 
         final QbftBundlePayload payload = new QbftBundlePayload(
                 List.of(), // epoch headers
                 minimalHeader(),
                 List.of(node(70, 3)), // account proof node
-                List.of(new QbftStorageProofEntry(slotKey(15), List.of(node(200, 4)))), // storage proof entry
+                List.of(new EvmStorageMerkleProof(slotKey(15), List.of(node(200, 4)))), // storage proof entry
                 Bytes.wrap(new byte[] {0x01, 0x02, 0x03}), // bundle content
                 manifestEntry,
                 Bytes.wrap(new byte[] {0x08, 0x01})); // manifest preimage (protobuf {version:1})

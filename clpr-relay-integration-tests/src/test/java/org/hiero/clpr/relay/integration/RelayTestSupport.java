@@ -145,8 +145,9 @@ public final class RelayTestSupport {
                         evm,
                         null,
                         new RelayConfig.QbftConfig(30_000L, 5, 10, 1_048_576L),
+                        null,
                         null);
-            case Stub -> new RelayConfig.LocalNetworkConfig("local", ProofType.Stub, evm, null, null, null);
+            case Stub -> new RelayConfig.LocalNetworkConfig("local", ProofType.Stub, evm, null, null, null, null);
             default ->
                 throw new IllegalArgumentException(
                         "unsupported local proof type for integration tests: " + localProofType);

@@ -74,6 +74,37 @@ localNetworks:
       # against a gas/size blowup on the peer's submitBundle (default: 1048576 = 1 MiB).
       maxBundleSize: 1048576
 
+  # ── Local Besu QBFT chain, "contract" validator-selection mode ──
+  # Uncomment for a Besu QBFT chain whose validator set is managed by a validator smart contract
+  # (Besu's qbft.validatorselectionmode: contract) rather than encoded in each block header's
+  # extra_data. This is a DISTINCT network type from besu-local above, not an optional variant of
+  # it — proofType: QBFTContractMode selects it, and a channel keeps its network's mode for its
+  # full life; there is no in-place migration between the two. See docs/configuration.md's
+  # "localNetworks[].qbftContractMode" section for the full requirements (peer-chain gas sizing,
+  # archive-node access).
+  # - id: besu-local-contract-mode
+  #   proofType: QBFTContractMode
+  #   evm:
+  #     jsonRpcUrl: http://localhost:8545
+  #     chainId: 1337
+  #     maxGasPriceCap: 9223372036854775807
+  #     gasPriorityFee: 2000000000
+  #     gasBufferMultiplier: 1.2
+  #     pollIntervalMs: 1000
+  #   qbftContractMode:
+  #     # Hex address of the deployed validator contract. Placeholder — a real deployment
+  #     # never leaves this at the zero address.
+  #     validatorContractAddress: "0x0000000000000000000000000000000000000000"
+  #
+  #     # Storage slot of the validator contract's `address[]` array. Depends on the deployed
+  #     # contract's storage layout — the default proof source assumes a plain Solidity
+  #     # `address[]` state variable (length at the slot, elements at keccak256(slot) + i),
+  #     # matching the Consensys validator-smart-contracts reference implementation.
+  #     arraySlotHex: "0x02"
+  #
+  #     # Maximum messages to include in a single bundle (default: 10).
+  #     maxMessagesPerBundle: 10
+
   # ── Local Sei (CometBFT) chain ──
   # Sei is EVM-compatible, so it reuses the evm: block for the EVM side (contract reads + submitBundle).
   # The CometBFT proof path is configured in the separate `cometBft:` block below.

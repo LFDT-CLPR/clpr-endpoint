@@ -19,7 +19,12 @@ import org.hiero.clpr.relay.evm.storage.ClprServiceStorageLayout;
 /**
  * Handles the Besu-QBFT proof format produced by {@link QbftBundleConstructor}: an RLP list
  * {@code [currentBlockHeader, epochBlockHeaders, clprServiceAccountProof, clprServiceStorageProofs,
- * rlp(ClprBundleContent)]}.
+ * rlp(ClprBundleContent)]}. Tuple element 1 is passed through unchanged regardless of its internal
+ * shape — the flat epoch-header list produced by {@link QbftBundleConstructor} (header validator
+ * mode) or the {@code [trustedSet, hops[], contractProof]} produced by
+ * {@link QbftContractModeBundleConstructor} (contract validator mode) — so this codec serves both
+ * modes without change. Both on-chain verifiers decode this same outer tuple (the shared
+ * {@code PAYLOAD_*_INDEX} constants of {@code QbftVerifierBase} in {@code clpr-smart-contracts}).
  *
  * <p>This codec <b>decodes</b> the bundle — it extracts the queue metadata and messages from the
  * embedded {@link ClprBundleContent} (the 5th tuple element) and passes the raw proof bytes through

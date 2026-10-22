@@ -2,7 +2,11 @@
 package org.hiero.clpr.relay.e2e.chain;
 
 import com.fasterxml.jackson.databind.JsonNode;
+import java.io.IOException;
+import java.math.BigInteger;
+import java.nio.charset.StandardCharsets;
 import java.time.Duration;
+import java.util.List;
 import org.hiero.clpr.relay.evm.AbiCodec;
 import org.hiero.clpr.relay.evm.jsonrpc.EvmJsonRpcClient;
 import org.hiero.clpr.relay.integration.AnvilTxSubmitter;
@@ -129,12 +133,73 @@ public final class E2eContractDeployer {
         return deploy("MockClprConnector", new byte[0], receiptTimeout);
     }
 
+    /**
+     * Deploy {@code QbftContractModeVerifier} — the on-chain verifier for QBFT "contract"
+     * validator-selection mode. Stateless (pure functions only), so it takes no constructor
+     * arguments.
+     *
+     * @param receiptTimeout how long to wait for the deploy receipt
+     * @return the verifier contract address
+     * @throws IllegalStateException on any deployment failure
+     */
+    public String deployQbftContractModeVerifier(final Duration receiptTimeout) {
+        return deploy("QbftContractModeVerifier", new byte[0], receiptTimeout);
+    }
+
+    /**
+     * Deploy the E2E {@link org.hiero.clpr.relay.evm.StandardValidatorContractProofSource}-compatible
+     * validator contract: a plain {@code address[]} state variable at slot 0, seeded with
+     * {@code initialValidators}. Not part of the {@code clpr-smart-contracts} artifact set — it is a
+     * self-contained fixture, precompiled to
+     * {@code src/testFixtures/resources/StandardValidatorContract.bin} (see that file's sibling
+     * {@code .sol} for the regeneration command) rather than built on demand.
+     *
+     * @param initialValidators hex addresses of the initial validator set (typically the same
+     *     address(es) that actually seal this chain's blocks, so
+     *     {@code QbftContractModeVerifier}'s committed-seal quorum check has something real to
+     *     check against)
+     * @param receiptTimeout how long to wait for the deploy receipt
+     * @return the validator contract address
+     * @throws IllegalStateException on any deployment failure
+     */
+    public String deployStandardValidatorContract(final List<String> initialValidators, final Duration receiptTimeout) {
+        final String bytecode = loadFixtureBytecode("StandardValidatorContract");
+        final byte[] constructorArgs = encodeAddressArrayArg(initialValidators);
+        return sendCreateAndAwait("StandardValidatorContract", bytecode, constructorArgs, receiptTimeout);
+    }
+
+    /** ABI-encodes a constructor's sole {@code address[]} parameter: offset, length, then each word. */
+    private static byte[] encodeAddressArrayArg(final List<String> addresses) {
+        final byte[] offset = AbiCodec.encodeUint256(BigInteger.valueOf(32));
+        final byte[] length = AbiCodec.encodeUint256(BigInteger.valueOf(addresses.size()));
+        final byte[][] words = new byte[addresses.size()][];
+        for (int i = 0; i < addresses.size(); i++) {
+            words[i] = AbiCodec.encodeAddress(addresses.get(i));
+        }
+        return AbiCodec.concat(AbiCodec.concat(offset, length), AbiCodec.concat(words));
+    }
+
+    /**
+     * Loads a fixture's compiled creation bytecode (no {@code 0x} prefix) from this module's own
+     * {@code testFixtures} classpath resources — e.g. {@code StandardValidatorContract.bin}.
+     */
+    private static String loadFixtureBytecode(final String name) {
+        try (var in = E2eContractDeployer.class.getResourceAsStream("/" + name + ".bin")) {
+            if (in == null) {
+                throw new IllegalStateException(name + ".bin not found on the test-fixtures classpath");
+            }
+            return new String(in.readAllBytes(), StandardCharsets.UTF_8).strip();
+        } catch (final IOException e) {
+            throw new IllegalStateException("failed to read " + name + ".bin", e);
+        }
+    }
+
     private String deploy(
             final String contractName, final byte[] abiEncodedConstructorArgs, final Duration receiptTimeout) {
         final ContractArtifact artifact;
         try {
             artifact = ContractArtifact.loadByName(contractName);
-        } catch (final java.io.IOException e) {
+        } catch (final IOException e) {
             throw new IllegalStateException(
                     "could not load the Foundry artifact for " + contractName
                             + " — is ../clpr-smart-contracts built (forge build)?",
@@ -142,7 +207,17 @@ public final class E2eContractDeployer {
         }
         final String bytecode =
                 artifact.bytecode().startsWith("0x") ? artifact.bytecode().substring(2) : artifact.bytecode();
-        final byte[] callData = AbiCodec.fromHex("0x" + bytecode + AbiCodec.toHexNoPrefix(abiEncodedConstructorArgs));
+        return sendCreateAndAwait(contractName, bytecode, abiEncodedConstructorArgs, receiptTimeout);
+    }
+
+    /** Assembles a contract creation transaction from creation bytecode and ABI-encoded constructor args, sends it, and awaits its address. */
+    private String sendCreateAndAwait(
+            final String contractName,
+            final String bytecodeHexNoPrefix,
+            final byte[] abiEncodedConstructorArgs,
+            final Duration receiptTimeout) {
+        final byte[] callData =
+                AbiCodec.fromHex("0x" + bytecodeHexNoPrefix + AbiCodec.toHexNoPrefix(abiEncodedConstructorArgs));
         final String txHash = txSubmitter.sendRawTx(null, callData, 0L, DEPLOY_GAS_LIMIT);
         return awaitContractAddress(contractName, txHash, receiptTimeout);
     }
