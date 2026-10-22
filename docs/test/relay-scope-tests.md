@@ -243,27 +243,19 @@ advancement is covered in Section #1.
    config, DNS, service discovery, or any other out-of-band directory
    ([spec §2.4.2](https://github.com/hiero-hackers/CLPR-spec/blob/main/clpr-service-spec.md#242-peer-manifest-on-ledger-per-channel),
    [§5.2](https://github.com/hiero-hackers/CLPR-spec/blob/main/clpr-service-spec.md#52-endpoint-discovery)).
-2. When a peer initiates INBOUND gRPC sync, the relay verifies the
-   peer's mTLS leaf certificate against the CA certificates stored in
-   the peer manifest entries — a leaf not chaining to any CA in the
-   manifest is rejected before serving the sync
-   ([spec §2.4.2](https://github.com/hiero-hackers/CLPR-spec/blob/main/clpr-service-spec.md#242-peer-manifest-on-ledger-per-channel),
-   [§1.2](https://github.com/hiero-hackers/CLPR-spec/blob/main/clpr-service-spec.md#12-endpoint-identity)).
-3. When `Channel.endpoint_manifest_version` advances on-chain, the
+2. When `Channel.endpoint_manifest_version` advances on-chain, the
    relay reloads the peer manifest and updates its working set to match
    the new state: newly-added endpoints become eligible for outbound
-   sync and their CAs become trusted for inbound mTLS; removed
-   endpoints are no longer selected for outbound sync and their CAs are
-   no longer trusted; endpoints whose address or CA changed use the new
-   values on subsequent connections — all without requiring a restart
+   sync; removed endpoints are no longer selected for outbound sync;
+   endpoints whose address changed use the new address on subsequent
+   connections — all without requiring a restart
    ([spec §2.4.2 Refresh](https://github.com/hiero-hackers/CLPR-spec/blob/main/clpr-service-spec.md#242-peer-manifest-on-ledger-per-channel)).
-4. A peer manifest with `version ≥ 1` and an empty endpoint list is
+3. A peer manifest with `version ≥ 1` and an empty endpoint list is
    accepted as a valid state — the relay does not treat this as an
-   error or refuse to work on the Channel; sync is simply idle in both
-   directions (no outbound peers to contact; no trusted CAs for inbound
-   mTLS) until the manifest is repopulated
+   error or refuse to work on the Channel; outbound sync is simply idle
+   (no peers to contact) until the manifest is repopulated
    ([spec §2.4.2 Empty manifest](https://github.com/hiero-hackers/CLPR-spec/blob/main/clpr-service-spec.md#242-peer-manifest-on-ledger-per-channel)).
-5. A Channel whose peer manifest version is 0 (uninitialized, PENDING)
+4. A Channel whose peer manifest version is 0 (uninitialized, PENDING)
    is not sync'd against — the relay attempts no peer selection until
    `completeChannel` has populated the manifest to version ≥ 1
    ([spec §2.1](https://github.com/hiero-hackers/CLPR-spec/blob/main/clpr-service-spec.md#21-channel)
@@ -445,9 +437,7 @@ Message passthrough (folded in from the former ORD section).
 ## 8. Sync protocol (gRPC)
 
 Scope: relay obligations for the `ClprEndpointService.sync` bidirectional
-gRPC stream, its mTLS identity, and payload framing. Peer selection is
-covered in section #9. Peer-manifest-driven mTLS trust (verifying incoming
-leaves against manifest CAs) is covered in section #4 item #2.
+gRPC stream and payload framing. Peer selection is covered in section #9.
 
 1. The relay exposes `ClprEndpointService.sync` as a bidirectional
    streaming RPC
@@ -474,55 +464,6 @@ leaves against manifest CAs) is covered in section #4 item #2.
    ([spec §1.5](https://github.com/hiero-hackers/CLPR-spec/blob/main/clpr-service-spec.md#15-sync-protocol)
    — "Implementations MUST configure gRPC max message sizes to
    accommodate `max_sync_bytes`").
-6. mTLS handshakes use TLS 1.3; the relay's leaf certificate is Ed25519
-   and chains to the ECDSA P-384 self-signed CA whose public part is
-   registered on the local endpoint manifest
-   ([spec §1.2](https://github.com/hiero-hackers/CLPR-spec/blob/main/clpr-service-spec.md#12-endpoint-identity)
-   for the CA constraints;
-   [ADR 2026-07-14 endpoint-sync-streaming-and-mtls](https://github.com/hiero-hackers/CLPR-spec/blob/main/ADR/2026-07-14-endpoint-sync-streaming-and-mtls.md)
-   for TLS 1.3 + Ed25519 leaf).
-7. The relay's mTLS leaf certificate is ephemeral — regenerated at
-   process startup and after the configured rotation interval
-   (`leaf_certificate_validity_seconds`, default 86400 = 24 hours),
-   and held only in memory, not persisted to disk. Rotation under a
-   long-running process is observable via successive handshakes
-   presenting distinct leaf certificates chaining to the same CA
-   ([ADR 2026-07-14 endpoint-sync-streaming-and-mtls](https://github.com/hiero-hackers/CLPR-spec/blob/main/ADR/2026-07-14-endpoint-sync-streaming-and-mtls.md)).
-8. The relay rejects a peer mTLS handshake presenting a leaf
-   certificate whose validity window has expired (`notAfter` in the
-   past); no sync stream is established (implicit via standard TLS 1.3
-   handshake validation against the CA constraints in
-   [spec §1.2](https://github.com/hiero-hackers/CLPR-spec/blob/main/clpr-service-spec.md#12-endpoint-identity)).
-9. The relay rejects a peer mTLS handshake presenting a leaf
-   certificate that is not yet valid (`notBefore` in the future); no
-   sync stream is established (implicit via standard TLS 1.3 handshake
-   validation against the CA constraints in
-   [spec §1.2](https://github.com/hiero-hackers/CLPR-spec/blob/main/clpr-service-spec.md#12-endpoint-identity)).
-10. The relay rejects a peer mTLS handshake presenting a leaf
-    certificate that does not chain to any trusted CA — the generic
-    "unknown peer" case; the peer-manifest-CA specialization is in
-    section #4 item #2 (implicit via standard TLS 1.3 chain validation
-    against the manifest CAs;
-    [spec §1.2](https://github.com/hiero-hackers/CLPR-spec/blob/main/clpr-service-spec.md#12-endpoint-identity)
-    defines the CA format,
-    [§2.4.2](https://github.com/hiero-hackers/CLPR-spec/blob/main/clpr-service-spec.md#242-peer-manifest-on-ledger-per-channel)
-    sources the trusted CA set).
-11. The relay accepts a peer mTLS handshake presenting a leaf
-    certificate that is within its validity window and chains to a CA
-    registered in the peer manifest — the sync stream proceeds to the
-    application-layer `ClprSyncPayload` exchange (positive case of the
-    above; implicit via standard TLS 1.3 against
-    [spec §1.2](https://github.com/hiero-hackers/CLPR-spec/blob/main/clpr-service-spec.md#12-endpoint-identity)
-    +
-    [§2.4.2](https://github.com/hiero-hackers/CLPR-spec/blob/main/clpr-service-spec.md#242-peer-manifest-on-ledger-per-channel)).
-12. When the leaf certificate is rotated (interval or manual), rotation
-    takes effect between sync attempts; an established gRPC sync stream
-    is not re-handshaked mid-cycle
-    ([ADR 2026-07-14 endpoint-sync-streaming-and-mtls](https://github.com/hiero-hackers/CLPR-spec/blob/main/ADR/2026-07-14-endpoint-sync-streaming-and-mtls.md)).
-13. Setting `leaf_certificate_validity_seconds = 0` disables periodic
-    rotation; the leaf certificate generated at startup remains in use
-    until the process restarts
-    ([ADR 2026-07-14 endpoint-sync-streaming-and-mtls](https://github.com/hiero-hackers/CLPR-spec/blob/main/ADR/2026-07-14-endpoint-sync-streaming-and-mtls.md)).
 
 ---
 
@@ -615,11 +556,8 @@ section #4.
      (skip check `QbftBundleConstructor.java:266-276`, manifest step
      `:362`; skip check `SeiBundleConstructor.java:345-352`, manifest step
      `:461`).
-6. **Section 4 item 2 / Section 8 items 10–11** — mTLS match is
-   union-of-rosters, not per-connection. Documented as TODO in
-   `ClprSyncHandler.java:115-120` (it may be impossible to solve).
-7. **Section 4 item 2** — no startup self-check of listen-address / CA vs manifest (there is a ticket for CA, the listener address might be difficult as it might hide behind a LB).
-8. **Section 2 items 4, 5, 6** — outbound bundle construction does not
+6. **Section 4** — no startup self-check of the listen address vs the local manifest (it might be difficult as the listener might hide behind a LB).
+7. **Section 2 items 4, 5, 6** — outbound bundle construction does not
    honor the peer's advertised throttles. `peerThrottles` is decoded
    (`EvmContractStateReader.java:232`) and stored on the channel state but
    never consumed; outbound message-count / size limits come from the

@@ -6,9 +6,6 @@ import com.swirlds.logging.api.Logger;
 import com.swirlds.logging.api.Loggers;
 import com.swirlds.metrics.api.LongGauge;
 import com.swirlds.metrics.api.Metrics;
-import java.nio.file.Files;
-import java.nio.file.Path;
-import java.time.Duration;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -17,11 +14,8 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.Function;
-import org.hiero.clpr.relay.core.Certs;
 import org.hiero.clpr.relay.core.ClprChannelOps;
 import org.hiero.clpr.relay.core.CommitmentLevel;
-import org.hiero.clpr.relay.core.LeafKeyManager;
-import org.hiero.clpr.relay.core.PeerEndpointTlsRegistry;
 import org.hiero.clpr.relay.core.RelayProtocol;
 import org.hiero.clpr.relay.core.metrics.SimpleMetrics;
 import org.hiero.clpr.relay.grpc.client.ClprEndpointClient;
@@ -160,29 +154,8 @@ public final class RelayInstance {
         final Function<Bytes, Optional<ClprChannelHandler>> channelLookup =
                 channelId -> findChannelHandler(clprServices, channelId);
 
-        // 3. Parse the CA key once and create a leaf key manager shared by both the outbound client
-        //    and the inbound sync listener. The manager re-mints its leaf on demand when the rotation
-        //    window elapses; rotation is disabled when leafCertValiditySeconds == 0.
-        final var sync = config.sync();
-        final LeafKeyManager leafKeyManager;
-        if (sync.tlsEnabled()) {
-            try {
-                final var caKey = Certs.parsePrivateKey(Files.readAllBytes(Path.of(sync.tlsKeyPath())));
-                Certs.requireEcP384(caKey);
-                leafKeyManager = new LeafKeyManager(caKey, Duration.ofSeconds(sync.leafCertValiditySeconds()), metrics);
-            } catch (final Exception e) {
-                throw new IllegalStateException(
-                        "Failed to load TLS CA key from relay.grpc.sync.tlsKeyPath=" + sync.tlsKeyPath(), e);
-            }
-        } else {
-            leafKeyManager = null;
-        }
-
-        // Outbound peer client (shared by every channel's sync loop).
-
-        final var clprEndpointClient = new ClprEndpointClient(config.grpc().maxMessageSize(), leafKeyManager);
-
-        final var tlsRegistry = new PeerEndpointTlsRegistry();
+        // 3. Outbound peer client (shared by every channel's sync loop).
+        final var clprEndpointClient = new ClprEndpointClient(config.grpc().maxMessageSize());
 
         // Two-phase sync (responder side): resolves the per-channel collaborators by channel id, and
         // builds a bundle ad hoc for the peer's request via createBundle. The peer's held manifest
@@ -211,10 +184,9 @@ public final class RelayInstance {
                 new GetLedgerConfigurationHandler(ledgerConfigResolver, CommitmentLevel.FINALIZED);
 
         final var grpcServer = new ClprGrpcServer(
-                new ClprGrpcServer.Listeners(sync.port(), config.info().port(), leafKeyManager),
+                config.grpc().port(),
                 config.grpc().maxMessageSize(),
                 syncHandler,
-                tlsRegistry,
                 getLedgerConfigurationHandler,
                 instanceName);
 
@@ -239,8 +211,7 @@ public final class RelayInstance {
                             config.backoff(),
                             instanceName,
                             clprEndpointClient,
-                            config.peerProofTypes(),
-                            tlsRegistry));
+                            config.peerProofTypes()));
         }
 
         return new RelayInstance(localNetworks, clprServices, grpcServer, clprEndpointClient, metrics);
@@ -292,21 +263,12 @@ public final class RelayInstance {
     }
 
     /**
-     * Returns the data-plane ({@code sync}) gRPC port, or {@code -1} if not started.
+     * Returns the gRPC port, or {@code -1} if not started.
      *
-     * @return the sync gRPC port
+     * @return the gRPC port
      */
     public int grpcPort() {
         return grpcServer.port();
-    }
-
-    /**
-     * Returns the info-plane gRPC port ({@code getLedgerConfiguration}), or {@code -1} if not started.
-     *
-     * @return the info gRPC port
-     */
-    public int infoPort() {
-        return grpcServer.infoPort();
     }
 
     /**

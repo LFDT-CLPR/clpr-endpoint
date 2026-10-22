@@ -102,7 +102,7 @@ class ClprSyncSessionTest {
                 .bundleConstructor(bundleConstructor)
                 .inboundBundleQueue(submitter);
         final var handler = new ClprSyncHandler(channelId -> Optional.of(ops), new SimpleMetrics(), "test");
-        return handler.newSession(responses, null);
+        return handler.newSession(responses);
     }
 
     private static ClprSyncPayload requestPayload() {

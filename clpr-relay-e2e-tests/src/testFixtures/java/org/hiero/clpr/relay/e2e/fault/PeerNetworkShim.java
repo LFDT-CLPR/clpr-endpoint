@@ -125,7 +125,7 @@ public final class PeerNetworkShim implements AutoCloseable {
             return new ProxyAddress(staticIp, existing.port());
         }
         final int port = PROXY_PORT_BASE + registered.size();
-        final String upstream = endpoint.containerIp() + ":" + EvmEndpoint.SYNC_PORT;
+        final String upstream = endpoint.containerIp() + ":" + EvmEndpoint.GRPC_PORT;
         createProxy(endpoint.id(), port, upstream);
         registered.put(endpoint.id(), new RegisteredEndpoint(endpoint.id(), port));
         return new ProxyAddress(staticIp, port);

@@ -16,7 +16,6 @@ dependencies.constraints {
     val mockitoVersion = "5.15.2"
     val grpcIoVersion = "1.73.0"
     val protobufVersion = "4.31.1"
-    val bouncyCastleVersion = "1.78.1"
 
     api("com.hedera.pbj:pbj-runtime:${pbjVersion}") { because("com.hedera.pbj.runtime") }
     api("com.hedera.pbj:pbj-grpc-helidon:${pbjVersion}") { because("com.hedera.pbj.grpc.helidon") }
@@ -105,13 +104,6 @@ dependencies.constraints {
     api("com.hedera.common:hedera-common-nativesupport:$hieroCryptoVersion") {
         because("com.hedera.common.nativesupport")
     }
-
-    // BouncyCastle — X.509 leaf-certificate construction for the two-tier mTLS trust model.
-    api("org.bouncycastle:bcprov-jdk18on:$bouncyCastleVersion") {
-        because("org.bouncycastle.provider")
-    }
-    api("org.bouncycastle:bcutil-jdk18on:$bouncyCastleVersion") { because("org.bouncycastle.util") }
-    api("org.bouncycastle:bcpkix-jdk18on:$bouncyCastleVersion") { because("org.bouncycastle.pkix") }
 
     // Testing
     api("org.junit.jupiter:junit-jupiter-api:5.14.0") { because("org.junit.jupiter.api") }

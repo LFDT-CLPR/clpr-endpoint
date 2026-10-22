@@ -84,11 +84,8 @@ spec:
             {{- end }}
             {{- end }}
           ports:
-            - name: grpc-sync
-              containerPort: {{ .Values.grpc.sync.port }}
-              protocol: TCP
-            - name: grpc-info
-              containerPort: {{ .Values.grpc.info.port }}
+            - name: grpc
+              containerPort: {{ .Values.grpc.port }}
               protocol: TCP
             {{- if .Values.metrics.enabled }}
             - name: metrics
@@ -98,14 +95,14 @@ spec:
           # Liveness: the gRPC port must be accepting channels.
           livenessProbe:
             tcpSocket:
-              port: grpc-sync
+              port: grpc
             initialDelaySeconds: 30
             periodSeconds: 15
             failureThreshold: 3
           # Readiness: same check — pod only receives traffic once gRPC is up.
           readinessProbe:
             tcpSocket:
-              port: grpc-sync
+              port: grpc
             initialDelaySeconds: 10
             periodSeconds: 10
             failureThreshold: 3
@@ -123,11 +120,6 @@ spec:
               readOnly: true
             - name: tmp
               mountPath: /tmp
-            {{- if .Values.grpc.sync.tls.enabled }}
-            - name: tls-ca-key
-              mountPath: /app/tls
-              readOnly: true
-            {{- end }}
       volumes:
         - name: config
           configMap:
@@ -137,14 +129,6 @@ spec:
             name: {{ include "clpr-evm-endpoint.fullname" . }}-logging
         - name: tmp
           emptyDir: {}
-        {{- if .Values.grpc.sync.tls.enabled }}
-        - name: tls-ca-key
-          secret:
-            secretName: {{ required "grpc.sync.tls.existingSecret is required when grpc.sync.tls.enabled is true" .Values.grpc.sync.tls.existingSecret }}
-            items:
-              - key: {{ .Values.grpc.sync.tls.secretKey }}
-                path: ca-key.der
-        {{- end }}
       {{- with .Values.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}

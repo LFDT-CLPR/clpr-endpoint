@@ -52,26 +52,6 @@ RELAY_B_SEED_IP="${RELAY_B_SEED_IP:-${RELAY_B_HOST}}"
 OUTPUT_FILE="${OUTPUT_FILE:-/tmp/clpr-kind-setup.env}"
 CHAIN_ID=1337
 
-# Secure (mTLS) transport. When SECURE_TRANSPORT=1, each relay's ECDSA P-384 CA cert
-# (gen-certs.sh, mounted at CERT_DIR) must reach the peer roster so peers can pin it.
-#
-# It is injected ONLY through the mock verifier's setSeedEndpoints (which flows into the
-# roster at completeChannel and is NOT validated on-chain). It is deliberately NOT put
-# in the updateLedgerConfiguration seed endpoints: that path runs
-# EndpointValidation.validateTlsCertificate, which still requires a DER RSA >=2048 cert
-# and rejects the relay's EC P-384 cert (a drift between clpr-smart-contracts and the
-# relay's two-tier mTLS model). The ledger seeds therefore keep an empty (0x) cert, which
-# the validator accepts, while the roster the relay actually reads carries the EC cert.
-SECURE_TRANSPORT="${SECURE_TRANSPORT:-0}"
-CERT_DIR="${CERT_DIR:-/certs}"
-if [[ "$SECURE_TRANSPORT" == "1" ]]; then
-    RELAY_A_TLS="0x$(cat "$CERT_DIR/relay-a-cert.hex")"
-    RELAY_B_TLS="0x$(cat "$CERT_DIR/relay-b-cert.hex")"
-else
-    RELAY_A_TLS="0x"
-    RELAY_B_TLS="0x"
-fi
-
 # Anvil deterministic dev accounts.
 # Account 0: relay A's signing identity and the deployer/owner for all contracts.
 # Account 1: relay B's signing identity (registers on CONTRACT_B as the B endpoint).
@@ -268,7 +248,7 @@ err "[6/8] Configuring verifiers and mock apps..."
 tx "$KEY_A" "$QBFT_VERIFIER_A" "setVerifyConfigResult(string,bytes,uint96)" "eip155:1" "$CONTRACT_B" 1000
 tx "$KEY_A" "$QBFT_VERIFIER_A" "setPeerThrottles((uint64,uint64,uint64,uint64,uint64))" "$THROTTLES"
 tx "$KEY_A" "$QBFT_VERIFIER_A" "setSeedEndpoints((string,uint32,bytes,bytes)[])" \
-    "[(\"$RELAY_B_HOST\",$RELAY_GRPC_PORT,$RELAY_B_TLS,$ADDR_B)]"
+    "[(\"$RELAY_B_HOST\",$RELAY_GRPC_PORT,0x,$ADDR_B)]"
 err "  Verifier A configured (peer: $CONTRACT_B)."
 
 # QbftPassThroughVerifier B:
@@ -277,7 +257,7 @@ err "  Verifier A configured (peer: $CONTRACT_B)."
 tx "$KEY_A" "$QBFT_VERIFIER_B" "setVerifyConfigResult(string,bytes,uint96)" "eip155:1" "$CONTRACT_A" 1000
 tx "$KEY_A" "$QBFT_VERIFIER_B" "setPeerThrottles((uint64,uint64,uint64,uint64,uint64))" "$THROTTLES"
 tx "$KEY_A" "$QBFT_VERIFIER_B" "setSeedEndpoints((string,uint32,bytes,bytes)[])" \
-    "[(\"$RELAY_A_HOST\",$RELAY_GRPC_PORT,$RELAY_A_TLS,$ADDR_A)]"
+    "[(\"$RELAY_A_HOST\",$RELAY_GRPC_PORT,0x,$ADDR_A)]"
 err "  Verifier B configured (peer: $CONTRACT_A)."
 
 # Pre-load PONG responses in mock apps so inbound messages are handled.

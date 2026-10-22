@@ -166,19 +166,18 @@ class ChannelSyncTaskTest {
     }
 
     // -------------------------------------------------------------------------
-    // Endpoint-client stubs (two-phase sync: sync(host, port, request, followUpFactory, peerCert))
+    // Endpoint-client stubs (two-phase sync: sync(host, port, request, followUpFactory))
     // -------------------------------------------------------------------------
 
     private static ClprEndpointClient stubPayloadClprEndpointClient(
             Function<ClprSyncPayload, ClprSyncPayload> provider) {
-        return new ClprEndpointClient(1_048_576, null) {
+        return new ClprEndpointClient(1_048_576) {
             @Override
             public ClprSyncPayload sync(
                     final String host,
                     final int port,
                     final ClprSyncPayload request,
-                    final Function<ClprSyncPayload, ClprSyncPayload> followUpFactory,
-                    final Bytes peerTlsCertificate) {
+                    final Function<ClprSyncPayload, ClprSyncPayload> followUpFactory) {
                 final ClprSyncPayload reply = provider.apply(request);
                 // Mirror the real client: the peer's phase-1 reply drives the follow-up factory, which is
                 // where the task consumes (enqueues) the inbound bundle before building its phase-2 answer.
@@ -464,12 +463,12 @@ class ChannelSyncTaskTest {
         task.executeSyncCycle();
 
         final String channelIdLabel = HexFormat.of().formatHex(CHANNEL_ID.toByteArray());
-        // SinglePeerSelectorWithEndpoint's peer carries accountId {0x09} → hex "09".
+        // SinglePeerSelectorWithEndpoint's peer is labelled by its service endpoint.
         final var failedAfterSend = (Counter) metrics.getMetric(
                 "sync",
                 MetricLabels.labeled(
                         "exchanges.failed_after_send",
-                        Map.of("role", "initiator", "channel_id", channelIdLabel, "peer", "09")));
+                        Map.of("role", "initiator", "channel_id", channelIdLabel, "peer", "127.0.0.1:19999")));
         assertThat(failedAfterSend).isNotNull();
         assertThat(failedAfterSend.get()).isEqualTo(1L);
 
@@ -604,14 +603,13 @@ class ChannelSyncTaskTest {
                 .ackedMessageId(3L)
                 .receivedMessageId(3L)
                 .build();
-        final var closedClient = new ClprEndpointClient(1_048_576, null) {
+        final var closedClient = new ClprEndpointClient(1_048_576) {
             @Override
             public ClprSyncPayload sync(
                     final String host,
                     final int port,
                     final ClprSyncPayload request,
-                    final Function<ClprSyncPayload, ClprSyncPayload> followUpFactory,
-                    final Bytes peerTlsCertificate) {
+                    final Function<ClprSyncPayload, ClprSyncPayload> followUpFactory) {
                 throw new IllegalStateException("ClprEndpointClient is closed");
             }
         };
@@ -640,7 +638,7 @@ class ChannelSyncTaskTest {
     /** ClprEndpointClient that records the last two-phase call's arguments. */
     static class RecordingClprEndpointClient extends ClprEndpointClient {
         RecordingClprEndpointClient() {
-            super(1_048_576, null);
+            super(1_048_576);
         }
 
         String host;
@@ -665,8 +663,7 @@ class ChannelSyncTaskTest {
                 @NonNull String h,
                 int p,
                 @NonNull ClprSyncPayload request,
-                @NonNull Function<ClprSyncPayload, ClprSyncPayload> followUpFactory,
-                @NonNull Bytes peerTlsCertificate) {
+                @NonNull Function<ClprSyncPayload, ClprSyncPayload> followUpFactory) {
             host = h;
             port = p;
             channelId = request.channelId();

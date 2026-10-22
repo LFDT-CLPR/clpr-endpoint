@@ -27,7 +27,7 @@ class RelayConfigLoaderTest {
     void noConfigFile_yieldsDefaultsAndEmptyTopology() {
         final var config = RelayConfigLoader.load(null, new Properties());
 
-        assertThat(config.sync().port()).isEqualTo(9545);
+        assertThat(config.grpc().port()).isEqualTo(9545);
         assertThat(config.grpc().maxMessageSize()).isEqualTo(1_048_576);
         assertThat(config.localNetworks()).isEmpty();
         assertThat(config.clprServices()).isEmpty();
@@ -40,11 +40,11 @@ class RelayConfigLoaderTest {
     @Test
     void noConfigFile_systemPropertiesOverrideGrpcDefaults() {
         final var overrides = new Properties();
-        overrides.setProperty("relay.grpc.sync.port", "12345");
+        overrides.setProperty("relay.grpc.port", "12345");
 
         final var config = RelayConfigLoader.load(null, overrides);
 
-        assertThat(config.sync().port()).isEqualTo(12345);
+        assertThat(config.grpc().port()).isEqualTo(12345);
         assertThat(config.clprServices()).isEmpty();
     }
 
@@ -53,15 +53,14 @@ class RelayConfigLoaderTest {
         final var yaml = tmp.resolve("relay-config.yaml");
         Files.writeString(yaml, """
                 grpc:
-                  sync:
-                    port: 9000
+                  port: 9000
                 """);
         final var overrides = new Properties();
-        overrides.setProperty("relay.grpc.sync.port", "7777");
+        overrides.setProperty("relay.grpc.port", "7777");
 
         final var config = RelayConfigLoader.load(yaml, overrides);
 
-        assertThat(config.sync().port()).isEqualTo(7777);
+        assertThat(config.grpc().port()).isEqualTo(7777);
     }
 
     @Test
@@ -363,7 +362,7 @@ class RelayConfigLoaderTest {
 
         final var config = RelayConfigLoader.load(yaml, new Properties());
 
-        assertThat(config.sync().port()).isEqualTo(9545);
+        assertThat(config.grpc().port()).isEqualTo(9545);
         assertThat(config.peerProofTypes()).containsEntry("eip155:1337", ProofType.QBFT);
 
         assertThat(config.localNetworks()).hasSize(1);
@@ -693,131 +692,30 @@ class RelayConfigLoaderTest {
     }
 
     // -------------------------------------------------------------------------
-    // Transport validation: one sync listener (plaintext or mTLS) + an always-plaintext info listener
+    // gRPC port validation
     // -------------------------------------------------------------------------
 
     @Test
-    void transportDefaults_syncAndInfoPlaintext() {
-        final var config = RelayConfigLoader.load(null, new Properties());
-
-        assertThat(config.sync().port()).isEqualTo(9545);
-        assertThat(config.info().port()).isEqualTo(9546);
-        assertThat(config.sync().tlsEnabled()).isFalse();
-    }
-
-    @Test
-    void syncPortZero_failsFast() {
+    void grpcPortZero_failsFast() {
         final var overrides = new Properties();
-        overrides.setProperty("relay.grpc.sync.port", "0");
+        overrides.setProperty("relay.grpc.port", "0");
 
         assertThatThrownBy(() -> RelayConfigLoader.load(null, overrides))
                 .isInstanceOf(IllegalArgumentException.class)
-                .hasMessageContaining("relay.grpc.sync.port must be > 0");
+                .hasMessageContaining("relay.grpc.port must be > 0");
     }
 
     @Test
-    void infoPortZero_failsFast() {
-        final var overrides = new Properties();
-        overrides.setProperty("relay.grpc.info.port", "0");
-
-        assertThatThrownBy(() -> RelayConfigLoader.load(null, overrides))
-                .isInstanceOf(IllegalArgumentException.class)
-                .hasMessageContaining("relay.grpc.info.port must be > 0");
-    }
-
-    @Test
-    void tlsEnabledWithoutKey_failsFast() {
-        final var overrides = new Properties();
-        overrides.setProperty("relay.grpc.sync.tlsEnabled", "true"); // no key supplied
-
-        assertThatThrownBy(() -> RelayConfigLoader.load(null, overrides))
-                .isInstanceOf(IllegalArgumentException.class)
-                .hasMessageContaining("tlsKeyPath must be set");
-    }
-
-    @Test
-    void tlsDisabled_ignoresKey() {
-        final var overrides = new Properties();
-        // tlsEnabled defaults to false, so a bogus (unreadable) key path is ignored rather than validated.
-        overrides.setProperty("relay.grpc.sync.tlsKeyPath", "/no/such/key.pem");
-
-        final var config = RelayConfigLoader.load(null, overrides);
-
-        assertThat(config.sync().tlsEnabled()).isFalse();
-    }
-
-    @Test
-    void syncAndInfoSamePort_failsFast() {
-        final var overrides = new Properties();
-        overrides.setProperty("relay.grpc.info.port", "9545"); // collides with the default sync port
-
-        assertThatThrownBy(() -> RelayConfigLoader.load(null, overrides))
-                .isInstanceOf(IllegalArgumentException.class)
-                .hasMessageContaining("must differ");
-    }
-
-    @Test
-    void syncTlsKeyMissingFile_failsFast() {
-        final var overrides = new Properties();
-        overrides.setProperty("relay.grpc.sync.tlsEnabled", "true");
-        overrides.setProperty("relay.grpc.sync.tlsKeyPath", "/no/such/key.pem");
-
-        assertThatThrownBy(() -> RelayConfigLoader.load(null, overrides))
-                .isInstanceOf(IllegalArgumentException.class)
-                .hasMessageContaining("not readable");
-    }
-
-    @Test
-    void secureSync_withReadableKey_loads(@TempDir final Path tmp) throws Exception {
-        final var key = Files.writeString(tmp.resolve("key.pem"), "dummy-key");
-        final var overrides = new Properties();
-        overrides.setProperty("relay.grpc.sync.tlsEnabled", "true");
-        overrides.setProperty("relay.grpc.sync.tlsKeyPath", key.toString());
-
-        final var config = RelayConfigLoader.load(null, overrides);
-
-        assertThat(config.sync().port()).isEqualTo(9545);
-        assertThat(config.info().port()).isEqualTo(9546);
-        assertThat(config.sync().tlsEnabled()).isTrue();
-        assertThat(config.sync().tlsKeyPath()).isEqualTo(key.toString());
-    }
-
-    @Test
-    void plaintextSync_fromYamlRoundTrips(@TempDir final Path tmp) throws Exception {
-        final var yaml = tmp.resolve("plain.yaml");
+    void grpcPort_fromYamlFile(@TempDir final Path tmp) throws Exception {
+        final var yaml = tmp.resolve("ports.yaml");
         Files.writeString(yaml, """
                 grpc:
-                  info:
-                    port: 9700
-                  sync:
-                    port: 9545
-                signingPrivateKeyHex: "0xaabbccdd"
+                  port: 9700
                 """);
 
         final var config = RelayConfigLoader.load(yaml, new Properties());
 
-        assertThat(config.sync().port()).isEqualTo(9545);
-        assertThat(config.info().port()).isEqualTo(9700);
-    }
-
-    @Test
-    void secureSync_yamlRoundTrip(@TempDir final Path tmp) throws Exception {
-        final var key = Files.writeString(tmp.resolve("k.pem"), "y");
-        final var yaml = tmp.resolve("secure.yaml");
-        Files.writeString(yaml, """
-                grpc:
-                  sync:
-                    port: 9600
-                    tlsEnabled: true
-                    tlsKeyPath: "%s"
-                signingPrivateKeyHex: "0xaabbccdd"
-                """.formatted(key));
-
-        final var config = RelayConfigLoader.load(yaml, new Properties());
-
-        assertThat(config.sync().port()).isEqualTo(9600);
-        assertThat(config.sync().tlsEnabled()).isTrue();
-        assertThat(config.sync().tlsKeyPath()).isEqualTo(key.toString());
+        assertThat(config.grpc().port()).isEqualTo(9700);
     }
 
     @Test

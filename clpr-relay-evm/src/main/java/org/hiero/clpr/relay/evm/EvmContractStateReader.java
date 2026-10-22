@@ -444,7 +444,7 @@ public class EvmContractStateReader implements ContractStateReader {
         } catch (final Exception e) {
             // Unlike the local readEndpointManifest (whose failure just skips an optional outbound
             // proof), a failed PEER read must NOT degrade to the empty DEFAULT sentinel: both callers
-            // feed the result into a destructive PeerEndpointCache/tlsRegistry *replace*, so a
+            // feed the result into a destructive PeerEndpointCache *replace*, so a
             // transient RPC/decode failure would wipe an authoritative roster and stall sync until the
             // next manifest-version advance (which may never come). Record the failure metric, then
             // rethrow so the listener poll loop backs off and retries and channel bootstrap aborts
@@ -702,15 +702,12 @@ public class EvmContractStateReader implements ContractStateReader {
             final int tlsRelOffset = AbiCodec.decodeOffsetOrLength(result, elemBase + 2 * 32);
             final byte[] tlsCert = decodeBytesAt(result, elemBase + tlsRelOffset);
 
-            // Slot 3: offset to accountId bytes (relative to elemBase).
+            // Slot 3: offset to accountId bytes (relative to elemBase). Kept verbatim, never
+            // synthesised: the relay does not use accountId (peers are keyed by host:port, see
+            // Peers.peerKey), and the decoded local manifest is re-encoded as the protobuf preimage
+            // of the slot-18 manifest commitment, so any rewritten field would break the proof.
             final int accountRelOffset = AbiCodec.decodeOffsetOrLength(result, elemBase + 3 * 32);
-            byte[] accountId = decodeBytesAt(result, elemBase + accountRelOffset);
-
-            // When the on-chain accountId is empty, synthesise an ip:port key so the
-            // PeerSelector stats map can distinguish different peers.
-            if (accountId.length == 0) {
-                accountId = (ip + ":" + portLong).getBytes(StandardCharsets.UTF_8);
-            }
+            final byte[] accountId = decodeBytesAt(result, elemBase + accountRelOffset);
 
             return new ClprEndpoint(
                     new ClprServiceEndpoint(ip, (int) portLong), Bytes.wrap(tlsCert), Bytes.wrap(accountId));

@@ -9,8 +9,6 @@ description = "CLPR EVM Relay — Core interfaces and types"
 dependencies {
     api("com.swirlds:swirlds-metrics-api")
     implementation("com.swirlds:swirlds-metrics-impl")
-    // X.509 leaf-certificate construction for the two-tier mTLS trust model.
-    implementation("org.bouncycastle:bcpkix-jdk18on")
     compileOnly("org.jspecify:jspecify")
 }
 

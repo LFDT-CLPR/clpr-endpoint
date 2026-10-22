@@ -300,7 +300,7 @@ This aligns the providers with the `LedgerConfigurationPayloadProvider` interfac
 
 The per-channel peer-manifest refresh poller, driven directly by its `ClprChannelHandler` (there is
 no central listener). It reads only the on-ledger peer endpoint manifest and, when its `version`
-advances, replaces the channel's `PeerEndpointCache` (and the mTLS trust registry) wholesale. In the
+advances, replaces the channel's `PeerEndpointCache` wholesale. In the
 two-phase protocol nothing else is polled: bundles are built ad hoc from a peer's `BundleRequest`
 (`BundleConstructor.createBundle`), not on a state-change trigger.
 

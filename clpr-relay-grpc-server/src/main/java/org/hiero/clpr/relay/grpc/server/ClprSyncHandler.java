@@ -1,13 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 package org.hiero.clpr.relay.grpc.server;
 
-import com.hedera.hapi.node.state.clpr.ClprEndpoint;
 import com.hedera.hapi.node.state.clpr.ClprSyncPayload;
 import com.hedera.pbj.runtime.grpc.Pipeline;
 import com.swirlds.metrics.api.Metrics;
 import org.hiero.clpr.relay.core.ChannelLookup;
 import org.hiero.clpr.relay.core.metrics.LabeledCounter;
-import org.jspecify.annotations.Nullable;
 
 /**
  * Factory for {@link ClprSyncSession} instances, one per inbound two-phase {@code sync}
@@ -55,16 +53,12 @@ public class ClprSyncHandler {
      * Creates a fresh session bound to the outbound response stream for one call.
      *
      * @param responses the response pipeline the session writes replies to
-     * @param peer      the authenticated peer resolved from the mutual-TLS client certificate, or
-     *                  {@code null} for a plaintext dial or an mTLS certificate matching no roster entry
      * @return a new, stateful two-phase session
      */
-    public ClprSyncSession newSession(
-            final Pipeline<? super ClprSyncPayload> responses, @Nullable final ClprEndpoint peer) {
+    public ClprSyncSession newSession(final Pipeline<? super ClprSyncPayload> responses) {
         return new ClprSyncSession(
                 responses,
                 channelLookup,
-                peer,
                 instanceName,
                 exchangesStarted,
                 exchangesFailed,

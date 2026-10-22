@@ -11,17 +11,7 @@ import com.hedera.pbj.runtime.grpc.Pipeline;
 import com.hedera.pbj.runtime.grpc.Pipelines;
 import com.hedera.pbj.runtime.grpc.ServiceInterface;
 import com.hedera.pbj.runtime.io.buffer.Bytes;
-import io.helidon.common.tls.Tls;
-import io.helidon.common.tls.TlsClientAuth;
 import io.helidon.webserver.WebServer;
-import java.io.ByteArrayInputStream;
-import java.io.IOException;
-import java.security.GeneralSecurityException;
-import java.security.KeyStore;
-import java.security.KeyStoreException;
-import java.security.SecureRandom;
-import java.security.cert.CertificateFactory;
-import java.security.cert.X509Certificate;
 import java.time.Duration;
 import java.util.List;
 import java.util.concurrent.BlockingQueue;
@@ -31,14 +21,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Function;
 import java.util.function.Predicate;
-import javax.net.ssl.KeyManager;
-import javax.net.ssl.SSLContext;
-import javax.net.ssl.TrustManager;
-import javax.net.ssl.TrustManagerFactory;
-import javax.net.ssl.X509ExtendedKeyManager;
-import org.hiero.clpr.relay.core.LeafKeyManager;
 import org.hiero.clpr.relay.grpc.client.ClprEndpointClient;
-import org.jspecify.annotations.Nullable;
 
 /**
  * A controllable CLPR peer endpoint for single-side integration tests, speaking the two-phase
@@ -72,117 +55,28 @@ public final class StubPeer implements AutoCloseable {
     /** Standing phase-1 response policy; defaults to a responsive-but-silent peer that asks for our data. */
     private volatile Function<ClprSyncPayload, ClprSyncPayload> syncResponder = StubPeer::requestOnlyReply;
 
-    private StubPeer(
-            final int maxMessageSize,
-            @Nullable final LeafKeyManager serverKeyManager,
-            @Nullable final byte[] clientCaDer) {
-        // When a serverKeyManager is present the stub peer also uses it as its client identity so
-        // that pokeSync(host, port, payload, serverCaDer) can present a client certificate against
-        // a mandatory-mTLS relay listener.
-        this.client = new ClprEndpointClient(maxMessageSize, serverKeyManager);
-        final var builder = WebServer.builder()
+    private StubPeer(final int maxMessageSize) {
+        this.client = new ClprEndpointClient(maxMessageSize);
+        this.server = WebServer.builder()
                 .name("stub-peer clpr-grpc")
                 .port(0) // ephemeral; read back via port()
                 .addProtocol(PbjConfig.builder()
                         .name("pbj")
                         .maxMessageSizeBytes(maxMessageSize)
                         .build())
-                .addRouting(PbjRouting.builder().service(new StubService()));
-        if (serverKeyManager != null) {
-            builder.tls(buildTls(serverKeyManager, clientCaDer));
-        }
-        this.server = builder.build().start();
+                .addRouting(PbjRouting.builder().service(new StubService()))
+                .build()
+                .start();
     }
 
     /** Start a stub peer on an ephemeral port with the default max message size. */
     public static StubPeer start() {
-        return new StubPeer(DEFAULT_MAX_MESSAGE_SIZE, null, null);
+        return new StubPeer(DEFAULT_MAX_MESSAGE_SIZE);
     }
 
     /** Start a stub peer on an ephemeral port with an explicit max gRPC message size. */
     public static StubPeer start(final int maxMessageSize) {
-        return new StubPeer(maxMessageSize, null, null);
-    }
-
-    /**
-     * Start a TLS-enabled stub peer on an ephemeral port with the default max message size. The server
-     * presents the certificate from {@code serverKeyManager}; no client certificate is required (one-way
-     * TLS from the connecting peer's perspective).
-     */
-    public static StubPeer start(final LeafKeyManager serverKeyManager) {
-        return new StubPeer(DEFAULT_MAX_MESSAGE_SIZE, serverKeyManager, null);
-    }
-
-    /**
-     * Start a mutual-TLS stub peer on an ephemeral port with the default max message size. The server
-     * presents the certificate from {@code serverKeyManager} and requires every connecting client to
-     * present a leaf certificate that chains to {@code clientCaDer}.
-     *
-     * @param serverKeyManager the key material the stub peer presents as the TLS server
-     * @param clientCaDer      DER-encoded CA certificate used to verify the connecting client's leaf
-     */
-    public static StubPeer start(final LeafKeyManager serverKeyManager, final byte[] clientCaDer) {
-        return new StubPeer(DEFAULT_MAX_MESSAGE_SIZE, serverKeyManager, clientCaDer);
-    }
-
-    /**
-     * Start a TLS-enabled stub peer backed by a static, non-rotating key manager. Unlike
-     * {@link #start(LeafKeyManager)}, the certificate returned by {@code serverKm} is never rotated,
-     * making this factory suitable for scenarios where the presented certificate must stay fixed —
-     * for example an already-expired certificate that {@link LeafKeyManager} would otherwise rotate
-     * away on the first TLS handshake.
-     *
-     * <p>The returned peer has no client TLS identity; {@link #pokeSync(String, int, ClprSyncPayload, Bytes)}
-     * dials plaintext and will fail against a mandatory-mTLS listener.
-     *
-     * @param serverKm the static key manager supplying the server certificate and private key
-     */
-    public static StubPeer startWithStaticKeyManager(final X509ExtendedKeyManager serverKm) {
-        return new StubPeer(DEFAULT_MAX_MESSAGE_SIZE, serverKm);
-    }
-
-    private StubPeer(final int maxMessageSize, final X509ExtendedKeyManager staticKeyManager) {
-        this.client = new ClprEndpointClient(maxMessageSize, null);
-        final var builder = WebServer.builder()
-                .name("stub-peer clpr-grpc")
-                .port(0)
-                .addProtocol(PbjConfig.builder()
-                        .name("pbj")
-                        .maxMessageSizeBytes(maxMessageSize)
-                        .build())
-                .addRouting(PbjRouting.builder().service(new StubService()));
-        builder.tls(buildTls(staticKeyManager, null));
-        this.server = builder.build().start();
-    }
-
-    private static Tls buildTls(final X509ExtendedKeyManager serverKeyManager, @Nullable final byte[] clientCaDer) {
-        try {
-            final SSLContext ctx = SSLContext.getInstance("TLS");
-            final TrustManager[] trustManagers = clientCaDer != null ? buildTrustManagers(clientCaDer) : null;
-            ctx.init(new KeyManager[] {serverKeyManager}, trustManagers, new SecureRandom());
-            return Tls.builder()
-                    .sslContext(ctx)
-                    .clientAuth(clientCaDer != null ? TlsClientAuth.REQUIRED : TlsClientAuth.NONE)
-                    .endpointIdentificationAlgorithm(Tls.ENDPOINT_IDENTIFICATION_NONE)
-                    .build();
-        } catch (final GeneralSecurityException e) {
-            throw new IllegalStateException("failed to build stub-peer TLS context: " + e.getMessage(), e);
-        }
-    }
-
-    private static TrustManager[] buildTrustManagers(final byte[] caDer) throws GeneralSecurityException {
-        final CertificateFactory cf = CertificateFactory.getInstance("X.509");
-        final X509Certificate caCert = (X509Certificate) cf.generateCertificate(new ByteArrayInputStream(caDer));
-        final KeyStore ks = KeyStore.getInstance(KeyStore.getDefaultType());
-        try {
-            ks.load(null, null);
-        } catch (final IOException e) {
-            throw new KeyStoreException("failed to initialize client trust store", e);
-        }
-        ks.setCertificateEntry("ca", caCert);
-        final TrustManagerFactory tmf = TrustManagerFactory.getInstance(TrustManagerFactory.getDefaultAlgorithm());
-        tmf.init(ks);
-        return tmf.getTrustManagers();
+        return new StubPeer(maxMessageSize);
     }
 
     /** The bound (ephemeral) port. */
@@ -327,38 +221,7 @@ public final class StubPeer implements AutoCloseable {
             final ClprSyncPayload phase1,
             final Function<ClprSyncPayload, ClprSyncPayload> followUp)
             throws Exception {
-        return client.sync(host, port, phase1, followUp, Bytes.EMPTY);
-    }
-
-    /**
-     * Push a crafted sync payload into the endpoint-under-test's mandatory-mTLS gRPC server and
-     * return its reciprocal reply. The stub peer presents its own leaf (from the
-     * {@link LeafKeyManager} it was started with) as the TLS client certificate, and validates the
-     * server's leaf against {@code serverCaDer}.
-     *
-     * <p>Requires the stub peer to have been started with a {@link LeafKeyManager} (i.e. via
-     * {@link #start(LeafKeyManager)}); throws {@link IllegalStateException} otherwise because the
-     * underlying {@link org.hiero.clpr.relay.grpc.client.ClprEndpointClient} would not have a client
-     * identity to present.
-     *
-     * @param host        the endpoint-under-test's host
-     * @param port        the endpoint-under-test's gRPC port
-     * @param phase1      the crafted phase-1 sync payload
-     * @param serverCaDer the relay's CA certificate (DER) used as the trust anchor for the server's
-     *                    presented leaf
-     * @return the endpoint's reply payload
-     * @throws Exception if the RPC or TLS handshake fails
-     */
-    public ClprSyncPayload pokeSync(
-            final String host, final int port, final ClprSyncPayload phase1, final Bytes serverCaDer) throws Exception {
-        return client.sync(
-                host,
-                port,
-                phase1,
-                reply -> ClprSyncPayload.newBuilder()
-                        .channelId(phase1.channelId())
-                        .build(),
-                serverCaDer);
+        return client.sync(host, port, phase1, followUp);
     }
 
     @Override

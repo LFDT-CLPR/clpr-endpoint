@@ -21,9 +21,8 @@ import org.junit.jupiter.api.condition.EnabledIfEnvironmentVariable;
  * PENDING one has no on-chain record, so those two do yield nothing.)
  *
  * <p>Drives the channel to CLOSING with a single relay + admin close (no second relay), then sends an
- * authenticated empty-payload request via {@link #poke} and asserts the relay answers with a non-empty
- * status bundle rather than an empty payload. Peer identity is the mTLS roster-CA check on the data
- * plane — there is no payload-level endpoint signature.
+ * empty-payload request via {@link #poke} and asserts the relay answers with a non-empty status bundle
+ * rather than an empty payload.
  */
 @EnabledIfEnvironmentVariable(named = "RUN_INTEGRATION_TESTS", matches = ".*")
 class ClosingChannelSyncStubPeerTest extends OneSidedStubPeerTestBase {

@@ -27,6 +27,7 @@ import java.util.concurrent.locks.ReentrantLock;
 import org.hiero.clpr.relay.core.BundleLog;
 import org.hiero.clpr.relay.core.EvmSubmissionConfig;
 import org.hiero.clpr.relay.core.ParsedBundle;
+import org.hiero.clpr.relay.core.Peers;
 import org.hiero.clpr.relay.core.metrics.LabeledCounter;
 import org.hiero.clpr.relay.core.metrics.MetricLabels;
 import org.hiero.clpr.relay.evm.jsonrpc.EvmJsonRpcClient;
@@ -165,9 +166,9 @@ public final class AccountTransactionSubmitter {
             String channelIdLabel,
             @Nullable ClprEndpoint peer) {}
 
-    /** Metric label for the peer a bundle came from — its roster account id, or {@code anonymous}. */
+    /** Metric label for the peer a bundle came from — its {@code host:port}, or {@code anonymous}. */
     private static String peerLabel(@Nullable final ClprEndpoint peer) {
-        return peer != null ? peer.accountId().toHex() : "anonymous";
+        return peer != null ? Peers.peerLabel(peer) : "anonymous";
     }
 
     private final EvmJsonRpcClient rpcClient;

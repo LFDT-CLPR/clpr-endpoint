@@ -35,7 +35,7 @@ import org.jspecify.annotations.Nullable;
 public final class Channels {
 
     /** gRPC sync port every endpoint listens on inside the Docker network. */
-    private static final int PEER_SYNC_PORT = EvmEndpoint.SYNC_PORT;
+    private static final int PEER_SYNC_PORT = EvmEndpoint.GRPC_PORT;
 
     /** Minimum bond an endpoint must post to be admitted: 0.01 ether. */
     private static final BigInteger ENDPOINT_BOND_WEI = BigInteger.valueOf(10_000_000_000_000_000L);

@@ -6,8 +6,10 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.hedera.hapi.node.state.clpr.ClprChannel;
 import com.hedera.hapi.node.state.clpr.ClprChannelStatus;
+import com.hedera.hapi.node.state.clpr.ClprEndpoint;
 import com.hedera.hapi.node.state.clpr.ClprEndpointManifest;
 import com.hedera.hapi.node.state.clpr.ClprLedgerConfiguration;
+import com.hedera.hapi.node.state.clpr.ClprServiceEndpoint;
 import com.hedera.pbj.runtime.io.buffer.Bytes;
 import java.io.ByteArrayOutputStream;
 import java.nio.charset.StandardCharsets;
@@ -826,7 +828,7 @@ class EvmContractStateReaderTest {
     @Test
     void readPeerEndpointManifest_decodesPopulatedEndpoints() {
         final byte[] ep0 = encodeEndpoint("10.0.0.1", 9545, new byte[] {(byte) 0xAA, (byte) 0xBB}, new byte[] {0x01});
-        // ep1 has an empty on-chain accountId, which the decoder synthesises as "ip:port".
+        // ep1 has an empty on-chain accountId, which the decoder must keep empty (never synthesise).
         final byte[] ep1 = encodeEndpoint("10.0.0.2", 9546, new byte[0], new byte[0]);
         final EvmJsonRpcClient stub = TestEvmJsonRpcClient.newStubClient(
                 encodeGetEndpointManifestReturnWithEndpoints(5L, new byte[20], List.of(ep0, ep1)));
@@ -847,7 +849,30 @@ class EvmContractStateReaderTest {
         final var e1 = manifest.endpoints().get(1);
         assertThat(e1.serviceEndpoint().ipAddress()).isEqualTo("10.0.0.2");
         assertThat(e1.serviceEndpoint().port()).isEqualTo(9546);
-        assertThat(e1.accountId()).isEqualTo(Bytes.wrap("10.0.0.2:9546".getBytes(StandardCharsets.UTF_8)));
+        assertThat(e1.accountId()).isEqualTo(Bytes.EMPTY);
+    }
+
+    @Test
+    void readEndpointManifest_reEncodesByteExactWithoutSynthesisedAccountId() {
+        // The decoded local manifest is re-encoded as the protobuf preimage of the slot-18
+        // commitment. An endpoint registered with an empty accountId must therefore re-encode
+        // without field 3, exactly as the contract committed it.
+        final byte[] ep = encodeEndpoint("10.0.0.2", 9546, new byte[0], new byte[0]);
+        final EvmJsonRpcClient stub = TestEvmJsonRpcClient.newStubClient(
+                encodeGetEndpointManifestReturnWithEndpoints(2L, new byte[20], List.of(ep)));
+        final EvmContractStateReader reader = new EvmContractStateReader(stub, "0xdeadbeef");
+
+        final ClprEndpointManifest decoded = reader.readEndpointManifest("latest");
+
+        final ClprEndpointManifest committed = ClprEndpointManifest.newBuilder()
+                .version(2L)
+                .serviceAddress(Bytes.wrap(new byte[20]))
+                .endpoints(List.of(ClprEndpoint.newBuilder()
+                        .serviceEndpoint(new ClprServiceEndpoint("10.0.0.2", 9546))
+                        .build()))
+                .build();
+        assertThat(ClprEndpointManifest.PROTOBUF.toBytes(decoded))
+                .isEqualTo(ClprEndpointManifest.PROTOBUF.toBytes(committed));
     }
 
     // =========================================================================

@@ -13,16 +13,12 @@ import java.util.List;
 import org.jspecify.annotations.Nullable;
 
 /**
- * Info-plane {@link ServiceInterface} for the CLPR endpoint service: {@code getLedgerConfiguration}.
- * Hosted on the always-on, open (plaintext) info listener — on its own dedicated port — so this
- * metadata RPC is reachable independent of whether the {@code sync} data plane runs plaintext or mTLS.
- *
- * <p>The former {@code discoverEndpoints} RPC has been removed: peer endpoints are now obtained from
- * the authoritative on-ledger {@code ClprEndpointManifest} rather than from a gRPC discovery call.
+ * {@link ServiceInterface} for the CLPR endpoint service's {@code getLedgerConfiguration} RPC. Served
+ * alongside {@link ClprSyncService} on the {@link ClprGrpcServer} port.
  */
 public final class ClprInfoService implements ServiceInterface {
 
-    /** Proto service name shared by both endpoint-service planes. */
+    /** Proto service name shared with {@link ClprSyncService}; PBJ routes per method. */
     private static final String SERVICE_NAME = "ClprEndpointService";
 
     private static final String FULL_NAME = "proto.ClprEndpointService";
@@ -69,7 +65,7 @@ public final class ClprInfoService implements ServiceInterface {
             }
             return openGetLedgerConfiguration(opts, responses);
         }
-        throw new GrpcException(GrpcStatus.UNIMPLEMENTED, "method not served on the info listener: " + method.name());
+        throw new GrpcException(GrpcStatus.UNIMPLEMENTED, "unsupported method: " + method.name());
     }
 
     /**

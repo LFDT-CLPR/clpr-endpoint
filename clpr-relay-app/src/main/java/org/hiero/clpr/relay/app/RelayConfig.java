@@ -3,7 +3,6 @@ package org.hiero.clpr.relay.app;
 
 import com.swirlds.config.api.ConfigData;
 import com.swirlds.config.api.ConfigProperty;
-import com.swirlds.config.api.validation.annotation.Min;
 import com.swirlds.config.api.validation.annotation.Positive;
 import java.util.List;
 import java.util.Map;
@@ -17,11 +16,7 @@ import org.jspecify.annotations.Nullable;
  * from the YAML file by {@code RelayConfigLoader}, because list/map-of-objects shapes cannot be
  * represented by the property-based config model.
  *
- * @param grpc                shared gRPC server settings (max message size); the {@code info} and
- *                            {@code sync} listeners are separate top-level params to allow the
- *                            config framework to bind them independently
- * @param info                always-plaintext info listener (discovery + ledger configuration)
- * @param sync                sync (data-plane) listener: port plus optional mTLS material
+ * @param grpc                gRPC server settings (port, max message size)
  * @param localNetworks       named local network entries; each entry declares a proof type and the
  *                            network connection parameters for a chain the relay submits to
  * @param clprServices        {@code ClprService} contract deployments; each references a local
@@ -35,8 +30,6 @@ import org.jspecify.annotations.Nullable;
  */
 public record RelayConfig(
         GrpcConfig grpc,
-        GrpcInfoConfig info,
-        GrpcSyncConfig sync,
         List<LocalNetworkConfig> localNetworks,
         List<ClprServiceConfig> clprServices,
         BackoffConfig backoff,
@@ -242,61 +235,22 @@ public record RelayConfig(
     public record BeaconConfig(String beaconApiUrl, int maxMessagesPerBundle, int maxRetries, long requestTimeoutMs) {}
 
     /**
-     * Shared gRPC settings: the max inbound message size applied symmetrically to every inbound
-     * PBJ-Helidon listener and to outbound {@code ClprEndpointClient} Netty channels.
+     * gRPC server configuration. The server hosts {@code sync} and {@code getLedgerConfiguration} on
+     * one port.
      *
-     * <p>System property: {@code relay.grpc.maxMessageSize}
+     * <p>System properties: {@code relay.grpc.port}, {@code relay.grpc.maxMessageSize}
      *
-     * @param maxMessageSize maximum gRPC message size in bytes (default: {@code 1048576} = 1 MiB)
+     * @param port           TCP port the gRPC server listens on (default: {@code 9545})
+     * @param maxMessageSize maximum gRPC message size in bytes (default: {@code 1048576} = 1 MiB).
+     *                       Applied symmetrically to the inbound PBJ-Helidon server and to
+     *                       outbound {@code ClprEndpointClient} Netty channels
      */
     @ConfigData("relay.grpc")
     public record GrpcConfig(
+            @ConfigProperty(defaultValue = "9545") int port,
+
             @Positive @ConfigProperty(defaultValue = "1048576")
             int maxMessageSize) {}
-
-    /**
-     * The <b>info</b> listener: always plaintext, always served. Hosts the public metadata RPC
-     * {@code getLedgerConfiguration}, which returns chain-verifiable data, so it is never put behind TLS.
-     *
-     * <p>System property: {@code relay.grpc.info.port}
-     *
-     * @param port TCP port for the plaintext info listener (default: {@code 9546})
-     */
-    @ConfigData("relay.grpc.info")
-    public record GrpcInfoConfig(
-            @ConfigProperty(defaultValue = "9546") int port) {}
-
-    /**
-     * The <b>sync</b> (data-plane) listener: its port and optional mTLS key. When {@code tlsEnabled} is
-     * {@code true} the sync listener is mandatory mTLS and {@code tlsKeyPath} is required; when
-     * {@code false} the key is ignored and the listener is plaintext.
-     *
-     * <p>{@code tlsKeyPath} is this endpoint's ECDSA P-384 <b>CA private key</b> — the private half of the
-     * CA whose certificate is published on-chain as {@code ClprEndpoint.tls_certificate}. The certificate
-     * itself is never loaded from disk: at startup the relay generates an Ed25519 leaf signed by this key
-     * and presents it at every handshake. A dialer's leaf must chain to a CA in the on-chain roster.
-     *
-     * <p>{@code leafCertValiditySeconds} controls how often the in-memory Ed25519 leaf is re-minted.
-     * The leaf is regenerated on demand the first time a TLS handshake occurs after the window elapses.
-     * Set to {@code 0} to disable rotation (the initial leaf is valid for 10 years). The default of
-     * {@code 86400} (24 h) is a reasonable production value; adjust for compliance requirements.
-     *
-     * <p>System properties: {@code relay.grpc.sync.port}, {@code relay.grpc.sync.tlsEnabled},
-     * {@code relay.grpc.sync.tlsKeyPath}, {@code relay.grpc.sync.leafCertValiditySeconds}
-     *
-     * @param port                     TCP port for the sync listener (default: {@code 9545})
-     * @param tlsEnabled               {@code true} makes the sync listener mandatory mTLS (default: {@code false})
-     * @param tlsKeyPath               path to this endpoint's CA private key (PKCS#8 PEM/DER); required iff
-     *                                 {@code tlsEnabled}
-     * @param leafCertValiditySeconds  seconds between leaf re-mints; {@code 0} disables rotation
-     *                                 (default: {@code 86400})
-     */
-    @ConfigData("relay.grpc.sync")
-    public record GrpcSyncConfig(
-            @ConfigProperty(defaultValue = "9545") int port,
-            @ConfigProperty(defaultValue = "false") boolean tlsEnabled,
-            @ConfigProperty(defaultValue = "") String tlsKeyPath,
-            @ConfigProperty(defaultValue = "86400") @Min(0) long leafCertValiditySeconds) {}
 
     /**
      * Failure-backoff policy for the relay's per-channel loops (the sync loop and the listener

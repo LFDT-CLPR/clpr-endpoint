@@ -24,7 +24,7 @@ import org.hiero.clpr.relay.core.InboundBundleQueue;
 import org.hiero.clpr.relay.core.LedgerConfigurationPayloadProvider;
 import org.hiero.clpr.relay.core.ParsedBundle;
 import org.hiero.clpr.relay.core.PeerEndpointCache;
-import org.hiero.clpr.relay.core.PeerEndpointTlsRegistry;
+import org.hiero.clpr.relay.core.Peers;
 import org.hiero.clpr.relay.core.RelayProtocol;
 import org.hiero.clpr.relay.core.StubBundleConstructor;
 import org.hiero.clpr.relay.core.StubProofCodec;
@@ -84,7 +84,6 @@ public final class ClprChannelHandler implements ClprChannelOps {
     private final LabeledCounter bundleEnqueued;
     private final RelayConfig.BackoffConfig backoffConfig;
     private final ClprEndpointClient clprEndpointClient;
-    private final PeerEndpointTlsRegistry tlsRegistry;
     private final RelayConfig.CommonEvmParams evmParams;
     private final long syncIntervalMs;
 
@@ -112,7 +111,6 @@ public final class ClprChannelHandler implements ClprChannelOps {
             final Metrics metrics,
             final RelayConfig.BackoffConfig backoffConfig,
             final ClprEndpointClient clprEndpointClient,
-            final PeerEndpointTlsRegistry tlsRegistry,
             final RelayConfig.CommonEvmParams evmParams,
             final long syncIntervalMs,
             final String instanceName) {
@@ -134,7 +132,6 @@ public final class ClprChannelHandler implements ClprChannelOps {
                 metrics);
         this.backoffConfig = backoffConfig;
         this.clprEndpointClient = clprEndpointClient;
-        this.tlsRegistry = tlsRegistry;
         this.evmParams = evmParams;
         this.syncIntervalMs = syncIntervalMs;
         this.instanceName = instanceName;
@@ -156,8 +153,6 @@ public final class ClprChannelHandler implements ClprChannelOps {
      * @param backoff            per-loop failure-backoff policy
      * @param instanceName       worker-loop log-context label; a blank value adds no context entry
      * @param clprEndpointClient outbound gRPC client used by the sync loop
-     * @param tlsRegistry        global TLS registry updated alongside the peer cache on every
-     *                           manifest change and at bootstrap
      * @return a not-yet-started channel handler
      */
     public static ClprChannelHandler create(
@@ -172,8 +167,7 @@ public final class ClprChannelHandler implements ClprChannelOps {
             final Metrics metrics,
             final RelayConfig.BackoffConfig backoff,
             final String instanceName,
-            final ClprEndpointClient clprEndpointClient,
-            final PeerEndpointTlsRegistry tlsRegistry) {
+            final ClprEndpointClient clprEndpointClient) {
 
         final var evmParams = network.config().evm();
         final var rpcClient = network.rpcClient();
@@ -251,7 +245,7 @@ public final class ClprChannelHandler implements ClprChannelOps {
                 rawBundleConstructor = new StubBundleConstructor(stateReader, commitmentLevel);
                 localChainHeight = null;
                 // getLedgerConfiguration has no meaning for a stub network (the sync path never calls
-                // it; it is exposed only on the info plane), so fail loudly if a tool ever asks.
+                // it), so fail loudly if a tool ever asks.
                 ledgerConfigProvider = commitment -> {
                     throw new UnsupportedOperationException(
                             "getLedgerConfiguration is not supported for a Stub local network");
@@ -305,11 +299,8 @@ public final class ClprChannelHandler implements ClprChannelOps {
                             + " until the peer endpoint manifest is populated.",
                     channelId);
         } else {
-            // The endpoint manifest is the peer source of truth: its endpoints carry the same
-            // on-chain TLS certificates the legacy roster did, so it feeds both the peer cache and
-            // the mTLS trust registry in one read.
+            // The endpoint manifest is the peer source of truth for dial targets.
             peerCache.replaceAll(manifest.endpoints());
-            tlsRegistry.update(channelId, manifest.endpoints());
             log.info(
                     "Loaded {} peer endpoint(s) from manifest for channel {}",
                     manifest.endpoints().size(),
@@ -332,7 +323,6 @@ public final class ClprChannelHandler implements ClprChannelOps {
                 metrics,
                 backoff,
                 clprEndpointClient,
-                tlsRegistry,
                 evmParams,
                 syncIntervalMs,
                 instanceName);
@@ -355,7 +345,6 @@ public final class ClprChannelHandler implements ClprChannelOps {
                 stateReader,
                 commitmentLevel,
                 peerCache,
-                tlsRegistry,
                 metrics,
                 evmParams.pollIntervalMs(),
                 backoffConfig.baseMs(),
@@ -510,7 +499,7 @@ public final class ClprChannelHandler implements ClprChannelOps {
 
             // Accepted onto the submit queue (parse + throttle passed). Labels mirror the submitter's
             // channel_id/peer so bundle.enqueued → bundle.submissions/reverted/skipped can be joined.
-            final String peerLabel = peer != null ? peer.accountId().toHex() : "anonymous";
+            final String peerLabel = peer != null ? Peers.peerLabel(peer) : "anonymous";
             bundleEnqueued.increment("channel_id", channelId.toHex(), "peer", peerLabel);
             txSubmitter.submit(serviceAddress, channelId, parsedBundle, peer);
         };

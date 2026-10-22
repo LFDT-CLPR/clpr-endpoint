@@ -11,7 +11,6 @@ import org.hiero.clpr.relay.core.CommitmentLevel;
 import org.hiero.clpr.relay.core.ContractStateReader;
 import org.hiero.clpr.relay.core.FailState;
 import org.hiero.clpr.relay.core.PeerEndpointCache;
-import org.hiero.clpr.relay.core.PeerEndpointTlsRegistry;
 import org.hiero.clpr.relay.core.metrics.LabeledCounter;
 import org.jspecify.annotations.Nullable;
 
@@ -22,8 +21,7 @@ import org.jspecify.annotations.Nullable;
  * <p>Each cycle it reads the on-ledger peer {@link ClprEndpointManifest} at the configured commitment
  * level and compares its {@code version} against the version it last applied. When they differ — including
  * the first observation, which repopulates a cache empty at startup — it replaces the channel's
- * {@link PeerEndpointCache} and the mTLS {@link PeerEndpointTlsRegistry} wholesale from the fresh manifest
- * (replace, not merge; spec §2.4.2). Between cycles it sleeps a fixed interval.
+ * {@link PeerEndpointCache} wholesale from the fresh manifest (replace, not merge; spec §2.4.2). Between cycles it sleeps a fixed interval.
  *
  * <p>This is all the relay needs from on-chain polling in the two-phase protocol: bundles are built ad hoc
  * from a peer's request (see {@code BundleConstructor.createBundle}), so there is no queue or lifecycle
@@ -43,7 +41,6 @@ public final class EndpointManifestRefreshTask implements Runnable {
     private final ContractStateReader stateReader;
     private final CommitmentLevel commitmentLevel;
     private final PeerEndpointCache peerCache;
-    private final PeerEndpointTlsRegistry tlsRegistry;
     /** Interval in milliseconds between successive manifest reads. */
     private final long pollIntervalMs;
 
@@ -75,8 +72,6 @@ public final class EndpointManifestRefreshTask implements Runnable {
      * @param commitmentLevel the finality level at which to read the manifest
      * @param peerCache       the channel's peer endpoint cache, replaced from the on-ledger manifest
      *                        whenever its version advances
-     * @param tlsRegistry     global TLS registry updated in parallel with the peer cache on every
-     *                        manifest change so the mTLS trust manager stays current
      * @param metrics         registry for the {@code evm.listener.poll.failed} and
      *                        {@code evm.listener.manifest.refreshed} counters (labeled by {@code channel_id})
      * @param pollIntervalMs  interval in ms between successive manifest reads
@@ -88,7 +83,6 @@ public final class EndpointManifestRefreshTask implements Runnable {
             final ContractStateReader stateReader,
             final CommitmentLevel commitmentLevel,
             final PeerEndpointCache peerCache,
-            final PeerEndpointTlsRegistry tlsRegistry,
             final Metrics metrics,
             final long pollIntervalMs,
             final long backoffBaseMs,
@@ -97,7 +91,6 @@ public final class EndpointManifestRefreshTask implements Runnable {
         this.stateReader = stateReader;
         this.commitmentLevel = commitmentLevel;
         this.peerCache = peerCache;
-        this.tlsRegistry = tlsRegistry;
         this.pollIntervalMs = pollIntervalMs;
         this.channelIdLabel = HexFormat.of().formatHex(channelId.toByteArray());
         this.pollFailed = new LabeledCounter(
@@ -169,8 +162,8 @@ public final class EndpointManifestRefreshTask implements Runnable {
     }
 
     /**
-     * Replace the channel's peer cache and the mTLS trust registry from {@code manifest} (replace, not
-     * merge) and record its version as applied.
+     * Replace the channel's peer cache from {@code manifest} (replace, not merge) and record its version
+     * as applied.
      */
     private void refresh(final ClprEndpointManifest manifest) {
         if (appliedManifestVersion == NO_VERSION_APPLIED) {
@@ -180,10 +173,8 @@ public final class EndpointManifestRefreshTask implements Runnable {
                     "manifest version advanced {} -> {}; refreshing cache", appliedManifestVersion, manifest.version());
         }
 
-        // The manifest endpoints carry the on-chain TLS certs, so one read feeds both the peer cache and
-        // the mTLS trust registry (replace, not merge).
+        // Replace, not merge: the manifest is the authoritative set of dial targets.
         peerCache.replaceAll(manifest.endpoints());
-        tlsRegistry.update(channelId, manifest.endpoints());
         appliedManifestVersion = manifest.version();
 
         if (manifest.endpoints().isEmpty()) {

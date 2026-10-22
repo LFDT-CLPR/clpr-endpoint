@@ -77,7 +77,7 @@ Outer offset pointer, then 10-slot struct head. `decodeLedgerConfiguration` extr
 
 `protocolVersion` is validated against `RelayProtocol.PROTOCOL_VERSION` (currently 1) when each channel is registered (in `ClprChannelHandler.create`). A mismatch fails that channel's registration — the relay logs an ERROR and skips the channel rather than operating against an incompatible contract version — while continuing to serve any other channels whose versions match.
 
-Each endpoint is a tuple `(string ipAddress, uint32 port, bytes tlsCertificate, bytes accountId)`. When `accountId` is empty on chain, the relay synthesizes `ip:port` as the cache key so `PeerSelector` can distinguish peers.
+Each endpoint is a tuple `(string ipAddress, uint32 port, bytes tlsCertificate, bytes accountId)`. The relay decodes `accountId` verbatim but does not use it: peers are identified by `(ipAddress, port)` (`Peers.peerKey`) in both `PeerEndpointCache` and `PeerSelector`. The value is never rewritten, because the decoded local manifest is re-encoded as the protobuf preimage of the slot-18 manifest commitment and must hash to exactly what the contract committed.
 
 ### QBFT-specific wrapper for `getLedgerConfiguration` gRPC
 

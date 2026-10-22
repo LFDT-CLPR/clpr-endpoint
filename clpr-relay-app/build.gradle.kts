@@ -31,6 +31,8 @@ mainModuleInfo {
 
 testModuleInfo {
     requires("org.hiero.clpr.relay.core.test.fixtures")
+    // StubLoopbackTest calls getLedgerConfiguration over the loopback server.
+    requires("org.hiero.clpr.relay.grpc.client.test.fixtures")
     // java.net.http: MetricsHttpServerTest scrapes the /metrics + /healthz endpoints it serves.
     requires("java.net.http")
 }

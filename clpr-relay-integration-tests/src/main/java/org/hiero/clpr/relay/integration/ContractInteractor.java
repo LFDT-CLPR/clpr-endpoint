@@ -98,7 +98,7 @@ public final class ContractInteractor {
     /**
      * Call {@code ClprService.updateEconomicConfiguration} with sensible test defaults.
      *
-     * <p>The {@code EconomicConfig} struct has 11 fields (all static, padded to 32 bytes each
+     * <p>The {@code EconomicConfig} struct has 12 fields (all static, padded to 32 bytes each
      * in ABI encoding):
      * <ol>
      *   <li>messageExecutionCost (uint256)</li>
@@ -112,16 +112,17 @@ public final class ContractInteractor {
      *   <li>connectorInboundGasStipend (uint64)</li>
      *   <li>maxChannels (uint32)</li>
      *   <li>maxConnectors (uint32)</li>
+     *   <li>connectorPaymentGasLimit (uint64)</li>
      * </ol>
      */
     public void configureDefaultEconomics() {
         final byte[] selector = AbiCodec.functionSelector(
-                "updateEconomicConfiguration((uint256,uint256,uint256,uint256,uint256,uint256,uint32,uint32,uint64,uint32,uint32))");
+                "updateEconomicConfiguration((uint256,uint256,uint256,uint256,uint256,uint256,uint32,uint32,uint64,uint32,uint32,uint64))");
         final byte[] callData = AbiCodec.concat(selector, defaultEconomicConfigStruct());
         sendTxAndWait(contracts.clprServiceAddress(), callData, null);
     }
 
-    /** The default {@code EconomicConfig} as its 11-word all-static ABI tuple (see field list above). */
+    /** The default {@code EconomicConfig} as its 12-word all-static ABI tuple (see field list above). */
     private static byte[] defaultEconomicConfigStruct() {
         return AbiCodec.concat(
                 AbiCodec.encodeUint256(new BigInteger("1000000000000000")), // messageExecutionCost = 0.001 ether
@@ -134,7 +135,8 @@ public final class ContractInteractor {
                 AbiCodec.encodeUint(50L), // connectorQueueQuotaPct (uint32)
                 AbiCodec.encodeUint(50000L), // connectorInboundGasStipend (uint64)
                 AbiCodec.encodeUint(0L), // maxChannels (uint32, 0 = no limit)
-                AbiCodec.encodeUint(0L)); // maxConnectors (uint32, 0 = no limit)
+                AbiCodec.encodeUint(0L), // maxConnectors (uint32, 0 = no limit)
+                AbiCodec.encodeUint(200_000L)); // connectorPaymentGasLimit (uint64, >= MIN 50_000)
     }
 
     /**
@@ -227,7 +229,7 @@ public final class ContractInteractor {
 
     /**
      * Call {@code ClprService.initialize(bytes,(uint32,uint64,uint64,uint32,uint64,uint32,uint32),
-     * bytes,bytes,(uint256,uint256,uint256,uint256,uint256,uint256,uint32,uint32,uint64,uint32,uint32))}
+     * bytes,bytes,(uint256,uint256,uint256,uint256,uint256,uint256,uint32,uint32,uint64,uint32,uint32,uint64))}
      * with the same default throttles / economic config the {@code configureDefault*} helpers apply.
      *
      * <p>{@code initialize} is the one-time bootstrap that applies the first ledger + economic
@@ -244,20 +246,20 @@ public final class ContractInteractor {
         final byte[] tailTrustAnchor = AbiCodec.encodeUint(0L);
         final byte[] tailTrustAnchorId = AbiCodec.encodeUint(0L);
 
-        // Head layout (21 slots × 32 bytes = 672 bytes):
+        // Head layout (22 slots × 32 bytes = 704 bytes):
         //   [0]     offset to serviceAddress (bytes)
         //   [1..7]  throttles struct (7 static words)
         //   [8]     offset to trustAnchor (bytes)
         //   [9]     offset to trustAnchorId (bytes)
-        //   [10..20] economicConfig struct (11 static words)
-        final long headSize = 21L * 32L;
+        //   [10..21] economicConfig struct (12 static words)
+        final long headSize = 22L * 32L;
         final long serviceAddrOffset = headSize;
         final long trustAnchorOffset = serviceAddrOffset + tailServiceAddr.length;
         final long trustAnchorIdOffset = trustAnchorOffset + tailTrustAnchor.length;
 
         final byte[] selector = AbiCodec.functionSelector(
                 "initialize(bytes,(uint32,uint64,uint64,uint32,uint64,uint32,uint32),bytes,bytes,"
-                        + "(uint256,uint256,uint256,uint256,uint256,uint256,uint32,uint32,uint64,uint32,uint32))");
+                        + "(uint256,uint256,uint256,uint256,uint256,uint256,uint32,uint32,uint64,uint32,uint32,uint64))");
 
         final byte[] head = AbiCodec.concat(
                 AbiCodec.encodeUint(serviceAddrOffset),
@@ -650,25 +652,6 @@ public final class ContractInteractor {
             final byte[] peerServiceAddr,
             final long configTimestamp,
             final int peerPort) {
-        configureVerifierConfig(verifierAddress, chainId, peerServiceAddr, configTimestamp, peerPort, new byte[0]);
-    }
-
-    /**
-     * Overload of {@link #configureVerifierConfig(String, String, byte[], long, int)} that also
-     * publishes the peer relay's {@code tls_certificate} (DER) in the per-Channel peer endpoint
-     * roster. A non-empty certificate makes the local relay dial that peer over mutual TLS: it pins the
-     * peer's server certificate to these bytes and presents its own client certificate, which the peer
-     * validates against <em>its</em> roster. Pass an empty array for the plaintext path.
-     *
-     * @param peerTlsCert the peer relay's certificate DER to publish on-chain (empty → plaintext)
-     */
-    public void configureVerifierConfig(
-            final String verifierAddress,
-            final String chainId,
-            final byte[] peerServiceAddr,
-            final long configTimestamp,
-            final int peerPort,
-            final byte[] peerTlsCert) {
         final byte[] chainIdBytes = chainId.getBytes(StandardCharsets.UTF_8);
         final byte[] paddedChainId = AbiCodec.padRight32(chainIdBytes);
         final byte[] paddedServiceAddr = AbiCodec.padRight32(peerServiceAddr);
@@ -722,23 +705,21 @@ public final class ContractInteractor {
         // MUST be non-empty: the contract keys the per-channel roster by keccak256(accountId) and
         // silently skips endpoints with an empty accountId (clpr-smart-contracts
         // ChannelLogic._populatePeerEndpointRoster), which would leave the relay with an empty
-        // roster ("no peer available"). Use ip:port so the entry is unique and matches the relay's
-        // own decode-time fallback key.
+        // roster ("no peer available"). Use ip:port so the entry is unique.
         final byte[] ipBytes = "127.0.0.1".getBytes(StandardCharsets.UTF_8);
         final byte[] paddedIp = AbiCodec.padRight32(ipBytes);
         final byte[] accountBytes = ("127.0.0.1:" + peerPort).getBytes(StandardCharsets.UTF_8);
         final byte[] paddedAccount = AbiCodec.padRight32(accountBytes);
-        final byte[] paddedTls = AbiCodec.padRight32(peerTlsCert); // empty array pads to nothing
 
         // Head is 4 slots (128 bytes), relative to element start:
         //   slot 0: offset to ipAddress string
         //   slot 1: port (uint32, inline)
-        //   slot 2: offset to tls bytes
+        //   slot 2: offset to tls bytes (empty)
         //   slot 3: offset to accountId bytes
         final long epHeadSize = 4L * 32L; // 128 bytes
         final long epIpOffset = epHeadSize;
         final long epTlsOffset = epIpOffset + 32L + paddedIp.length;
-        final long epAccOffset = epTlsOffset + 32L + paddedTls.length;
+        final long epAccOffset = epTlsOffset + 32L;
 
         final byte[] endpointElement = AbiCodec.concat(
                 AbiCodec.encodeUint(epIpOffset),
@@ -747,8 +728,7 @@ public final class ContractInteractor {
                 AbiCodec.encodeUint(epAccOffset),
                 AbiCodec.encodeUint(ipBytes.length),
                 paddedIp,
-                AbiCodec.encodeUint(peerTlsCert.length), // tls length (0 → plaintext)
-                paddedTls,
+                AbiCodec.encodeUint(0L), // tls length (empty)
                 AbiCodec.encodeUint(accountBytes.length),
                 paddedAccount);
 

@@ -13,7 +13,6 @@ import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.Function;
 import org.hiero.clpr.relay.core.CommitmentLevel;
-import org.hiero.clpr.relay.core.PeerEndpointTlsRegistry;
 import org.hiero.clpr.relay.core.metrics.LabeledCounter;
 import org.hiero.clpr.relay.evm.EthSigner;
 import org.hiero.clpr.relay.evm.EvmContractStateReader;
@@ -55,7 +54,6 @@ public final class ClprServiceHandler {
     private final RelayConfig.BackoffConfig backoff;
     private final String instanceName;
     private final ClprEndpointClient clprEndpointClient;
-    private final PeerEndpointTlsRegistry tlsRegistry;
 
     // Resolved once for this service: the commitment level, sync cadence, and proof lag applied to
     // every channel it serves, plus the peer proof-type resolver and the normalised per-channel
@@ -84,8 +82,7 @@ public final class ClprServiceHandler {
             final RelayConfig.BackoffConfig backoff,
             final String instanceName,
             final ClprEndpointClient clprEndpointClient,
-            final Map<String, ProofType> peerProofTypes,
-            final PeerEndpointTlsRegistry tlsRegistry) {
+            final Map<String, ProofType> peerProofTypes) {
         this.network = network;
         this.serviceAddress = config.serviceAddress();
         this.config = config;
@@ -93,7 +90,6 @@ public final class ClprServiceHandler {
         this.backoff = backoff;
         this.instanceName = instanceName;
         this.clprEndpointClient = clprEndpointClient;
-        this.tlsRegistry = tlsRegistry;
 
         this.commitmentLevel = CommitmentLevel.LATEST;
         this.syncIntervalMs = ChannelSyncTask.DEFAULT_INTERVAL_MS;
@@ -122,8 +118,6 @@ public final class ClprServiceHandler {
      * @param instanceName          worker-loop log-context label
      * @param clprEndpointClient    outbound gRPC client shared with the sync loops
      * @param peerProofTypes        CAIP-2 {@code chainId → ProofType} map used to resolve peers
-     * @param tlsRegistry           global TLS registry updated whenever a channel's peer endpoint
-     *                              manifest changes, so the mTLS trust manager stays current
      * @return a not-yet-started service handler
      * @throws IllegalArgumentException if {@code config.localNetwork()} is unknown
      */
@@ -134,15 +128,14 @@ public final class ClprServiceHandler {
             final RelayConfig.BackoffConfig backoff,
             final String instanceName,
             final ClprEndpointClient clprEndpointClient,
-            final Map<String, ProofType> peerProofTypes,
-            final PeerEndpointTlsRegistry tlsRegistry) {
+            final Map<String, ProofType> peerProofTypes) {
         final var network = localNetworkAdapters.get(config.localNetwork());
         if (network == null) {
             throw new IllegalArgumentException("clprServices['" + config.serviceAddress() + "'].localNetwork='"
                     + config.localNetwork() + "' does not reference a known localNetworks id");
         }
         return new ClprServiceHandler(
-                network, config, metrics, backoff, instanceName, clprEndpointClient, peerProofTypes, tlsRegistry);
+                network, config, metrics, backoff, instanceName, clprEndpointClient, peerProofTypes);
     }
 
     /**
@@ -222,8 +215,7 @@ public final class ClprServiceHandler {
                     metrics,
                     backoff,
                     instanceName,
-                    clprEndpointClient,
-                    tlsRegistry);
+                    clprEndpointClient);
         } catch (final RuntimeException e) {
             // A bootstrap read (protocol version / ledger config / roster) failed. Leave nothing
             // behind so discovery retries on its next cycle and a predefined channel is not

@@ -2,7 +2,6 @@
 package org.hiero.clpr.relay.grpc.server;
 
 import com.hedera.hapi.node.state.clpr.BundleResponse;
-import com.hedera.hapi.node.state.clpr.ClprEndpoint;
 import com.hedera.hapi.node.state.clpr.ClprSyncPayload;
 import com.hedera.pbj.runtime.grpc.Pipeline;
 import com.hedera.pbj.runtime.io.buffer.Bytes;
@@ -49,14 +48,6 @@ public class ClprSyncSession implements Pipeline<ClprSyncPayload> {
 
     private final Pipeline<? super ClprSyncPayload> responses;
     private final ChannelLookup channelLookup;
-
-    /**
-     * The authenticated peer resolved from the mutual-TLS client certificate, or {@code null} for a
-     * plaintext dial or an mTLS certificate matching no roster entry.
-     */
-    @Nullable
-    private final ClprEndpoint peer;
-
     private final String instanceName;
     private final LabeledCounter exchangesStarted;
     private final LabeledCounter exchangesFailed;
@@ -70,9 +61,8 @@ public class ClprSyncSession implements Pipeline<ClprSyncPayload> {
     private String channelIdLabel;
 
     /**
-     * The channel this session committed to serving in phase 1 (set only once the peer passed the
-     * per-channel endpoint-manifest check); {@code null} until then. The phase-2 follow-up must target the
-     * same channel — see {@link #handleFollowUp}.
+     * The channel this session committed to serving in phase 1; {@code null} until then. The phase-2
+     * follow-up must target the same channel — see {@link #handleFollowUp}.
      */
     @Nullable
     private Bytes phase1ChannelId;
@@ -83,7 +73,6 @@ public class ClprSyncSession implements Pipeline<ClprSyncPayload> {
     public ClprSyncSession(
             final Pipeline<? super ClprSyncPayload> responses,
             final ChannelLookup channelLookup,
-            @Nullable final ClprEndpoint peer,
             final String instanceName,
             final LabeledCounter exchangesStarted,
             final LabeledCounter exchangesFailed,
@@ -91,17 +80,11 @@ public class ClprSyncSession implements Pipeline<ClprSyncPayload> {
             final LabeledCounter syncErrors) {
         this.responses = responses;
         this.channelLookup = channelLookup;
-        this.peer = peer;
         this.instanceName = instanceName;
         this.exchangesStarted = exchangesStarted;
         this.exchangesFailed = exchangesFailed;
         this.exchangesFailedAfterSend = exchangesFailedAfterSend;
         this.syncErrors = syncErrors;
-    }
-
-    /** Log label for the authenticated peer (its roster account id), or {@code anonymous}. */
-    private String peerLabel() {
-        return peer != null ? peer.accountId().toHex() : "anonymous";
     }
 
     @Override
@@ -174,7 +157,7 @@ public class ClprSyncSession implements Pipeline<ClprSyncPayload> {
         }
         exchangesFailed.increment("role", "responder", "channel_id", channelIdLabel);
         if (sentBundle) {
-            exchangesFailedAfterSend.increment("role", "responder", "channel_id", channelIdLabel, "peer", peerLabel());
+            exchangesFailedAfterSend.increment("role", "responder", "channel_id", channelIdLabel, "peer", "anonymous");
         }
     }
 
@@ -194,20 +177,11 @@ public class ClprSyncSession implements Pipeline<ClprSyncPayload> {
 
         final String channelIdLabel = HexFormat.of().formatHex(channelId.toByteArray());
         try (var _ = Context.getThreadLocalContext().add("relay", instanceName);
-                var _ = Context.getThreadLocalContext().add("conn", channelIdLabel);
-                var _ = Context.getThreadLocalContext().add("peer", peerLabel())) {
+                var _ = Context.getThreadLocalContext().add("conn", channelIdLabel)) {
             this.channelIdLabel = channelIdLabel;
             exchangesStarted.increment("role", "responder", "channel_id", channelIdLabel);
 
-            if (peer != null && !clprChannel.peerEndpointCache().hasPeerEndpoint(peer)) {
-                log.warn(
-                        "sync: connected with a known peer, but they aren't listed in the endpoint manifest of channel {}",
-                        channelIdLabel);
-                return ClprSyncPayload.newBuilder().channelId(channelId).build();
-            }
-
-            // Commit to this channel for the rest of the exchange: phase 2 must target the same one, so that
-            // the per-channel authorization performed above cannot be side-stepped by a phase-2 for another.
+            // Commit to this channel for the rest of the exchange: phase 2 must target the same one.
             this.phase1ChannelId = channelId;
 
             final var reply = ClprSyncPayload.newBuilder().channelId(channelId);
@@ -246,9 +220,8 @@ public class ClprSyncSession implements Pipeline<ClprSyncPayload> {
     private void handleFollowUp(final ClprSyncPayload followUp) {
         final Bytes channelId = followUp.channelId();
 
-        // Security: the phase-2 follow-up must target the same channel we authorized in phase 1. A peer that
-        // requested (and passed the endpoint-manifest check for) channel A must not be able to submit a
-        // bundle against channel B here — phase 2 does not re-run that per-channel authorization. Reject any
+        // The phase-2 follow-up must target the same channel we served in phase 1: a peer that requested
+        // channel A must not be able to submit a bundle against channel B in the same exchange. Reject any
         // mismatch (also covers a follow-up arriving when phase 1 never committed to a channel).
         if (phase1ChannelId == null || !phase1ChannelId.equals(channelId)) {
             log.warn(
@@ -266,8 +239,7 @@ public class ClprSyncSession implements Pipeline<ClprSyncPayload> {
 
         final String channelIdLabel = HexFormat.of().formatHex(channelId.toByteArray());
         try (var _ = Context.getThreadLocalContext().add("relay", instanceName);
-                var _ = Context.getThreadLocalContext().add("conn", channelIdLabel);
-                var _ = Context.getThreadLocalContext().add("peer", peerLabel())) {
+                var _ = Context.getThreadLocalContext().add("conn", channelIdLabel)) {
             if (!followUp.hasBundleResponse()) {
                 return;
             }
@@ -275,10 +247,11 @@ public class ClprSyncSession implements Pipeline<ClprSyncPayload> {
             // replay-trims anything at or below our received-message frontier, and the on-chain verifier
             // (reached via the submitter's eth_call preview) rejects any bundle whose proof or message range
             // does not line up — so a stale, replayed, or mismatched response is dropped, never advancing
-            // state, without this session having to parse the opaque payload.
+            // state, without this session having to parse the opaque payload. The inbound transport does not
+            // identify the dialer, so the source peer is unknown.
             clprChannel
                     .inboundBundleQueue()
-                    .offer(followUp.bundleResponseOrThrow().bundlePayload(), peer);
+                    .offer(followUp.bundleResponseOrThrow().bundlePayload(), null);
         } catch (final Exception e) {
             throw new RuntimeException(e);
         }

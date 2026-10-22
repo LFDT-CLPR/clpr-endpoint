@@ -88,10 +88,7 @@ public abstract class OneSidedStubPeerTestBase {
         // before any mutating op, otherwise the calls below revert with ClprDisabled().
         interactor.bootstrapDefaults(serviceAddr);
 
-        // Point the channel's peer roster at the StubPeer.
-        // The relay verifies inbound endpoint signatures against this roster (spec §2.4.2).
-        // peerServiceAddr is a placeholder (the relay never dials the peer's CLPR Service — it talks to
-        // the StubPeer over gRPC and reads its sync target from this roster).
+        // Publish the stub peer's endpoint in the peer roster so the relay can dial it (spec §2.4.2).
         interactor.configureVerifierConfig(
                 contracts.stubVerifierAddress(), "eip155:1337", serviceAddr, 1000, peer.port());
 

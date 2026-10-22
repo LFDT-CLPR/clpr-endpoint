@@ -15,11 +15,6 @@ import org.junit.jupiter.api.condition.EnabledIfEnvironmentVariable;
  * channel id with no on-chain record must produce an empty phase-1 {@code bundle_response}. The state
  * reader returns empty for the phantom id, so {@code createBundle} short-circuits with an empty payload
  * rather than building a bundle or faulting.
- *
- * <p>Note: the two-phase protocol authenticates peers at the mTLS layer (roster-CA client-cert
- * validation), not with a payload-level endpoint signature, so there is no per-payload signature-mismatch
- * rejection to exercise here — that boundary moved to the transport and is covered by the TLS loopback
- * tests.
  */
 @EnabledIfEnvironmentVariable(named = "RUN_INTEGRATION_TESTS", matches = ".*")
 class NegativeSyncBoundaryTest extends OneSidedStubPeerTestBase {

@@ -45,34 +45,13 @@ serviceAccount:
 replicaCount: 1
 
 # ── gRPC server ───────────────────────────────────────────────────────────────
-# Inbound transport is two always-plaintext listeners: an info listener and a sync (data-plane) listener.
-# Both ports are always served and must differ.
 grpc:
-  # Maximum gRPC message size in bytes (applied to every listener and outbound channel).
+  # Port peers dial; serves the sync RPC and getLedgerConfiguration.
+  port: 9545
+  # Maximum gRPC message size in bytes (applied to the inbound server and outbound channels).
   maxMessageSize: 1048576
-  info:
-    # Always-plaintext info port (discoverEndpoints / getLedgerConfiguration).
-    port: 9546
-  sync:
-    # Sync (data-plane) port peers dial.
-    port: 9545
-    # ── mTLS (optional) ───────────────────────────────────────────────────────
-    # When enabled, the sync listener requires mutual TLS. The CA private key
-    # (PKCS#8 DER) must be stored in a pre-provisioned Kubernetes Secret; the
-    # chart mounts it read-only into the container at /app/tls/ca-key.der and
-    # sets relay.grpc.sync.tlsKeyPath accordingly.
-    #
-    # The chart does NOT create this Secret — provision it before installing:
-    #   kubectl create secret generic <name> \
-    #     --from-file=tlsCaKey=/path/to/ca-key.der
-    tls:
-      enabled: false
-      # Name of the pre-provisioned Secret containing the CA private key.
-      existingSecret: ""
-      # Key within the Secret that holds the DER-encoded CA private key bytes.
-      secretKey: "tlsCaKey"
   service:
-    # LoadBalancer exposes the gRPC sync port(s) to peer relays on other clusters.
+    # LoadBalancer exposes the gRPC port to peer relays on other clusters.
     # Change to ClusterIP if peers are in the same cluster or behind an ingress.
     type: LoadBalancer
     # Use provider-specific annotations to request a static IP — spec.loadBalancerIP
@@ -85,7 +64,6 @@ grpc:
 # ── Prometheus metrics ────────────────────────────────────────────────────────
 metrics:
   enabled: true
-  # Kept distinct from the gRPC info port (9546) so the two HTTP/gRPC servers don't collide.
   port: 9547
   service:
     type: ClusterIP

@@ -6,12 +6,10 @@ Prerequisite: `docs/README.md`, `docs/architecture.md`.
 
 ## RPCs hosted
 
-The endpoint service is split across two listeners (`ClprGrpcServer`):
+`ClprGrpcServer` serves both RPCs in plaintext on one port (`grpc.port`, default 9545), the port peers advertise in the endpoint manifest:
 
-- **data plane** (`sync.port`, default 9545) — hosts **`sync`**, a **two-phase bidirectional-streaming** RPC (`stream ClprSyncPayload → stream ClprSyncPayload`). Plaintext by default; **mandatory mTLS** when a leaf certificate is configured, in which case the dialer's client leaf must chain to a CA in the on-chain roster. Peer identity is established at the TLS layer — there is no payload-level endpoint signature.
-- **info plane** (`info.port`, default 9546) — **always plaintext**. Hosts **`getLedgerConfiguration`**, which returns chain-verifiable public data.
-
-(The old `discoverEndpoints` RPC has been removed; peer endpoints are read from the on-chain per-Channel endpoint manifest.)
+- **`sync`** (`ClprSyncService`) — a **two-phase bidirectional-streaming** RPC (`stream ClprSyncPayload → stream ClprSyncPayload`). Inbound bundles are accepted on the strength of proof verification.
+- **`getLedgerConfiguration`** (`ClprInfoService`) — returns chain-verifiable public data.
 
 `getLedgerConfiguration(...)` returns this ledger's current `ClprLedgerConfiguration` (protocol version, chain id, service address, throttles, endpoints) read from the on-chain ClprService at `CommitmentLevel.FINALIZED`, together with a QBFT-specific `qbft_payload` wrapper. Used for manual channel setup and by end-to-end tests to obtain the data needed to call `completeChannel` on a peer ledger. The request's optional `service_address` selects which local deployment to serve (empty → the single/primary one; a non-empty unknown address → `NOT_FOUND`; an empty selector with nothing registered yet → `UNIMPLEMENTED`). The `qbft_payload` carries the genesis + current block headers and the EIP-1186 account/storage proofs the peer's QBFT verifier needs to authenticate the configuration against the source ledger's state. Wiring: each channel's `ClprChannelHandler` constructs a `QbftLedgerConfigurationProvider`; `RelayInstance` builds a `GetLedgerConfigurationHandler.Resolver` that maps the request's `service_address` to the matching handler's provider, wrapped in a `GetLedgerConfigurationHandler` that pins `FINALIZED`.
 
@@ -54,10 +52,10 @@ None of these holding on an `ACTIVE` channel yields an empty payload. Crucially,
 
 ## Inbound sync flow (responder side)
 
-Path: `ClprSyncService.openSync → ClprSyncHandler.newSession → ClprSyncSession` (one stateful session per stream). `openSync` resolves the authenticated peer once per RPC from the mutual-TLS client leaf (via `PeerEndpointTlsRegistry`) and injects it into the session; `ClprSyncHandler` itself holds only a `ChannelLookup` and the shared metrics counters. Each inbound message resolves its channel by id — `channelLookup.findById(channelId)` returns the per-channel `ClprChannelOps` (that channel's bundle constructor, request constructor, inbound queue, and state reader); an unknown channel replies with an empty payload. PBJ's bidi pipeline drives delivery (it requests unbounded and does not subscribe the session — which nonetheless requests unbounded defensively in `onSubscribe`), so the session reacts in `onNext`:
+Path: `ClprSyncService.openSync → ClprSyncHandler.newSession → ClprSyncSession` (one stateful session per stream). `ClprSyncHandler` holds only a `ChannelLookup` and the shared metrics counters. Each inbound message resolves its channel by id — `channelLookup.findById(channelId)` returns the per-channel `ClprChannelOps` (that channel's bundle constructor, request constructor, inbound queue, and state reader); an unknown channel replies with an empty payload. PBJ's bidi pipeline drives delivery (it requests unbounded and does not subscribe the session — which nonetheless requests unbounded defensively in `onSubscribe`), so the session reacts in `onNext`:
 
 - **Phase 1** (`handleRequest`): build `bundle_response = ops.bundleConstructor().createBundle(channelId, request.bundleRequest)` (build failures are logged and metered `grpc.sync.errors{reason=build_error}`, not fatal) and attach `bundle_request = ops.bundleRequestConstructor().createBundleRequest()`. Emit one reply.
-- **Phase 2** (`handleFollowUp`): hand the peer's `bundle_response` payload to `ops.inboundBundleQueue().offer(payload, peer)`, then complete the stream. That `InboundBundleQueue` implementation (wired in `ClprChannelHandler`) parses the payload with the per-channel `BundlePayloadCodec` (replay-trimmed against the local `receivedMessageId`), gates it on the per-channel `ThrottleEnforcer`, and calls `AccountTransactionSubmitter.submit(...)` — which **enqueues** on the signing account's serial worker and returns; the worker runs a read-only `eth_call` preview at send time and skips (no gas) anything the contract would revert.
+- **Phase 2** (`handleFollowUp`): hand the peer's `bundle_response` payload to `ops.inboundBundleQueue().offer(payload, null)` (the inbound transport does not identify the dialer), then complete the stream. That `InboundBundleQueue` implementation (wired in `ClprChannelHandler`) parses the payload with the per-channel `BundlePayloadCodec` (replay-trimmed against the local `receivedMessageId`), gates it on the per-channel `ThrottleEnforcer`, and calls `AccountTransactionSubmitter.submit(...)` — which **enqueues** on the signing account's serial worker and returns; the worker runs a read-only `eth_call` preview at send time and skips (no gas) anything the contract would revert.
 
 A CLOSED (or absent) local channel drops the peer's response. The session is best-effort: a failed submission does not poison the exchange.
 
@@ -67,7 +65,7 @@ One `ChannelSyncTask` per configured channel, on its own virtual thread, driving
 
 1. **Read on-chain state** — `ops.contractStateReader().readChannelState(channelId, commitmentLevel)`. `CLOSED` → self-stop; `PENDING` (or no record) → idle. Any other live status (ACTIVE / PAUSED / CLOSING / DRAINED) keeps syncing.
 2. **Pick peer** — `PeerSelector.selectPeer()`; if none (or the selected peer has no service endpoint), skip this cycle.
-3. **Phase 1** — send `ClprSyncPayload{channelId, bundleRequest = ops.bundleRequestConstructor().createBundleRequest()}` via `ClprEndpointClient.sync(host, port, phase1, followUpFactory, peerTlsCertificate)` (mutual TLS when the peer publishes a certificate on-chain).
+3. **Phase 1** — send `ClprSyncPayload{channelId, bundleRequest = ops.bundleRequestConstructor().createBundleRequest()}` via `ClprEndpointClient.sync(host, port, phase1, followUpFactory)`.
 4. **Phase 2 (followUpFactory)** — from the peer's reply, if it carried a `bundle_request`, answer it with `ops.bundleConstructor().createBundle(channelId, peerReply.bundleRequest)`; send that as the phase-2 `bundle_response`, then half-close.
 5. **Submit the peer's answer** — the peer's phase-1 reply `bundle_response` answers *our* request; a non-empty payload is handed to `ops.inboundBundleQueue().offer(payload, peer)` (the same parse / replay-trim / throttle / enqueue path as the responder's phase 2). An empty payload is a no-op.
 6. **Record peer outcome** (`PeerSelector.recordSuccess` / `recordFailure`) and sleep `syncIntervalMs` (`ChannelSyncTask.DEFAULT_INTERVAL_MS` = 1000ms, uniform per channel).
@@ -79,13 +77,13 @@ The relay initiates every cycle (a cheap phase-1 request); whether a *bundle* is
 Each endpoint has its own `ClprEndpointManifest` (its admitted peer endpoints + service address) recorded on-chain. Two flows keep manifests current:
 
 - **Sending our manifest**: when a peer's request reports (`current_endpoint_manifest_version`) an older version of our manifest than we hold locally, `createBundle` attaches a fresh manifest proof (`ManifestProofPolicy`), in each proof format's own wire shape (QBFT: an EIP-1186 storage proof of the manifest-commitment slot; Sei: the ICS-23 analog). Skipped when the peer is already current or our manifest has no service address yet.
-- **Receiving a peer's manifest**: the peer's manifest is verified and stored on our chain. `EndpointManifestRefreshTask` polls the on-ledger peer endpoint manifest and, when its `version` advances (or on first observation), replaces the channel's `PeerEndpointCache` and the mTLS trust registry wholesale (spec §2.4.2). It reads only the manifest — no channel/queue state.
+- **Receiving a peer's manifest**: the peer's manifest is verified and stored on our chain. `EndpointManifestRefreshTask` polls the on-ledger peer endpoint manifest and, when its `version` advances (or on first observation), replaces the channel's `PeerEndpointCache` wholesale (spec §2.4.2). It reads only the manifest — no channel/queue state.
 
 There is **no** `PeerManifestVersionCache`: the version each peer holds of our manifest arrives in its `BundleRequest`, and the version we hold of a peer's manifest is our own `Channel.endpoint_manifest_version` (sent in the request we build via `BundleRequestConstructor.createBundleRequest()`).
 
 ## Peer selection
 
-`PeerSelector` tracks `PeerStats` per peer (`accountId`-keyed): `successCount`, consecutive `failureCount`, and an exponential-backoff deadline. Selection each cycle excludes peers currently inside their backoff window, then picks one by **weighted random** among the rest, weight = `successCount + 1.0` (a never-succeeded peer still has weight 1.0, so it is always eligible; peers with more past successes are favoured). If *every* peer is backed off it falls back to uniform-random over the full list rather than skipping the cycle. `recordFailure` applies exponential backoff (1s, 2s, 4s, … capped at 60s); `recordSuccess` increments `successCount`, resets `failureCount`, and clears the backoff. Source: `clpr-relay-sync/.../PeerSelector.java`, `PeerStats.java`. The candidate set comes from `PeerEndpointCache`, seeded at startup from the on-chain per-Channel peer endpoint manifest and replaced wholesale by `EndpointManifestRefreshTask` on a manifest-version advance (above). `PeerSelector` reads the cache live; `PeerStats` for a departed peer is left in place (never selected again).
+`PeerSelector` tracks `PeerStats` per peer (keyed by the advertised `(host, port)`, not `account_id`): `successCount`, consecutive `failureCount`, and an exponential-backoff deadline. Selection each cycle excludes peers currently inside their backoff window, then picks one by **weighted random** among the rest, weight = `successCount + 1.0` (a never-succeeded peer still has weight 1.0, so it is always eligible; peers with more past successes are favoured). If *every* peer is backed off it falls back to uniform-random over the full list rather than skipping the cycle. `recordFailure` applies exponential backoff (1s, 2s, 4s, … capped at 60s); `recordSuccess` increments `successCount`, resets `failureCount`, and clears the backoff. Source: `clpr-relay-sync/.../PeerSelector.java`, `PeerStats.java`. The candidate set comes from `PeerEndpointCache`, seeded at startup from the on-chain per-Channel peer endpoint manifest and replaced wholesale by `EndpointManifestRefreshTask` on a manifest-version advance (above). `PeerSelector` reads the cache live; `PeerStats` for a departed peer is left in place (never selected again).
 
 ## Proof handling — current state
 
@@ -99,7 +97,7 @@ The wire format of `bundle_payload` is opaque to `clpr-relay-sync` and `clpr-rel
 
 ## Endpoint signing
 
-The relay does **not** sign or verify a per-payload endpoint signature; peer identity is the mandatory-mTLS roster-CA check on the data plane. `ClprSyncPayload` carries only `channel_id`, `bundle_request`, and `bundle_response`. (A signing key is still used — the per-service `clprServices[].defaultSigningPrivateKeyHex` or a per-channel override — but only to sign the EVM `submitBundle` transaction via `EthSigner`; see `evm-integration.md`.)
+The relay does **not** sign or verify a per-payload endpoint signature; inbound bundles are accepted on the strength of proof verification, not caller authentication. `ClprSyncPayload` carries only `channel_id`, `bundle_request`, and `bundle_response`. (A signing key is still used — the per-service `clprServices[].defaultSigningPrivateKeyHex` or a per-channel override — but only to sign the EVM `submitBundle` transaction via `EthSigner`; see `evm-integration.md`.)
 
 ## Concurrency notes
 

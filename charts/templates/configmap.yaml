@@ -15,15 +15,8 @@ data:
   # Secret-sourced env vars at startup.
   relay.yaml: |
     grpc:
+      port: {{ .Values.grpc.port }}
       maxMessageSize: {{ .Values.grpc.maxMessageSize | int64 }}
-      info:
-        port: {{ .Values.grpc.info.port }}
-      sync:
-        port: {{ .Values.grpc.sync.port }}
-        {{- if .Values.grpc.sync.tls.enabled }}
-        tlsEnabled: true
-        tlsKeyPath: /app/tls/ca-key.der
-        {{- end }}
 
     localNetworks:
     {{- range .Values.localNetworks }}

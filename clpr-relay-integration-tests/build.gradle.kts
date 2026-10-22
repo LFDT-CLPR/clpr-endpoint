@@ -14,25 +14,19 @@ dependencies {
     testImplementation("org.testcontainers:junit-jupiter")
     testImplementation(project(":clpr-relay-app"))
     testImplementation(project(":clpr-relay-core"))
-    testImplementation(project(":clpr-relay-grpc-client"))
-    testImplementation(testFixtures(project(":clpr-relay-core")))
     testImplementation(testFixtures(project(":clpr-relay-evm")))
-    // ClprEndpointInfoClient (info-plane discoverEndpoints / getLedgerConfiguration driver); the
+    // ClprEndpointInfoClient (getLedgerConfiguration driver); the
     // testFixtures dependency pulls the grpc-client main variant transitively.
     testImplementation(testFixtures(project(":clpr-relay-grpc-client")))
-    runtimeOnly("org.bouncycastle:bcprov-jdk18on:1.78.1")
 }
 
 testModuleInfo {
     requires("org.testcontainers.junit.jupiter")
     requires("org.hiero.clpr.relay.app")
     requires("org.hiero.clpr.relay.core")
-    requires("org.hiero.clpr.relay.core.test.fixtures")
     requires("org.hiero.clpr.relay.evm.test.fixtures")
-    requires("org.hiero.clpr.relay.grpc.client")
     requires("org.hiero.clpr.relay.grpc.client.test.fixtures")
     requires("com.swirlds.metrics.api")
-    requires("io.grpc")
     opensTo("org.testcontainers.junit.jupiter")
     // Note: com.github.dockerjava.api is required by the main module-info (used by SeiContainer
     // and TransientNodeOutageRecoveryTest); the test sources patch that same module, so it must

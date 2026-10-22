@@ -40,11 +40,8 @@ import org.testcontainers.images.builder.Transferable;
  */
 public final class EvmEndpoint {
 
-    /** gRPC sync (data plane) port inside the container. */
-    public static final int SYNC_PORT = 9545;
-
-    /** gRPC info plane port inside the container. */
-    public static final int INFO_PORT = 9546;
+    /** gRPC port ({@code sync}, {@code getLedgerConfiguration}) inside the container. */
+    public static final int GRPC_PORT = 9545;
 
     /** Prometheus {@code /metrics} and {@code /healthz} port inside the container. */
     public static final int METRICS_PORT = 9547;
@@ -272,8 +269,7 @@ public final class EvmEndpoint {
 
     /** @return the {@code relay.yaml} this endpoint would start with. */
     public String renderConfig() {
-        final RelayYamlWriter writer =
-                new RelayYamlWriter(SYNC_PORT, INFO_PORT, spec.backoffBaseMs(), spec.backoffCapMs());
+        final RelayYamlWriter writer = new RelayYamlWriter(GRPC_PORT, spec.backoffBaseMs(), spec.backoffCapMs());
         localNetworks.forEach(writer::addLocalNetwork);
         services.forEach(writer::addService);
         peerProofTypes.forEach(writer::addPeerProofType);
@@ -305,7 +301,7 @@ public final class EvmEndpoint {
                         cmd -> cmd.withHostName(spec.id()).withIpv4Address(staticIp))
                 .withNetwork(network)
                 .withNetworkAliases(spec.id())
-                .withExposedPorts(SYNC_PORT, INFO_PORT, METRICS_PORT)
+                .withExposedPorts(GRPC_PORT, METRICS_PORT)
                 .withCopyToContainer(Transferable.of(configYaml), "/app/relay.yaml")
                 .withEnv("JAVA_OPTS", javaOpts())
                 .withLogConsumer(logStream.consumer())
@@ -390,14 +386,9 @@ public final class EvmEndpoint {
         return requireContainer().getContainerId();
     }
 
-    /** @return host-mapped sync port. */
-    public int syncPort() {
-        return requireContainer().getMappedPort(SYNC_PORT);
-    }
-
-    /** @return host-mapped info port. */
-    public int infoPort() {
-        return requireContainer().getMappedPort(INFO_PORT);
+    /** @return host-mapped gRPC port. */
+    public int grpcPort() {
+        return requireContainer().getMappedPort(GRPC_PORT);
     }
 
     /** @return host-mapped metrics port. */

@@ -3,7 +3,6 @@ package org.hiero.clpr.relay.sync;
 
 import com.hedera.hapi.node.state.clpr.BundleResponse;
 import com.hedera.hapi.node.state.clpr.ClprChannelStatus;
-import com.hedera.hapi.node.state.clpr.ClprEndpoint;
 import com.hedera.hapi.node.state.clpr.ClprSyncPayload;
 import com.hedera.pbj.runtime.io.buffer.Bytes;
 import com.swirlds.logging.api.Logger;
@@ -16,6 +15,7 @@ import java.util.function.Function;
 import org.hiero.clpr.relay.core.ClprChannelOps;
 import org.hiero.clpr.relay.core.CommitmentLevel;
 import org.hiero.clpr.relay.core.FailState;
+import org.hiero.clpr.relay.core.Peers;
 import org.hiero.clpr.relay.core.metrics.LabeledCounter;
 import org.hiero.clpr.relay.core.metrics.MetricLabels;
 import org.hiero.clpr.relay.grpc.client.ClprEndpointClient;
@@ -285,15 +285,13 @@ public class ChannelSyncTask implements Runnable {
 
         try {
             exchangesStarted.increment("role", "initiator", "channel_id", channelIdLabel);
-            // Dial mutual TLS when the peer publishes a certificate on-chain; plaintext otherwise.
             // followUp (above) already enqueued the peer's answer to our request when its phase-1 reply
             // arrived, so sync()'s return value is not needed here: the inbound delivery is done,
             // decoupled from whether our phase-2 leg completes.
-            clprEndpointClient.sync(
-                    serviceEndpoint.ipAddress(), serviceEndpoint.port(), phase1, followUp, peer.tlsCertificate());
+            clprEndpointClient.sync(serviceEndpoint.ipAddress(), serviceEndpoint.port(), phase1, followUp);
             // The RPC completed, so the peer is reachable: credit its health now.
             peerSelector.recordSuccess(peer);
-            peerSyncSuccess.increment("channel_id", channelIdLabel, "peer", peerAccountLabel(peer));
+            peerSyncSuccess.increment("channel_id", channelIdLabel, "peer", Peers.peerLabel(peer));
         } catch (final Exception e) {
             if (!running) {
                 // Shutting down: the peer client may already be closed or the RPC cancelled
@@ -306,21 +304,12 @@ public class ChannelSyncTask implements Runnable {
                 // We handed the peer a non-empty bundle before the exchange broke — it may hold our
                 // messages while we never learned it did. Surfaced separately as a reciprocity signal.
                 exchangesFailedAfterSend.increment(
-                        "role", "initiator", "channel_id", channelIdLabel, "peer", peerAccountLabel(peer));
+                        "role", "initiator", "channel_id", channelIdLabel, "peer", Peers.peerLabel(peer));
             }
             peerSelector.recordFailure(peer);
-            peerSyncErrors.increment("channel_id", channelIdLabel, "peer", peerAccountLabel(peer));
+            peerSyncErrors.increment("channel_id", channelIdLabel, "peer", Peers.peerLabel(peer));
             log.warn("Sync failed for channel {}", e, channelIdLabel);
         }
-    }
-
-    /**
-     * Peer label for cross-metric correlation with {@code sync.bundle.*}: the roster account id (hex),
-     * or {@code anonymous} when absent.
-     */
-    private static String peerAccountLabel(final ClprEndpoint peer) {
-        final Bytes id = peer.accountId();
-        return (id != null && id.length() > 0) ? id.toHex() : "anonymous";
     }
 
     /**

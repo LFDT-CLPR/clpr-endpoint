@@ -7,6 +7,7 @@ import com.hedera.hapi.node.state.clpr.ClprChannel;
 import com.hedera.hapi.node.state.clpr.ClprEndpoint;
 import com.hedera.hapi.node.state.clpr.ClprEndpointManifest;
 import com.hedera.hapi.node.state.clpr.ClprLedgerConfiguration;
+import com.hedera.hapi.node.state.clpr.ClprServiceEndpoint;
 import com.hedera.pbj.runtime.io.buffer.Bytes;
 import com.swirlds.metrics.api.Counter;
 import java.util.ArrayDeque;
@@ -18,14 +19,13 @@ import java.util.function.BooleanSupplier;
 import org.hiero.clpr.relay.core.CommitmentLevel;
 import org.hiero.clpr.relay.core.ContractStateReader;
 import org.hiero.clpr.relay.core.PeerEndpointCache;
-import org.hiero.clpr.relay.core.PeerEndpointTlsRegistry;
 import org.hiero.clpr.relay.core.metrics.SimpleMetrics;
 import org.junit.jupiter.api.Test;
 
 /**
  * Unit tests for {@link EndpointManifestRefreshTask}. Each poll reads the on-ledger peer endpoint
  * manifest and, whenever its {@code version} differs from the one last applied — including the first
- * observation — replaces the peer cache + mTLS registry. It reads only the manifest: no channel/queue
+ * observation — replaces the peer cache. It reads only the manifest: no channel/queue
  * state, no lifecycle branching.
  */
 class EndpointManifestRefreshTaskTest {
@@ -93,9 +93,10 @@ class EndpointManifestRefreshTaskTest {
                 .build();
     }
 
-    private static ClprEndpoint endpoint(final int accountId) {
+    /** An endpoint at {@code 10.0.0.<n>:9545} with no account id, as a spec-conformant manifest carries it. */
+    private static ClprEndpoint endpoint(final int n) {
         return ClprEndpoint.newBuilder()
-                .accountId(Bytes.wrap(new byte[] {(byte) accountId}))
+                .serviceEndpoint(new ClprServiceEndpoint("10.0.0." + n, 9545))
                 .build();
     }
 
@@ -115,7 +116,6 @@ class EndpointManifestRefreshTaskTest {
                 reader,
                 CommitmentLevel.LATEST,
                 cache,
-                new PeerEndpointTlsRegistry(),
                 metrics,
                 50L, // pollIntervalMs — small so tests poll promptly
                 backoffBaseMs,
@@ -146,8 +146,8 @@ class EndpointManifestRefreshTaskTest {
         try {
             awaitUntil(2_000L, cache::hasPeers);
             assertThat(cache.allPeers())
-                    .extracting(ClprEndpoint::accountId)
-                    .containsExactly(endpoint(7).accountId());
+                    .extracting(ClprEndpoint::serviceEndpoint)
+                    .containsExactly(endpoint(7).serviceEndpoint());
             final var refreshed = (Counter) metrics.getMetric("evm.listener", "manifest.refreshed[channel_id=01]");
             assertThat(refreshed.get()).isEqualTo(1L);
         } finally {
@@ -171,8 +171,8 @@ class EndpointManifestRefreshTaskTest {
                 return c != null && c.get() == 2L;
             });
             assertThat(cache.allPeers())
-                    .extracting(ClprEndpoint::accountId)
-                    .containsExactly(endpoint(8).accountId());
+                    .extracting(ClprEndpoint::serviceEndpoint)
+                    .containsExactly(endpoint(8).serviceEndpoint());
         } finally {
             task.stop();
             thread.join(2_000L);

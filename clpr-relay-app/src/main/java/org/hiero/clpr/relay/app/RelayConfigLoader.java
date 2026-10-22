@@ -20,8 +20,6 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Properties;
-import org.hiero.clpr.relay.app.RelayConfig.GrpcInfoConfig;
-import org.hiero.clpr.relay.app.RelayConfig.GrpcSyncConfig;
 import org.jspecify.annotations.Nullable;
 
 /**
@@ -117,8 +115,6 @@ final class RelayConfigLoader {
         final FileConfig fileConfig = configPath == null ? FileConfig.EMPTY : readYaml(configPath);
         final Configuration config = ConfigurationBuilder.create()
                 .withConfigDataType(RelayConfig.GrpcConfig.class)
-                .withConfigDataType(GrpcInfoConfig.class)
-                .withConfigDataType(GrpcSyncConfig.class)
                 .withConfigDataType(RelayConfig.BackoffConfig.class)
                 .withSource(SystemPropertiesConfigSource.getInstance())
                 .withSource(buildFileSource(fileConfig))
@@ -144,8 +140,6 @@ final class RelayConfigLoader {
         overrides.forEach((k, v) -> overrideSource.withValue(k.toString(), v.toString()));
         final Configuration config = ConfigurationBuilder.create()
                 .withConfigDataType(RelayConfig.GrpcConfig.class)
-                .withConfigDataType(GrpcInfoConfig.class)
-                .withConfigDataType(GrpcSyncConfig.class)
                 .withConfigDataType(RelayConfig.BackoffConfig.class)
                 .withSource(overrideSource)
                 .withSource(buildFileSource(fileConfig))
@@ -162,15 +156,13 @@ final class RelayConfigLoader {
         // was null/missing, explicitly empty, or there was no config file at all.
         final var peerProofTypes =
                 fileConfig.peerProofTypes.isEmpty() ? RelayConfig.DEFAULT_PEER_PROOF_TYPES : fileConfig.peerProofTypes;
-        final var info = config.getConfigData(GrpcInfoConfig.class);
-        final var sync = config.getConfigData(GrpcSyncConfig.class);
-        validateTransport(info, sync);
-
         final var grpc = config.getConfigData(RelayConfig.GrpcConfig.class);
+        if (grpc.port() <= 0) {
+            throw new IllegalArgumentException("relay.grpc.port must be > 0");
+        }
+
         return new RelayConfig(
                 grpc,
-                info,
-                sync,
                 fileConfig.localNetworks,
                 fileConfig.clprServices,
                 config.getConfigData(RelayConfig.BackoffConfig.class),
@@ -221,49 +213,6 @@ final class RelayConfigLoader {
     }
 
     /**
-     * Fail-fast validation of the transport configuration. The info and sync listeners are always served
-     * (both ports must be {@code > 0}) and must use distinct ports. The sync listener is mandatory mTLS
-     * when {@code sync.tlsEnabled} is true, in which case {@code sync.tlsKeyPath} is required (and must be
-     * readable); when disabled the key is ignored.
-     *
-     * <p>The certificate/key presence-and-readability check here is structural only — a best-effort
-     * courtesy for a friendly early error. A file readable at load time may be gone or rotated by server
-     * start, so it is <em>not</em> the authoritative guard: the certificate and key are fully loaded, and
-     * the key matched to the certificate, when the {@code SSLContext} is built at server start.
-     */
-    private static void validateTransport(final GrpcInfoConfig info, final GrpcSyncConfig sync) {
-        if (sync.port() <= 0) {
-            throw new IllegalArgumentException("relay.grpc.sync.port must be > 0");
-        }
-        if (info.port() <= 0) {
-            throw new IllegalArgumentException("relay.grpc.info.port must be > 0");
-        }
-        requireDistinct(sync.port(), info.port());
-
-        // tlsKeyPath is mandatory when sync mTLS is enabled, and ignored otherwise.
-        if (sync.tlsEnabled()) {
-            if (sync.tlsKeyPath().isBlank()) {
-                throw new IllegalArgumentException(
-                        "relay.grpc.sync.tlsEnabled is true, so relay.grpc.sync.tlsKeyPath must be set");
-            }
-            if (!Files.isReadable(Path.of(sync.tlsKeyPath()))) {
-                throw new IllegalArgumentException("\"relay.grpc.sync.tlsKeyPath\" does not exist or is not readable");
-            }
-        }
-    }
-
-    /** Configured (non-zero) ports must be pairwise distinct; disabled ports ({@code 0}) never collide. */
-    private static void requireDistinct(final int... ports) {
-        final var seen = new HashSet<Integer>();
-        for (final int port : ports) {
-            if (port > 0 && !seen.add(port)) {
-                throw new IllegalArgumentException(
-                        "all configured gRPC ports must differ; got " + Arrays.toString(ports));
-            }
-        }
-    }
-
-    /**
      * Build a {@link SimpleConfigSource} at {@link #FILE_CONFIG_ORDINAL} from parsed YAML values.
      * Only non-null fields are added so that missing YAML entries naturally fall through to
      * lower-priority sources (i.e. the {@code @ConfigProperty} defaults).
@@ -271,10 +220,7 @@ final class RelayConfigLoader {
     private static SimpleConfigSource buildFileSource(final FileConfig fc) {
         final var src = new SimpleConfigSource().withOrdinal(FILE_CONFIG_ORDINAL);
         if (fc.grpcMaxMessageSize != null) src.withValue("relay.grpc.maxMessageSize", fc.grpcMaxMessageSize);
-        if (fc.infoPort != null) src.withValue("relay.grpc.info.port", fc.infoPort);
-        if (fc.syncPort != null) src.withValue("relay.grpc.sync.port", fc.syncPort);
-        if (fc.tlsEnabled != null) src.withValue("relay.grpc.sync.tlsEnabled", fc.tlsEnabled);
-        if (fc.tlsKeyPath != null) src.withValue("relay.grpc.sync.tlsKeyPath", fc.tlsKeyPath);
+        if (fc.grpcPort != null) src.withValue("relay.grpc.port", fc.grpcPort);
         if (fc.backoffBaseMs != null) src.withValue("relay.backoff.baseMs", fc.backoffBaseMs);
         if (fc.backoffCapMs != null) src.withValue("relay.backoff.capMs", fc.backoffCapMs);
         return src;
@@ -341,19 +287,10 @@ final class RelayConfigLoader {
         static final FileConfig EMPTY = new FileConfig();
 
         @Nullable
+        Integer grpcPort;
+
+        @Nullable
         Integer grpcMaxMessageSize;
-
-        @Nullable
-        Integer infoPort;
-
-        @Nullable
-        Integer syncPort;
-
-        @Nullable
-        Boolean tlsEnabled;
-
-        @Nullable
-        String tlsKeyPath;
 
         @Nullable
         Long backoffBaseMs;
@@ -370,17 +307,8 @@ final class RelayConfigLoader {
 
             final var grpc = asMap(root.get("grpc"));
             if (grpc != null) {
+                fc.grpcPort = asInt(grpc.get("port"));
                 fc.grpcMaxMessageSize = asInt(grpc.get("maxMessageSize"));
-                final var info = asMap(grpc.get("info"));
-                if (info != null) {
-                    fc.infoPort = asInt(info.get("port"));
-                }
-                final var sync = asMap(grpc.get("sync"));
-                if (sync != null) {
-                    fc.syncPort = asInt(sync.get("port"));
-                    fc.tlsEnabled = asBool(sync.get("tlsEnabled"));
-                    fc.tlsKeyPath = asString(sync.get("tlsKeyPath"));
-                }
             }
 
             final var backoff = asMap(root.get("backoff"));

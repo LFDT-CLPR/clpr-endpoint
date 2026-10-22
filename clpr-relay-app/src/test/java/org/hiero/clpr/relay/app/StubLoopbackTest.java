@@ -8,6 +8,7 @@ import com.hedera.hapi.node.state.clpr.BundleResponse;
 import com.hedera.hapi.node.state.clpr.ClprChannel;
 import com.hedera.hapi.node.state.clpr.ClprChannelStatus;
 import com.hedera.hapi.node.state.clpr.ClprEndpoint;
+import com.hedera.hapi.node.state.clpr.ClprGetLedgerConfigurationRequest;
 import com.hedera.hapi.node.state.clpr.ClprLedgerConfiguration;
 import com.hedera.hapi.node.state.clpr.ClprLedgerConfigurationResponse;
 import com.hedera.hapi.node.state.clpr.ClprSyncPayload;
@@ -19,18 +20,21 @@ import java.util.Optional;
 import org.hiero.clpr.relay.core.CommitmentLevel;
 import org.hiero.clpr.relay.core.ContractStateReader;
 import org.hiero.clpr.relay.core.InboundBundleQueue;
-import org.hiero.clpr.relay.core.PeerEndpointTlsRegistry;
 import org.hiero.clpr.relay.core.StubBundleConstructor;
 import org.hiero.clpr.relay.core.metrics.SimpleMetrics;
 import org.hiero.clpr.relay.core.testfixtures.MockClprChannelOps;
 import org.hiero.clpr.relay.grpc.client.ClprEndpointClient;
+import org.hiero.clpr.relay.grpc.client.testfixtures.ClprEndpointInfoClient;
 import org.hiero.clpr.relay.grpc.server.ClprGrpcServer;
 import org.hiero.clpr.relay.grpc.server.ClprSyncHandler;
 import org.hiero.clpr.relay.grpc.server.GetLedgerConfigurationHandler;
 import org.jspecify.annotations.NonNull;
 import org.junit.jupiter.api.Test;
 
-/** Verifies the sync RPC end-to-end in a loopback configuration (client talks to a local server). */
+/**
+ * Verifies the sync and getLedgerConfiguration RPCs end-to-end in a loopback configuration (client talks to
+ * a local server).
+ */
 class StubLoopbackTest {
 
     /** Minimal stub state reader that always returns ACTIVE for any channel. */
@@ -90,19 +94,10 @@ class StubLoopbackTest {
                         .build(),
                 CommitmentLevel.FINALIZED);
         final int port;
-        final int infoPort;
-        try (var s1 = new java.net.ServerSocket(0);
-                var s2 = new java.net.ServerSocket(0)) {
-            port = s1.getLocalPort();
-            infoPort = s2.getLocalPort();
+        try (var s = new java.net.ServerSocket(0)) {
+            port = s.getLocalPort();
         }
-        final var server = new ClprGrpcServer(
-                new ClprGrpcServer.Listeners(port, infoPort, null),
-                1_048_576,
-                syncHandler,
-                new PeerEndpointTlsRegistry(),
-                ledgerConfigHandler,
-                "");
+        final var server = new ClprGrpcServer(port, 1_048_576, syncHandler, ledgerConfigHandler, "");
         server.start();
 
         try {
@@ -120,18 +115,13 @@ class StubLoopbackTest {
             // Phase 2: deliver a crafted inbound bundle for the endpoint to submit to the local chain.
             final Bytes inboundBundle = Bytes.wrap(new byte[] {1, 2, 3});
 
-            final var client = new ClprEndpointClient(1_048_576, null);
-            final var response = client.sync(
-                    "localhost",
-                    port,
-                    phase1,
-                    reply -> ClprSyncPayload.newBuilder()
-                            .channelId(channelId)
-                            .bundleResponse(BundleResponse.newBuilder()
-                                    .bundlePayload(inboundBundle)
-                                    .build())
-                            .build(),
-                    Bytes.EMPTY);
+            final var client = new ClprEndpointClient(1_048_576);
+            final var response = client.sync("localhost", port, phase1, reply -> ClprSyncPayload.newBuilder()
+                    .channelId(channelId)
+                    .bundleResponse(BundleResponse.newBuilder()
+                            .bundlePayload(inboundBundle)
+                            .build())
+                    .build());
 
             // Verify the endpoint's phase-1 reply carries its own bundle.
             assertThat(response).isNotNull();
@@ -141,6 +131,13 @@ class StubLoopbackTest {
             // Verify the phase-2 inbound bundle actually reached the channel's inbound queue verbatim.
             assertThat(txSubmitter.offered).hasSize(1);
             assertThat(txSubmitter.offered.get(0)).isEqualTo(inboundBundle);
+
+            // getLedgerConfiguration is served on the same port as sync.
+            try (var infoClient = new ClprEndpointInfoClient()) {
+                assertThat(infoClient.getLedgerConfiguration(
+                                "localhost", port, ClprGetLedgerConfigurationRequest.DEFAULT))
+                        .isEqualTo(QbftLedgerConfigurationPayload.DEFAULT);
+            }
         } finally {
             server.stop();
         }

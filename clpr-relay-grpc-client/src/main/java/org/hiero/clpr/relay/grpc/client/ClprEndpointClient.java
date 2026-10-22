@@ -10,18 +10,12 @@ import io.grpc.ManagedChannel;
 import io.grpc.MethodDescriptor;
 import io.grpc.Status;
 import io.grpc.StatusRuntimeException;
-import io.grpc.netty.shaded.io.grpc.netty.GrpcSslContexts;
 import io.grpc.netty.shaded.io.grpc.netty.NettyChannelBuilder;
-import io.grpc.netty.shaded.io.netty.handler.ssl.SslContext;
-import io.grpc.netty.shaded.io.netty.handler.ssl.SslContextBuilder;
-import io.grpc.netty.shaded.io.netty.handler.ssl.SslProvider;
 import io.grpc.stub.ClientCallStreamObserver;
 import io.grpc.stub.ClientCalls;
 import io.grpc.stub.StreamObserver;
 import java.io.ByteArrayInputStream;
 import java.io.InputStream;
-import java.security.KeyStore;
-import java.security.NoSuchAlgorithmException;
 import java.time.Duration;
 import java.util.List;
 import java.util.concurrent.ArrayBlockingQueue;
@@ -31,20 +25,13 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Function;
-import java.util.function.Supplier;
-import javax.net.ssl.KeyManager;
-import javax.net.ssl.KeyManagerFactory;
-import javax.net.ssl.KeyManagerFactorySpi;
-import javax.net.ssl.ManagerFactoryParameters;
-import org.hiero.clpr.relay.core.Certs;
-import org.hiero.clpr.relay.core.LeafKeyManager;
 import org.jspecify.annotations.Nullable;
 
 /**
- * gRPC client for the mutual-TLS-capable {@code sync} RPC against peer CLPR endpoints.
+ * gRPC client for the {@code sync} RPC against peer CLPR endpoints.
  *
  * <p>Uses {@code grpc-netty-shaded}'s {@code NettyChannelBuilder} for outbound
- * HTTP/2 transport and standard grpc-java {@link ClientCalls} for the unary
+ * HTTP/2 transport and standard grpc-java {@link ClientCalls} for the bidirectional-streaming
  * {@code sync} RPC against remote peers.
  *
  * <p>We do <b>not</b> use Helidon's {@code GrpcClient} or PBJ's
@@ -67,40 +54,20 @@ public class ClprEndpointClient implements AutoCloseable {
      */
     private static final Duration DEFAULT_READ_TIMEOUT = Duration.ofMillis(20 * 100 * 5);
 
-    /** An empty DER buffer meaning "no peer certificate" → dial plaintext. */
-    private static final byte[] NO_PEER_CERT = new byte[0];
-
     /** Maximum inbound gRPC message size in bytes; applied to every cached channel. */
     private final int maxInboundMessageSize;
 
     /**
-     * This endpoint's dynamic TLS leaf key manager, presented as the client certificate when dialing a
-     * peer over mutual TLS. {@code null} when no secure material is configured — such a relay can still
-     * dial plaintext peers but cannot present a client certificate to a mandatory-mTLS peer.
-     *
-     * <p>The key manager re-mints its leaf on demand when the rotation window elapses, so new TLS
-     * connections opened through any channel automatically use the current leaf.
-     */
-    @Nullable
-    private final LeafKeyManager leafKeyManager;
-
-    /**
-     * Construct with the given transport settings and an optional leaf key manager.
-     *
-     * <p>The caller is responsible for creating {@code leafKeyManager} and passing the same instance to
-     * both this client and the inbound {@code ClprGrpcServer}. The read timeout is always
+     * Construct with the given transport settings. The read timeout is always
      * {@link #DEFAULT_READ_TIMEOUT}.
      *
      * @param maxInboundMessageSize maximum inbound gRPC message size in bytes; must be positive
-     * @param leafKeyManager        this endpoint's dynamic leaf key manager; required when {@code tlsEnabled}
-     *                              and this endpoint must present a client certificate, {@code null} otherwise
      */
-    public ClprEndpointClient(final int maxInboundMessageSize, @Nullable final LeafKeyManager leafKeyManager) {
+    public ClprEndpointClient(final int maxInboundMessageSize) {
         if (maxInboundMessageSize <= 0) {
             throw new IllegalArgumentException("maxInboundMessageSize must be positive, got " + maxInboundMessageSize);
         }
         this.maxInboundMessageSize = maxInboundMessageSize;
-        this.leafKeyManager = leafKeyManager;
     }
 
     /** A simple byte-array marshaller for protobuf-encoded messages. */
@@ -175,15 +142,12 @@ public class ClprEndpointClient implements AutoCloseable {
      * </ol>
      *
      * <p>The peer emits exactly one response (to the phase-1 request); the phase-2 follow-up is not
-     * answered. The call is bounded by the read timeout at each blocking step. Transport (mutual-TLS
-     * vs plaintext) is chosen exactly as in {@link #sync}.
+     * answered. The call is bounded by the read timeout at each blocking step.
      *
-     * @param host               the peer's hostname or IP address
-     * @param port               the peer's gRPC port
-     * @param request            the phase-1 payload to send
-     * @param followUpFactory    maps the peer's response to the phase-2 follow-up payload
-     * @param peerTlsCertificate the peer's on-chain {@code tls_certificate} (CA DER); required when
-     *                           this endpoint's {@code sync.tlsEnabled}, ignored otherwise
+     * @param host            the peer's hostname or IP address
+     * @param port            the peer's gRPC port
+     * @param request         the phase-1 payload to send
+     * @param followUpFactory maps the peer's response to the phase-2 follow-up payload
      * @return the peer's phase-1 response payload
      * @throws Exception if the call fails or does not complete within the read timeout
      */
@@ -191,21 +155,10 @@ public class ClprEndpointClient implements AutoCloseable {
             final String host,
             final int port,
             final ClprSyncPayload request,
-            final Function<ClprSyncPayload, ClprSyncPayload> followUpFactory,
-            @Nullable final Bytes peerTlsCertificate)
+            final Function<ClprSyncPayload, ClprSyncPayload> followUpFactory)
             throws Exception {
-        final byte[] peerCertDer;
-        if (leafKeyManager != null) {
-            if (peerTlsCertificate == null || peerTlsCertificate.length() == 0) {
-                throw new IllegalStateException("sync.tlsEnabled=true but peer " + host + ":" + port
-                        + " publishes no on-chain tls_certificate; cannot establish the required mTLS channel");
-            }
-            peerCertDer = peerTlsCertificate.toByteArray();
-        } else {
-            peerCertDer = NO_PEER_CERT;
-        }
-        final String key = cacheKey(host, port, peerCertDer);
-        final ManagedChannel channel = channelFor(key, host, port, () -> buildChannel(host, port, peerCertDer));
+        final String key = host + ":" + port;
+        final ManagedChannel channel = channelFor(key, host, port);
         final var callOptions =
                 CallOptions.DEFAULT.withDeadlineAfter(DEFAULT_READ_TIMEOUT.toMillis(), TimeUnit.MILLISECONDS);
 
@@ -310,33 +263,16 @@ public class ClprEndpointClient implements AutoCloseable {
     }
 
     /**
-     * Cache key for a channel. Plaintext channels key on
-     * {@code host:port}; mutual-TLS sync channels add the peer-certificate fingerprint so a roster CA
-     * rotation opens a fresh channel rather than reusing a stale one.
+     * Returns the cached gRPC channel for {@code key} ({@code host:port}), creating one if absent.
+     * Channels are built with HTTP/2 keepalives so idle connections stay alive and broken ones are
+     * detected before the next RPC deadline fires. See class-level javadoc for why we use grpc-netty
+     * here instead of Helidon.
      */
-    private static String cacheKey(final String host, final int port, final byte[] peerCertDer) {
-        if (peerCertDer.length == 0) {
-            return host + ":" + port;
-        }
-        return host + ":" + port + ":" + Certs.sha256Hex(peerCertDer);
-    }
-
-    /**
-     * Returns a cached gRPC channel for the given key, creating one if absent. TLS-vs-plaintext is
-     * decided by {@code peerCertDer} (empty → plaintext). Channels are built with HTTP/2 keepalives so
-     * idle connections stay alive and broken ones are detected before the next RPC deadline fires.
-     * See class-level javadoc for why we use grpc-netty here instead of Helidon.
-     */
-    private ManagedChannel channelFor(
-            final String key, final String host, final int port, final Supplier<ManagedChannel> factory) {
+    private ManagedChannel channelFor(final String key, final String host, final int port) {
         if (closed) {
             throw new IllegalStateException("ClprEndpointClient is closed");
         }
-        final boolean[] created = {false};
-        final ManagedChannel channel = channelCache.computeIfAbsent(key, _ -> {
-            created[0] = true;
-            return factory.get();
-        });
+        final ManagedChannel channel = channelCache.computeIfAbsent(key, _ -> buildChannel(host, port));
         // A concurrent close() may have drained the cache after the open-check above. Re-check the
         // published flag: if close() has begun, evict and shut down the channel we just inserted so
         // it can never be orphaned. close() setting the flag happens-before its cache traversal, so
@@ -346,98 +282,18 @@ public class ClprEndpointClient implements AutoCloseable {
             channel.shutdownNow();
             throw new IllegalStateException("ClprEndpointClient is closed");
         }
-        if (created[0]) {
-            // A newly-built channel for this peer supersedes any prior channel to the same host:port —
-            // a rotated on-chain certificate (different fingerprint) or a plaintext↔TLS switch. Retire
-            // the stale one so its keepAlive connection is not orphaned in the cache indefinitely.
-            evictStaleSiblings(host, port, key);
-        }
         return channel;
     }
 
-    /**
-     * Shut down and remove any cached channel to {@code host:port} other than {@code keepKey}. Siblings
-     * are the plaintext entry ({@code host:port}) and any TLS entry ({@code host:port:<fingerprint>}).
-     */
-    private void evictStaleSiblings(final String host, final int port, final String keepKey) {
-        final String hostPort = host + ":" + port;
-        final String tlsPrefix = hostPort + ":";
-        for (final var entry : channelCache.entrySet()) {
-            final String k = entry.getKey();
-            if (!k.equals(keepKey) && (k.equals(hostPort) || k.startsWith(tlsPrefix))) {
-                if (channelCache.remove(k, entry.getValue())) {
-                    entry.getValue().shutdownNow();
-                }
-            }
-        }
-    }
-
-    /** Build a plaintext or (peer-pinned, optionally mutual) TLS channel. */
-    private ManagedChannel buildChannel(final String host, final int port, final byte[] peerCertDer) {
-        final var builder = NettyChannelBuilder.forAddress(host, port)
+    /** Build a channel to {@code host:port}. */
+    private ManagedChannel buildChannel(final String host, final int port) {
+        return NettyChannelBuilder.forAddress(host, port)
                 .maxInboundMessageSize(maxInboundMessageSize)
                 .keepAliveTime(KEEPALIVE_TIME.toSeconds(), TimeUnit.SECONDS)
                 .keepAliveTimeout(KEEPALIVE_TIMEOUT.toSeconds(), TimeUnit.SECONDS)
-                .keepAliveWithoutCalls(true);
-        if (peerCertDer.length == 0) {
-            builder.usePlaintext();
-        } else {
-            try {
-                // A deterministic authority; the CA-chain trust manager checks identity, so hostname
-                // verification is moot.
-                builder.sslContext(clientSslContext(peerCertDer)).overrideAuthority("clpr");
-            } catch (final Exception e) {
-                throw new IllegalStateException(
-                        "failed to build a TLS channel to " + host + ":" + port + ": " + e.getMessage(), e);
-            }
-        }
-        return builder.build();
-    }
-
-    /**
-     * Build the client {@link SslContext} that validates the peer's presented leaf against its on-chain
-     * CA certificate and (when this endpoint has its own material) presents its client leaf for mutual
-     * TLS. The JDK provider is forced so the custom trust manager behaves portably.
-     *
-     * <p>When a {@link LeafKeyManager} is available, it is wrapped in a thin {@link KeyManagerFactory}
-     * and passed to the builder so the JDK TLS stack calls it on every new handshake — enabling the
-     * dynamic rotation behaviour without rebuilding the channel or the {@code SslContext}.
-     */
-    private SslContext clientSslContext(final byte[] peerCertDer) throws Exception {
-        final var builder =
-                SslContextBuilder.forClient().trustManager(new ClientSideTrustManager(Certs.parse(peerCertDer)));
-        if (leafKeyManager != null) {
-            builder.keyManager(wrapAsFactory(leafKeyManager));
-        }
-        // configure() applies the gRPC/HTTP-2 ALPN settings appropriate for the chosen provider; forcing
-        // JDK keeps the custom trust manager portable (avoids tcnative-specific verification quirks).
-        GrpcSslContexts.configure(builder, SslProvider.JDK);
-        return builder.build();
-    }
-
-    /**
-     * Wraps {@code keyManager} in a {@link KeyManagerFactory} whose {@code getKeyManagers()} delegates
-     * to it. This is the only way to supply a custom {@link javax.net.ssl.KeyManager} to Netty's
-     * {@link SslContextBuilder} without abandoning the JDK provider.
-     *
-     * <p>The {@code engineInit} methods are empty because {@code SslContextBuilder} only calls
-     * {@code engineGetKeyManagers()}; the wrapped key manager is already initialised at construction.
-     */
-    private static KeyManagerFactory wrapAsFactory(final LeafKeyManager keyManager) throws NoSuchAlgorithmException {
-        final var spi = new KeyManagerFactorySpi() {
-            @Override
-            protected void engineInit(final KeyStore ks, final char[] password) {}
-
-            @Override
-            protected void engineInit(final ManagerFactoryParameters spec) {}
-
-            @Override
-            protected KeyManager[] engineGetKeyManagers() {
-                return new KeyManager[] {keyManager};
-            }
-        };
-        final var alg = KeyManagerFactory.getDefaultAlgorithm();
-        return new KeyManagerFactory(spi, KeyManagerFactory.getInstance(alg).getProvider(), alg) {};
+                .keepAliveWithoutCalls(true)
+                .usePlaintext()
+                .build();
     }
 
     /**

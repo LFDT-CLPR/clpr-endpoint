@@ -31,11 +31,11 @@ class ClprInfoServiceTest {
 
     @Test
     void open_unknownMethod_throwsUnimplemented() {
-        // Even with a handler present, a method not served on the info plane is rejected.
+        // Even with a handler present, a method this service does not serve is rejected.
         final var handler = new GetLedgerConfigurationHandler(serviceAddress -> null, CommitmentLevel.FINALIZED);
         final var service = new ClprInfoService(handler);
         assertThatThrownBy(() -> service.open(() -> "sync", null, null))
                 .isInstanceOf(GrpcException.class)
-                .hasMessageContaining("method not served on the info listener");
+                .hasMessageContaining("unsupported method: sync");
     }
 }
