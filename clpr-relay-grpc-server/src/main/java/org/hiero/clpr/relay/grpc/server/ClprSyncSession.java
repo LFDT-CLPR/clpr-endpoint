@@ -205,11 +205,20 @@ public class ClprSyncSession implements Pipeline<ClprSyncPayload> {
             } else {
                 log.warn("sync: phase-1 request carried no bundle_request; replying with our request only");
             }
-            // Always attach our own request so the peer can serve us in phase 2.
-            reply.bundleRequest(clprChannel.bundleRequestConstructor().createBundleRequest());
+            // Always attach our own request so the peer can serve us in phase 2. A failure building it
+            // (e.g. an on-chain state read) must not abort the exchange: reply with what we have so the
+            // initiator still receives our phase-1 bundle and does not count us as a failed peer.
+            try {
+                reply.bundleRequest(clprChannel.bundleRequestConstructor().createBundleRequest());
+            } catch (final Exception e) {
+                syncErrors.increment("channel_id", channelIdLabel, "reason", "build_error");
+                log.warn("sync: failed to build our own bundle request; replying without it", e);
+            }
             return reply.build();
         } catch (final Exception e) {
-            throw new RuntimeException(e);
+            syncErrors.increment("channel_id", channelIdLabel, "reason", "build_error");
+            log.warn("sync: failed to prepare the phase-1 reply; replying with channel id only", e);
+            return ClprSyncPayload.newBuilder().channelId(channelId).build();
         }
     }
 
@@ -253,7 +262,8 @@ public class ClprSyncSession implements Pipeline<ClprSyncPayload> {
                     .inboundBundleQueue()
                     .offer(followUp.bundleResponseOrThrow().bundlePayload(), null);
         } catch (final Exception e) {
-            throw new RuntimeException(e);
+            syncErrors.increment("channel_id", channelIdLabel, "reason", "submit_error");
+            log.warn("sync: failed to enqueue the peer's phase-2 bundle; completing the exchange", e);
         }
     }
 }

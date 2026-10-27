@@ -18,7 +18,7 @@ Prerequisite: `docs/README.md`, `docs/architecture.md`.
 A bundle is no longer produced on a state-change trigger and cached; it is built **ad hoc** from the peer's request. One `sync` stream carries exactly three messages:
 
 1. **Phase 1 (initiator → responder)** — `ClprSyncPayload{channel_id, bundle_request}`. The `BundleRequest` states what the initiator wants next and what it currently holds:
-   - `from_message_id` — the next message id the initiator expects (`receivedMessageId + 1`).
+   - `current_received_message_id` — the initiator's current `receivedMessageId`; the responder serves messages from this value + 1.
    - `current_status` — the initiator's channel status.
    - `current_trust_anchor_id` — the initiator verifier's current trust anchor, so the responder can decide what validator-set / epoch evidence to include.
    - `current_endpoint_manifest_version` (`uint64`) — the version of the **responder's** endpoint manifest that the initiator currently holds (from the initiator's on-chain `Channel.endpoint_manifest_version`), so the responder re-proves its manifest only when it has advanced.

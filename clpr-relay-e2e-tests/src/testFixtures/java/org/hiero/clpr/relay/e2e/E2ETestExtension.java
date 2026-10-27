@@ -145,6 +145,21 @@ public final class E2ETestExtension
         }
     }
 
+    /**
+     * The active keep-artifacts policy, defaulting to {@link KeepArtifacts#FAILURE} when
+     * {@code clpr.e2e.keepArtifacts} holds an unrecognized value. Resolving the policy must never
+     * throw from the failure/teardown hooks below, where an {@link IllegalArgumentException} would
+     * replace the real test failure that is being reported.
+     */
+    private static KeepArtifacts keepArtifactsPolicy() {
+        try {
+            return KeepArtifacts.active();
+        } catch (final IllegalArgumentException e) {
+            System.err.println("[e2e] " + e.getMessage() + "; defaulting to failure");
+            return KeepArtifacts.FAILURE;
+        }
+    }
+
     // ── TestTemplateInvocationContextProvider ─────────────────────────────────
 
     @Override
@@ -197,7 +212,7 @@ public final class E2ETestExtension
     @Override
     public void handleTestExecutionException(final ExtensionContext context, final Throwable throwable)
             throws Throwable {
-        final KeepArtifacts policy = KeepArtifacts.active();
+        final KeepArtifacts policy = keepArtifactsPolicy();
         if (policy != KeepArtifacts.NEVER) {
             final E2EEnvironment environment = existingEnvironment(context);
             if (environment != null) {
@@ -224,7 +239,7 @@ public final class E2ETestExtension
      */
     @Override
     public void afterTestExecution(final ExtensionContext context) {
-        if (KeepArtifacts.active() != KeepArtifacts.ALWAYS) {
+        if (keepArtifactsPolicy() != KeepArtifacts.ALWAYS) {
             return;
         }
         // A test that threw already had its diagnostics captured in handleTestExecutionException; a

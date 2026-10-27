@@ -195,6 +195,7 @@ public final class Channels {
             }
         }
         wire(channel);
+        admitServingSigners(channel.spec());
     }
 
     /**
@@ -252,6 +253,8 @@ public final class Channels {
                         net == netA ? validatorContractA : validatorContractB,
                         arraySlot));
 
+        admitServingSigners(channel.spec());
+
         return new ContractModeWiring(
                 new ContractModeSide(validatorContractA, arraySlot),
                 new ContractModeSide(validatorContractB, arraySlot));
@@ -270,6 +273,27 @@ public final class Channels {
         final List<EvmEndpoint> all = new ArrayList<>(spec.endpointsA());
         all.addAll(spec.endpointsB());
         return all;
+    }
+
+    /**
+     * Admit each serving endpoint's primary signer on the (chain, service) it serves.
+     *
+     * <p>The manual wiring paths ({@link #wireForDiscovery} / {@link #wireContractMode}) bypass
+     * {@link #configureEndpoints()}, which is otherwise where this admission happens. {@code
+     * submitBundle} is gated on {@code getEndpointEntry(from) != NONE}, so a serving endpoint whose
+     * signer is not admitted would have every bundle it submits revert. Those paths serve with the
+     * endpoint's {@link EvmEndpoint#signingKeySlot() primary} signer, so that is the account admitted
+     * here. Idempotent per (account, service), and scoped to the channel's own services, so it adds no
+     * stray cross-service registrations the routing-attribution test (on the {@link #wireAll} path)
+     * depends on being absent.
+     */
+    private void admitServingSigners(final ChannelSpec spec) {
+        for (final EvmEndpoint endpoint : spec.endpointsA()) {
+            registerEndpoint(spec.networkA(), spec.resolvedServiceA(), endpoint.signerAccount());
+        }
+        for (final EvmEndpoint endpoint : spec.endpointsB()) {
+            registerEndpoint(spec.networkB(), spec.resolvedServiceB(), endpoint.signerAccount());
+        }
     }
 
     /**

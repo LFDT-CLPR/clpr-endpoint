@@ -204,8 +204,21 @@ public class ClprEndpointClient implements AutoCloseable {
             // Phase 1: send the request.
             requestObserver.onNext(ClprSyncPayload.PROTOBUF.toBytes(request).toByteArray());
 
-            // Block for the peer's single response.
-            final ClprSyncPayload reply = replies.poll(DEFAULT_READ_TIMEOUT.toMillis(), TimeUnit.MILLISECONDS);
+            // Block for the peer's single response, but stop early if the stream errors or completes —
+            // a dead or UNAVAILABLE peer must not cost the full read timeout before we give up on it
+            // (PeerSelector / ChannelSyncTask would otherwise lose that timeout per dead peer each cycle).
+            ClprSyncPayload reply = null;
+            final long deadlineNanos = System.nanoTime() + DEFAULT_READ_TIMEOUT.toNanos();
+            while (reply == null
+                    && error.get() == null
+                    && completed.getCount() > 0
+                    && System.nanoTime() < deadlineNanos) {
+                reply = replies.poll(50, TimeUnit.MILLISECONDS);
+            }
+            if (reply == null) {
+                // A reply may have landed in the queue just before onError()/onCompleted() fired.
+                reply = replies.poll();
+            }
             if (reply == null) {
                 throw toException(
                         error.get(),

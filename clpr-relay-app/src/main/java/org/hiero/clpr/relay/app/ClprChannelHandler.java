@@ -90,11 +90,18 @@ public final class ClprChannelHandler implements ClprChannelOps {
     private final RelayConfig.CommonEvmParams evmParams;
     private final long syncIntervalMs;
 
-    @Nullable
-    private ChannelSyncTask syncTask;
+    /**
+     * Never-failing placeholder returned by the fail-state accessors before a task is created, so the
+     * metrics updater — which reads them off-thread, without the start/addChannel lock — sees a
+     * zero-failure state instead of dereferencing a null task.
+     */
+    private static final FailState IDLE_FAIL_STATE = new FailState(1, 1);
 
     @Nullable
-    private EndpointManifestRefreshTask manifestRefreshTask;
+    private volatile ChannelSyncTask syncTask;
+
+    @Nullable
+    private volatile EndpointManifestRefreshTask manifestRefreshTask;
 
     private final String instanceName;
 
@@ -556,11 +563,13 @@ public final class ClprChannelHandler implements ClprChannelOps {
 
     /** The outbound sync loop's failure state (for aggregate metrics). */
     public FailState syncFailState() {
-        return syncTask.failState();
+        final ChannelSyncTask task = syncTask;
+        return task != null ? task.failState() : IDLE_FAIL_STATE;
     }
 
     /** The state-change poll loop's failure state (for aggregate metrics). */
     public FailState manifestRefreshFailState() {
-        return manifestRefreshTask.failState();
+        final EndpointManifestRefreshTask task = manifestRefreshTask;
+        return task != null ? task.failState() : IDLE_FAIL_STATE;
     }
 }
