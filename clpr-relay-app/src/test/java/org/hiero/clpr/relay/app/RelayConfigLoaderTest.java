@@ -6,6 +6,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.assertj.core.api.Assertions.entry;
 
 import com.swirlds.config.api.validation.ConfigViolationException;
+import java.math.BigInteger;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Properties;
@@ -27,7 +28,7 @@ class RelayConfigLoaderTest {
     void noConfigFile_yieldsDefaultsAndEmptyTopology() {
         final var config = RelayConfigLoader.load(null, new Properties());
 
-        assertThat(config.sync().port()).isEqualTo(9545);
+        assertThat(config.grpc().port()).isEqualTo(9545);
         assertThat(config.grpc().maxMessageSize()).isEqualTo(1_048_576);
         assertThat(config.localNetworks()).isEmpty();
         assertThat(config.clprServices()).isEmpty();
@@ -40,11 +41,11 @@ class RelayConfigLoaderTest {
     @Test
     void noConfigFile_systemPropertiesOverrideGrpcDefaults() {
         final var overrides = new Properties();
-        overrides.setProperty("relay.grpc.sync.port", "12345");
+        overrides.setProperty("relay.grpc.port", "12345");
 
         final var config = RelayConfigLoader.load(null, overrides);
 
-        assertThat(config.sync().port()).isEqualTo(12345);
+        assertThat(config.grpc().port()).isEqualTo(12345);
         assertThat(config.clprServices()).isEmpty();
     }
 
@@ -53,15 +54,14 @@ class RelayConfigLoaderTest {
         final var yaml = tmp.resolve("relay-config.yaml");
         Files.writeString(yaml, """
                 grpc:
-                  sync:
-                    port: 9000
+                  port: 9000
                 """);
         final var overrides = new Properties();
-        overrides.setProperty("relay.grpc.sync.port", "7777");
+        overrides.setProperty("relay.grpc.port", "7777");
 
         final var config = RelayConfigLoader.load(yaml, overrides);
 
-        assertThat(config.sync().port()).isEqualTo(7777);
+        assertThat(config.grpc().port()).isEqualTo(7777);
     }
 
     @Test
@@ -140,6 +140,178 @@ class RelayConfigLoaderTest {
         assertThat(net.qbft().epochLength()).isEqualTo(30_000L);
         assertThat(net.qbft().maxEpochBlockHeadersPerBundle()).isEqualTo(5);
         assertThat(net.qbft().maxMessagesPerBundle()).isEqualTo(10);
+        assertThat(net.qbftContractMode()).isNull();
+    }
+
+    @Test
+    void localNetwork_qbftContractMode_parsed(@TempDir final Path tmp) throws Exception {
+        final var yaml = tmp.resolve("qbft-contract-mode.yaml");
+        Files.writeString(yaml, """
+                localNetworks:
+                  - id: minimal
+                    proofType: QBFTContractMode
+                    evm: {}
+                    qbftContractMode:
+                      validatorContractAddress: "0xdeaddeaddeaddeaddeaddeaddeaddeaddeaddead"
+                      arraySlotHex: "0x02"
+                      maxMessagesPerBundle: 7
+                """);
+
+        final var config = RelayConfigLoader.load(yaml, new Properties());
+
+        final var net = config.localNetworks().getFirst();
+        assertThat(net.proofType()).isEqualTo(ProofType.QBFTContractMode);
+        assertThat(net.qbft()).isNull();
+        final var qbftContractMode = net.qbftContractMode();
+        assertThat(qbftContractMode).isNotNull();
+        assertThat(qbftContractMode.validatorContractAddress()).isEqualTo("0xdeaddeaddeaddeaddeaddeaddeaddeaddeaddead");
+        assertThat(qbftContractMode.arraySlotHex()).isEqualTo("0x02");
+        assertThat(qbftContractMode.arraySlot()).isEqualTo(BigInteger.TWO);
+        assertThat(qbftContractMode.maxMessagesPerBundle()).isEqualTo(7);
+    }
+
+    @Test
+    void localNetwork_qbftContractMode_defaultMaxMessagesPerBundle_whenOmitted(@TempDir final Path tmp)
+            throws Exception {
+        final var yaml = tmp.resolve("qbft-contract-mode-defaults.yaml");
+        Files.writeString(yaml, """
+                localNetworks:
+                  - id: minimal
+                    proofType: QBFTContractMode
+                    evm: {}
+                    qbftContractMode:
+                      validatorContractAddress: "0xdeaddeaddeaddeaddeaddeaddeaddeaddeaddead"
+                      arraySlotHex: "0x02"
+                """);
+
+        final var config = RelayConfigLoader.load(yaml, new Properties());
+
+        assertThat(config.localNetworks().getFirst().qbftContractMode().maxMessagesPerBundle())
+                .isEqualTo(10);
+    }
+
+    @Test
+    void localNetwork_qbftContractMode_missingBlock_failsFast(@TempDir final Path tmp) throws Exception {
+        final var yaml = tmp.resolve("qbft-contract-mode-missing-block.yaml");
+        Files.writeString(yaml, """
+                localNetworks:
+                  - id: minimal
+                    proofType: QBFTContractMode
+                    evm: {}
+                """);
+
+        assertThatThrownBy(() -> RelayConfigLoader.load(yaml, new Properties()))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("qbftContractMode");
+    }
+
+    @Test
+    void localNetwork_qbftContractMode_missingAddress_failsFast(@TempDir final Path tmp) throws Exception {
+        final var yaml = tmp.resolve("qbft-contract-mode-missing-address.yaml");
+        Files.writeString(yaml, """
+                localNetworks:
+                  - id: minimal
+                    proofType: QBFTContractMode
+                    evm: {}
+                    qbftContractMode:
+                      arraySlotHex: "0x02"
+                """);
+
+        assertThatThrownBy(() -> RelayConfigLoader.load(yaml, new Properties()))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("validatorContractAddress");
+    }
+
+    @Test
+    void localNetwork_qbftContractMode_invalidAddress_failsFast(@TempDir final Path tmp) throws Exception {
+        final var yaml = tmp.resolve("qbft-contract-mode-invalid-address.yaml");
+        Files.writeString(yaml, """
+                localNetworks:
+                  - id: minimal
+                    proofType: QBFTContractMode
+                    evm: {}
+                    qbftContractMode:
+                      validatorContractAddress: "not-an-address"
+                      arraySlotHex: "0x02"
+                """);
+
+        assertThatThrownBy(() -> RelayConfigLoader.load(yaml, new Properties()))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("validatorContractAddress");
+    }
+
+    @Test
+    void localNetwork_qbftContractMode_missingArraySlot_failsFast(@TempDir final Path tmp) throws Exception {
+        final var yaml = tmp.resolve("qbft-contract-mode-missing-slot.yaml");
+        Files.writeString(yaml, """
+                localNetworks:
+                  - id: minimal
+                    proofType: QBFTContractMode
+                    evm: {}
+                    qbftContractMode:
+                      validatorContractAddress: "0xdeaddeaddeaddeaddeaddeaddeaddeaddeaddead"
+                """);
+
+        assertThatThrownBy(() -> RelayConfigLoader.load(yaml, new Properties()))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("arraySlotHex");
+    }
+
+    @Test
+    void localNetwork_qbftContractMode_invalidArraySlotHex_failsFast(@TempDir final Path tmp) throws Exception {
+        final var yaml = tmp.resolve("qbft-contract-mode-invalid-slot.yaml");
+        Files.writeString(yaml, """
+                localNetworks:
+                  - id: minimal
+                    proofType: QBFTContractMode
+                    evm: {}
+                    qbftContractMode:
+                      validatorContractAddress: "0xdeaddeaddeaddeaddeaddeaddeaddeaddeaddead"
+                      arraySlotHex: "0xzz"
+                """);
+
+        assertThatThrownBy(() -> RelayConfigLoader.load(yaml, new Properties()))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("arraySlotHex")
+                .hasMessageContaining("not a valid storage slot");
+    }
+
+    @Test
+    void localNetwork_qbftContractMode_arraySlotHexTooLarge_failsFast(@TempDir final Path tmp) throws Exception {
+        final var yaml = tmp.resolve("qbft-contract-mode-slot-too-large.yaml");
+        Files.writeString(yaml, """
+                localNetworks:
+                  - id: minimal
+                    proofType: QBFTContractMode
+                    evm: {}
+                    qbftContractMode:
+                      validatorContractAddress: "0xdeaddeaddeaddeaddeaddeaddeaddeaddeaddead"
+                      arraySlotHex: "0x1%s"
+                """.formatted("0".repeat(64)));
+
+        assertThatThrownBy(() -> RelayConfigLoader.load(yaml, new Properties()))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("arraySlotHex")
+                .hasMessageContaining("not a valid storage slot");
+    }
+
+    @Test
+    void localNetwork_qbftContractMode_negativeArraySlot_failsFast(@TempDir final Path tmp) throws Exception {
+        final var yaml = tmp.resolve("qbft-contract-mode-negative-slot.yaml");
+        Files.writeString(yaml, """
+                localNetworks:
+                  - id: minimal
+                    proofType: QBFTContractMode
+                    evm: {}
+                    qbftContractMode:
+                      validatorContractAddress: "0xdeaddeaddeaddeaddeaddeaddeaddeaddeaddead"
+                      arraySlotHex: "-2"
+                """);
+
+        assertThatThrownBy(() -> RelayConfigLoader.load(yaml, new Properties()))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("arraySlotHex")
+                .hasMessageContaining("not a valid storage slot");
     }
 
     @Test
@@ -237,6 +409,64 @@ class RelayConfigLoaderTest {
     }
 
     @Test
+    void ethereumPosLocalNetwork_parsedWithBeaconBlock(@TempDir final Path tmp) throws Exception {
+        final var yaml = tmp.resolve("ethereum-pos.yaml");
+        Files.writeString(yaml, """
+                signingPrivateKeyHex: "0xaabbccdd"
+                localNetworks:
+                  - id: ethereum-local
+                    proofType: EthereumPOS
+                    evm:
+                      jsonRpcUrl: "http://eth:8545"
+                      chainId: 1
+                    beacon:
+                      beaconApiUrl: "http://eth:5052"
+                      maxMessagesPerBundle: 7
+                      maxRetries: 9
+                      requestTimeoutMs: 12000
+                """);
+
+        final var config = RelayConfigLoader.load(yaml, new Properties());
+
+        final var net = config.localNetworks().getFirst();
+        assertThat(net.proofType()).isEqualTo(ProofType.EthereumPOS);
+        assertThat(net.evm()).isNotNull();
+        assertThat(net.evm().jsonRpcUrl()).isEqualTo("http://eth:8545");
+        assertThat(net.cometBft()).isNull();
+        assertThat(net.qbft()).isNull();
+        assertThat(net.beacon()).isNotNull();
+        assertThat(net.beacon().beaconApiUrl()).isEqualTo("http://eth:5052");
+        assertThat(net.beacon().maxMessagesPerBundle()).isEqualTo(7);
+        assertThat(net.beacon().maxRetries()).isEqualTo(9);
+        assertThat(net.beacon().requestTimeoutMs()).isEqualTo(12000L);
+    }
+
+    @Test
+    void ethereumPosLocalNetwork_beaconDefaultsWhenBlockAbsentAndProofTypeIsCaseInsensitive(@TempDir final Path tmp)
+            throws Exception {
+        final var yaml = tmp.resolve("ethereum-pos-defaults.yaml");
+        Files.writeString(yaml, """
+                signingPrivateKeyHex: "0xaabbccdd"
+                localNetworks:
+                  - id: ethereum-local
+                    proofType: ethereumpos
+                    evm:
+                      jsonRpcUrl: "http://eth:8545"
+                """);
+
+        final var config = RelayConfigLoader.load(yaml, new Properties());
+
+        final var net = config.localNetworks().getFirst();
+        assertThat(net.proofType()).isEqualTo(ProofType.EthereumPOS);
+        // A missing `beacon:` block yields an all-defaults BeaconConfig (never null for EthereumPOS).
+        assertThat(net.beacon()).isNotNull();
+        assertThat(net.beacon().beaconApiUrl()).isEqualTo("http://localhost:5052");
+        assertThat(net.beacon().maxMessagesPerBundle()).isEqualTo(10);
+        assertThat(net.beacon().maxRetries()).isEqualTo(3);
+        assertThat(net.beacon().requestTimeoutMs()).isEqualTo(30000L);
+    }
+
+    @Test
     void localNetwork_invalidProofType_failsFast(@TempDir final Path tmp) throws Exception {
         final var yaml = tmp.resolve("bad-proof-type.yaml");
         Files.writeString(yaml, """
@@ -305,7 +535,7 @@ class RelayConfigLoaderTest {
 
         final var config = RelayConfigLoader.load(yaml, new Properties());
 
-        assertThat(config.sync().port()).isEqualTo(9545);
+        assertThat(config.grpc().port()).isEqualTo(9545);
         assertThat(config.peerProofTypes()).containsEntry("eip155:1337", ProofType.QBFT);
 
         assertThat(config.localNetworks()).hasSize(1);
@@ -357,6 +587,7 @@ class RelayConfigLoaderTest {
     void multipleServicesOnSameNetwork_isValid(@TempDir final Path tmp) throws Exception {
         final var yaml = tmp.resolve("two-services.yaml");
         Files.writeString(yaml, """
+                signingPrivateKeyHex: "0xaabbccdd"
                 localNetworks:
                   - id: chain-a
                     proofType: QBFT
@@ -513,6 +744,35 @@ class RelayConfigLoaderTest {
         assertThat(config.peerProofTypes()).containsExactly(entry("eip155:9999", ProofType.CometBFT));
     }
 
+    @Test
+    void peerProofTypes_notAMap_failsFast(@TempDir final Path tmp) throws Exception {
+        // A scalar where a chainId -> proofType map is expected must fail startup with a clear message.
+        final var yaml = tmp.resolve("bad-peer-proof-types.yaml");
+        Files.writeString(yaml, """
+                peerProofTypes: "not-a-map"
+                """);
+
+        assertThatThrownBy(() -> RelayConfigLoader.load(yaml, new Properties()))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("Invalid relay config file")
+                .hasMessageContaining("not-a-map");
+    }
+
+    @Test
+    void peerProofTypes_valueNotAProofTypeString_failsFast(@TempDir final Path tmp) throws Exception {
+        // A nested object where a proof-type string is expected must fail startup.
+        final var yaml = tmp.resolve("bad-peer-proof-value.yaml");
+        Files.writeString(yaml, """
+                peerProofTypes:
+                  "eip155:1":
+                    nested: value
+                """);
+
+        assertThatThrownBy(() -> RelayConfigLoader.load(yaml, new Properties()))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("Invalid relay config file");
+    }
+
     // -------------------------------------------------------------------------
     // Signing-key validation
     // -------------------------------------------------------------------------
@@ -605,130 +865,58 @@ class RelayConfigLoaderTest {
     }
 
     // -------------------------------------------------------------------------
-    // Transport validation: one sync listener (plaintext or mTLS) + an always-plaintext info listener
+    // gRPC port validation
     // -------------------------------------------------------------------------
 
     @Test
-    void transportDefaults_syncAndInfoPlaintext() {
-        final var config = RelayConfigLoader.load(null, new Properties());
-
-        assertThat(config.sync().port()).isEqualTo(9545);
-        assertThat(config.info().port()).isEqualTo(9546);
-        assertThat(config.sync().tlsEnabled()).isFalse();
-    }
-
-    @Test
-    void syncPortZero_failsFast() {
+    void grpcPortZero_failsFast() {
         final var overrides = new Properties();
-        overrides.setProperty("relay.grpc.sync.port", "0");
+        overrides.setProperty("relay.grpc.port", "0");
 
         assertThatThrownBy(() -> RelayConfigLoader.load(null, overrides))
                 .isInstanceOf(IllegalArgumentException.class)
-                .hasMessageContaining("relay.grpc.sync.port must be > 0");
+                .hasMessageContaining("relay.grpc.port must be > 0");
     }
 
     @Test
-    void infoPortZero_failsFast() {
-        final var overrides = new Properties();
-        overrides.setProperty("relay.grpc.info.port", "0");
-
-        assertThatThrownBy(() -> RelayConfigLoader.load(null, overrides))
-                .isInstanceOf(IllegalArgumentException.class)
-                .hasMessageContaining("relay.grpc.info.port must be > 0");
-    }
-
-    @Test
-    void tlsEnabledWithoutKey_failsFast() {
-        final var overrides = new Properties();
-        overrides.setProperty("relay.grpc.sync.tlsEnabled", "true"); // no key supplied
-
-        assertThatThrownBy(() -> RelayConfigLoader.load(null, overrides))
-                .isInstanceOf(IllegalArgumentException.class)
-                .hasMessageContaining("tlsKeyPath must be set");
-    }
-
-    @Test
-    void tlsDisabled_ignoresKey() {
-        final var overrides = new Properties();
-        // tlsEnabled defaults to false, so a bogus (unreadable) key path is ignored rather than validated.
-        overrides.setProperty("relay.grpc.sync.tlsKeyPath", "/no/such/key.pem");
-
-        final var config = RelayConfigLoader.load(null, overrides);
-
-        assertThat(config.sync().tlsEnabled()).isFalse();
-    }
-
-    @Test
-    void syncAndInfoSamePort_failsFast() {
-        final var overrides = new Properties();
-        overrides.setProperty("relay.grpc.info.port", "9545"); // collides with the default sync port
-
-        assertThatThrownBy(() -> RelayConfigLoader.load(null, overrides))
-                .isInstanceOf(IllegalArgumentException.class)
-                .hasMessageContaining("must differ");
-    }
-
-    @Test
-    void syncTlsKeyMissingFile_failsFast() {
-        final var overrides = new Properties();
-        overrides.setProperty("relay.grpc.sync.tlsEnabled", "true");
-        overrides.setProperty("relay.grpc.sync.tlsKeyPath", "/no/such/key.pem");
-
-        assertThatThrownBy(() -> RelayConfigLoader.load(null, overrides))
-                .isInstanceOf(IllegalArgumentException.class)
-                .hasMessageContaining("not readable");
-    }
-
-    @Test
-    void secureSync_withReadableKey_loads(@TempDir final Path tmp) throws Exception {
-        final var key = Files.writeString(tmp.resolve("key.pem"), "dummy-key");
-        final var overrides = new Properties();
-        overrides.setProperty("relay.grpc.sync.tlsEnabled", "true");
-        overrides.setProperty("relay.grpc.sync.tlsKeyPath", key.toString());
-
-        final var config = RelayConfigLoader.load(null, overrides);
-
-        assertThat(config.sync().port()).isEqualTo(9545);
-        assertThat(config.info().port()).isEqualTo(9546);
-        assertThat(config.sync().tlsEnabled()).isTrue();
-        assertThat(config.sync().tlsKeyPath()).isEqualTo(key.toString());
-    }
-
-    @Test
-    void plaintextSync_fromYamlRoundTrips(@TempDir final Path tmp) throws Exception {
-        final var yaml = tmp.resolve("plain.yaml");
+    void grpcPort_fromYamlFile(@TempDir final Path tmp) throws Exception {
+        final var yaml = tmp.resolve("ports.yaml");
         Files.writeString(yaml, """
                 grpc:
-                  info:
-                    port: 9700
-                  sync:
-                    port: 9545
-                signingPrivateKeyHex: "0xaabbccdd"
+                  port: 9700
                 """);
 
         final var config = RelayConfigLoader.load(yaml, new Properties());
 
-        assertThat(config.sync().port()).isEqualTo(9545);
-        assertThat(config.info().port()).isEqualTo(9700);
+        assertThat(config.grpc().port()).isEqualTo(9700);
     }
 
     @Test
-    void secureSync_yamlRoundTrip(@TempDir final Path tmp) throws Exception {
-        final var key = Files.writeString(tmp.resolve("k.pem"), "y");
-        final var yaml = tmp.resolve("secure.yaml");
+    void maxBundleSize_defaultsAndParsesFromYaml(@TempDir final Path tmp) throws Exception {
+        final var yaml = tmp.resolve("maxbundle.yaml");
         Files.writeString(yaml, """
-                grpc:
-                  sync:
-                    port: 9600
-                    tlsEnabled: true
-                    tlsKeyPath: "%s"
-                signingPrivateKeyHex: "0xaabbccdd"
-                """.formatted(key));
+                localNetworks:
+                  - id: besu1
+                    proofType: QBFT
+                    evm: {}
+                  - id: sei1
+                    proofType: CometBFT
+                    evm: {}
+                    cometBft:
+                      maxBundleSize: 2048
+                """);
 
         final var config = RelayConfigLoader.load(yaml, new Properties());
 
-        assertThat(config.sync().port()).isEqualTo(9600);
-        assertThat(config.sync().tlsEnabled()).isTrue();
-        assertThat(config.sync().tlsKeyPath()).isEqualTo(key.toString());
+        final var qbft = config.localNetworks().stream()
+                .filter(n -> n.proofType() == ProofType.QBFT)
+                .findFirst()
+                .orElseThrow();
+        final var cometBft = config.localNetworks().stream()
+                .filter(n -> n.proofType() == ProofType.CometBFT)
+                .findFirst()
+                .orElseThrow();
+        assertThat(qbft.qbft().maxBundleSize()).isEqualTo(1_048_576L); // default when omitted
+        assertThat(cometBft.cometBft().maxBundleSize()).isEqualTo(2_048L); // from yaml
     }
 }

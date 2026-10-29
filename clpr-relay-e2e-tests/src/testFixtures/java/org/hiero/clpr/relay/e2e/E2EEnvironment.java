@@ -59,12 +59,38 @@ public interface E2EEnvironment extends AutoCloseable {
     /**
      * Directory for this test's artifacts — container logs, metric scrapes, chain dumps.
      *
-     * <p>Only created and populated when a test <b>fails</b>. A passing test leaves nothing behind, so
-     * the presence of a directory under {@code build/e2e-output} means something failed there.
+     * <p>Populated by the framework according to the {@code clpr.e2e.keepArtifacts} policy:
+     * {@code failure} (default; only failed tests write here), {@code always} (every test writes,
+     * with {@code success.txt} vs {@code failure.txt} as the summary marker), or {@code never}
+     * (nothing written). The directory is created on demand.
      *
      * @return the output directory (created on demand, may not exist)
      */
     Path outputDirectory();
+
+    /**
+     * Route endpoint-to-endpoint sync traffic through a Toxiproxy sidecar so tests can disconnect
+     * two relays cleanly, without also cutting them off from their chains.
+     *
+     * <p>Must be called <b>before</b> {@link #startAll()}: the channel wiring publishes each
+     * endpoint's dial address in the on-chain peer roster, and once that address is on chain the
+     * shim cannot re-route existing peers to itself. Idempotent; a second call is a no-op.
+     *
+     * <p>Peers keep dialing the same address they always would; the address just points at Toxiproxy
+     * instead of the endpoint itself. Chain traffic is not touched — for a chain outage, use
+     * {@link org.hiero.clpr.relay.e2e.fault.Faults#pauseChain(org.hiero.clpr.relay.e2e.chain.BesuNetwork)}.
+     */
+    void enablePeerNetworkShim();
+
+    /**
+     * Bring the chains up and deploy the primary CLPR stack on each, without wiring channels or
+     * starting endpoints yet. Idempotent — folded into {@link #startAll()} automatically.
+     *
+     * <p>Exposed as a separate step so additional {@code ClprService} deployments (see
+     * {@link org.hiero.clpr.relay.e2e.chain.BesuNetwork#deployAdditionalService()}) can be made
+     * against a running chain before {@link #startAll()} wires the channels that reference them.
+     */
+    void prepareContracts();
 
     /**
      * Bring up everything declared so far, in dependency order: chains, then contracts, then

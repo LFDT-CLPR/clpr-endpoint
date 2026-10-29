@@ -159,44 +159,4 @@ class UnderfundedConnectorE2ETest {
                 .as("the channel kept delivering after the connector was replaced")
                 .isEqualTo(receivedBefore + 4);
     }
-
-    @E2ETest(timeoutSeconds = 900)
-    void relay_survives_a_transient_chain_outage(final E2EEnvironment env) {
-        final BesuNetwork besuA = env.besuNetworks().add(BesuNetworkSpec.singleNode());
-        final BesuNetwork besuB = env.besuNetworks().add(BesuNetworkSpec.singleNode());
-        final EvmEndpoint epA = env.endpoints().add(EvmEndpointSpec.defaults().withId("ep-a"));
-        final EvmEndpoint epB = env.endpoints().add(EvmEndpointSpec.defaults().withId("ep-b"));
-        final Channel channel =
-                env.channels().create(ChannelSpec.between(besuA, besuB).endpoints(epA, epB));
-
-        env.startAll();
-
-        // Sanity: the channel delivers before the outage, so a post-outage failure is attributable.
-        final InjectionRun before = env.messages().enqueue(channel.a(), 2, MessageShape.small());
-        before.awaitAllConfirmed(Duration.ofMinutes(2));
-        env.await().peerReceivedAll(channel.a(), before.messageIds(), Duration.ofMinutes(4));
-
-        // Freeze chain B. Pausing rather than stopping keeps the ports mapped, so the relay sees RPC
-        // timeouts — the shape a real node outage has from a client — instead of connection refusals.
-        env.faults().pauseChain(besuB);
-        try {
-            // Long enough for the per-channel loops to fail repeatedly and back off.
-            Thread.sleep(Duration.ofSeconds(20).toMillis());
-        } catch (final InterruptedException e) {
-            Thread.currentThread().interrupt();
-            throw new AssertionError("interrupted during the outage window");
-        } finally {
-            env.faults().unpauseChain(besuB);
-        }
-
-        // Recovery is the assertion: a message queued after the outage must still be delivered, which
-        // only holds if both per-channel loops survived their failures instead of dying.
-        final long receivedBefore = channel.b().state().receivedMessageId();
-        final InjectionRun after = env.messages().enqueue(channel.a(), 2, MessageShape.small());
-        after.awaitAllConfirmed(Duration.ofMinutes(3));
-        env.await().peerReceived(channel.a(), receivedBefore + 2, Duration.ofMinutes(3));
-        env.await().queueDrained(channel.a(), Duration.ofMinutes(3));
-
-        assertThat(channel.b().state().receivedMessageId()).isEqualTo(receivedBefore + 2);
-    }
 }

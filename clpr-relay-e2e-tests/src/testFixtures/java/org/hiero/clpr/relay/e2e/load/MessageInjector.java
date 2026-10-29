@@ -64,7 +64,7 @@ public final class MessageInjector {
                     ClprAbi.sendMessage(side.channelId(), side.connector().id(), targetApp, shape.payload(i));
             final PipelinedTxSubmitter sender = senders.get(i % senders.size());
             try {
-                run.recordSubmitted(sender.submit(net.contracts().clprService(), callData, 0L, SEND_GAS_LIMIT));
+                run.recordSubmitted(sender.submit(side.clprServiceAddress(), callData, 0L, SEND_GAS_LIMIT));
             } catch (final RuntimeException e) {
                 // A send-side rejection never reaches the pool, so it has no receipt to reconcile.
                 // Recording it separately keeps "the send side failed" distinct from "the relay
@@ -134,7 +134,7 @@ public final class MessageInjector {
                         ClprAbi.sendMessage(side.channelId(), side.connector().id(), targetApp, shape.payload(sent));
                 final PipelinedTxSubmitter sender = senders.get(sent % senders.size());
                 try {
-                    run.recordSubmitted(sender.submit(net.contracts().clprService(), callData, 0L, SEND_GAS_LIMIT));
+                    run.recordSubmitted(sender.submit(side.clprServiceAddress(), callData, 0L, SEND_GAS_LIMIT));
                 } catch (final RuntimeException e) {
                     run.recordRejected(shortReason(e));
                     sender.resetNonce();

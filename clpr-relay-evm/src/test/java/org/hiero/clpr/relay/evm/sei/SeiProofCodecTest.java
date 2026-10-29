@@ -90,7 +90,7 @@ class SeiProofCodecTest {
         assertThat(parsed.messages()).hasSize(1);
         assertThat(parsed.messages().get(0).message().messageData()).isEqualTo(Bytes.wrap("hello".getBytes()));
         // The raw proof bytes pass through unchanged for on-chain submission.
-        assertThat(parsed.rawProofBytes()).isEqualTo(proof);
+        assertThat(parsed.rawBundleBytes()).isEqualTo(proof);
     }
 
     @Test
@@ -109,7 +109,7 @@ class SeiProofCodecTest {
         final ParsedBundle parsed = trim(proof, 0L);
 
         assertThat(parsed.messages()).hasSize(1);
-        assertThat(parsed.rawProofBytes()).isEqualTo(proof);
+        assertThat(parsed.rawBundleBytes()).isEqualTo(proof);
     }
 
     @Test
@@ -121,7 +121,7 @@ class SeiProofCodecTest {
 
         assertThat(parsed.messages()).hasSize(1);
         assertThat(parsed.metadata().nextMessageId()).isEqualTo(6L);
-        final ParsedBundle reparsed = codec.decodeBundle(parsed.rawProofBytes());
+        final ParsedBundle reparsed = codec.decodeBundle(parsed.rawBundleBytes());
         assertThat(reparsed.messages()).hasSize(1);
         assertThat(reparsed.messages().get(0).message().messageData()).isEqualTo(Bytes.wrap("m5".getBytes()));
     }
@@ -138,11 +138,11 @@ class SeiProofCodecTest {
         final ParsedBundle parsed = trim(proof, 1L);
 
         assertThat(parsed.messages()).isEmpty();
-        final ParsedBundle reparsed = codec.decodeBundle(parsed.rawProofBytes());
+        final ParsedBundle reparsed = codec.decodeBundle(parsed.rawBundleBytes());
         assertThat(reparsed.messages()).isEmpty();
         assertThat(reparsed.metadata().nextMessageId()).isEqualTo(2L);
         // The running-hash entry is gone; the two unrelated entries survive.
-        final ClprSeiBundlePayload rebuilt = readPayload(parsed.rawProofBytes());
+        final ClprSeiBundlePayload rebuilt = readPayload(parsed.rawBundleBytes());
         assertThat(rebuilt.stateProof().storageProofs()).hasSize(2);
         final byte[] droppedSlot = AbiCodec.encodeUint256(
                 ClprServiceStorageLayout.calculateMsgRunningHashStorageSlot(channelId, BigInteger.ONE));
@@ -168,7 +168,7 @@ class SeiProofCodecTest {
         final ParsedBundle parsed = trim(proof, 4L);
 
         assertThat(parsed.messages()).hasSize(1);
-        final ClprSeiBundlePayload rebuilt = readPayload(parsed.rawProofBytes());
+        final ClprSeiBundlePayload rebuilt = readPayload(parsed.rawBundleBytes());
         assertThat(rebuilt.hasManifestStorageProof()).isTrue();
         assertThat(rebuilt.manifestStorageProof()).isEqualTo(manifestEntry);
         assertThat(rebuilt.endpointManifest()).isEqualTo(manifestPreimage);

@@ -5,13 +5,16 @@ import java.nio.file.Path;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.function.IntFunction;
+import org.hiero.clpr.relay.e2e.fault.EvmRpcFilterProxy;
 import org.hiero.clpr.relay.evm.AbiCodec;
 import org.hiero.clpr.relay.evm.EthSigner;
 import org.hiero.clpr.relay.evm.jsonrpc.EvmJsonRpcClient;
 import org.hiero.clpr.relay.evm.testfixtures.TestEvmJsonRpcClient;
 import org.hiero.clpr.relay.integration.AnvilTxSubmitter;
 import org.hiero.clpr.relay.integration.ContractInteractor;
+import org.hiero.clpr.relay.integration.DeployedContracts;
 import org.hiero.clpr.relay.integration.TestConditions;
 import org.jspecify.annotations.Nullable;
 import org.testcontainers.containers.Network;
@@ -70,6 +73,14 @@ public final class BesuNetwork {
     @Nullable
     private ContractInteractor interactor;
 
+    /**
+     * Method-aware JSON-RPC proxy in front of the primary node, when the spec opts in. Endpoints
+     * dial this instead of the node directly, so a test can block specific methods without
+     * freezing the whole chain.
+     */
+    @Nullable
+    private EvmRpcFilterProxy rpcFilterProxy;
+
     BesuNetwork(
             final BesuNetworkSpec spec,
             final int networkIndex,
@@ -100,7 +111,14 @@ public final class BesuNetwork {
         // sequences on one address surface as `nonce too low`, which is indistinguishable from the
         // relay-side submission bug this suite exists to catch.
         this.deployerAccount = accounts.allocate(spec.id() + " deployer");
-        this.genesis = new BesuQbftGenesis(spec, validatorKeys, accounts.all());
+        // Give the deployer a much larger genesis balance than the other accounts. It funds every
+        // per-channel connector top-up ({@link ChannelSpec#DEFAULT_CONNECTOR_FUNDING_WEI}, 1 ETH),
+        // so at ten channels the total outflow already exceeds a default-balance account.
+        this.genesis = new BesuQbftGenesis(
+                spec,
+                validatorKeys,
+                accounts.all(),
+                Map.of(deployerAccount.address(), BesuQbftGenesis.DEPLOYER_BALANCE_WEI));
 
         for (int i = 0; i < spec.nodeCount(); i++) {
             final boolean isValidator = i < spec.validatorCount();
@@ -116,7 +134,8 @@ public final class BesuNetwork {
                     hostAddresses.apply(NODE_HOST_BASE + networkIndex * NODE_HOSTS_PER_NETWORK + i),
                     dockerNetwork,
                     workDir.resolve(nodeId),
-                    heapMb));
+                    heapMb,
+                    this::refreshHostClientsIfPrimaryUp));
         }
     }
 
@@ -185,6 +204,25 @@ public final class BesuNetwork {
         return primaryNode().internalJsonRpcUrl();
     }
 
+    /**
+     * URL an endpoint container should dial for this chain. Points at the filter proxy when the
+     * spec enabled it, otherwise at the primary node. Kept separate from {@link #internalJsonRpcUrl}
+     * so the test JVM's own clients (which always want to hit the real node, not the proxy) are
+     * unaffected by opting the endpoint side into filtering.
+     */
+    public String endpointRpcUrl() {
+        return rpcFilterProxy != null ? rpcFilterProxy.internalRpcUrl() : internalJsonRpcUrl();
+    }
+
+    /**
+     * @return the filter proxy for fault injection, or {@code null} if the spec did not opt in via
+     *     {@link BesuNetworkSpec#withRpcFilterProxy()}.
+     */
+    @Nullable
+    public EvmRpcFilterProxy rpcFilterProxy() {
+        return rpcFilterProxy;
+    }
+
     /** @return the relay's JSON-RPC client, pointed at the primary node. */
     public EvmJsonRpcClient rpc() {
         return requireStarted(rpc, "rpc()");
@@ -233,9 +271,8 @@ public final class BesuNetwork {
             }
         }
 
-        this.rpc = new TestEvmJsonRpcClient(primaryNode().jsonRpcUrl());
-        this.rawRpc = new RawJsonRpc(primaryNode().jsonRpcUrl());
-        this.inspector = new ChainInspector(rawRpc);
+        // rpc/rawRpc/inspector were already built by the per-node onStarted callback that fired
+        // from BesuNode.start() as each node came up — no explicit construction needed here.
 
         TestConditions.awaitCondition(Duration.ofMinutes(2), Duration.ofMillis(500), () -> {
             try {
@@ -244,6 +281,29 @@ public final class BesuNetwork {
                 return false; // node still coming up
             }
         });
+
+        // Start the RPC filter proxy after the primary node is up: the proxy's upstream is the
+        // node's docker-alias URL, which does not resolve until the node's container is running.
+        // Roll back the started nodes on proxy failure — otherwise a proxy that fails to come up
+        // leaves the whole chain running for the rest of the suite when the caller's teardown is
+        // not reached.
+        if (spec.rpcFilterProxy()) {
+            final EvmRpcFilterProxy proxy = new EvmRpcFilterProxy(
+                    spec.id() + "-rpc-filter", primaryNode().id(), BesuNode.RPC_PORT, dockerNetwork);
+            try {
+                proxy.start();
+            } catch (final RuntimeException e) {
+                for (final BesuNode node : nodes) {
+                    try {
+                        node.stop();
+                    } catch (final RuntimeException ignored) {
+                        // best-effort
+                    }
+                }
+                throw e;
+            }
+            this.rpcFilterProxy = proxy;
+        }
     }
 
     /** @return the account that deploys contracts and performs on-chain administration. */
@@ -272,23 +332,18 @@ public final class BesuNetwork {
     }
 
     /**
-     * An on-chain control surface bound to an arbitrary account on this chain.
+     * Bound to a specific {@link DeployedContracts}
+     * rather than this chain's primary stack. Used by tests that deploy additional
+     * {@code ClprService} instances via {@link #deployAdditionalService()} and need to target them
+     * for endpoint registration, channel wiring, and state reads.
      *
-     * <p>Needed because {@code registerEndpoint} admits {@code msg.sender}: each relay submits with
-     * its own signing key, so that key — not the deployer's — has to be the registered endpoint, or
-     * every {@code submitBundle} reverts.
-     *
-     * @param account the account to act as
-     * @return an interactor signing with that account
+     * @param account the account the interactor signs as
+     * @param deployedContracts the CLPR core the interactor operates against
+     * @return the interactor
      */
-    public ContractInteractor interactorFor(final TestAccount account) {
+    public ContractInteractor interactorFor(final TestAccount account, final DeployedContracts deployedContracts) {
         final EthSigner signer = new EthSigner(account.privateKeyHex());
-        return new ContractInteractor(
-                rpc(),
-                submitterFor(account),
-                signer,
-                account.publicKey64(),
-                contracts().core());
+        return new ContractInteractor(rpc(), submitterFor(account), signer, account.publicKey64(), deployedContracts);
     }
 
     /**
@@ -323,6 +378,89 @@ public final class BesuNetwork {
         interactor.bootstrapDefaults(AbiCodec.fromHex(contracts.clprService()));
     }
 
+    /**
+     * Deploy a second independent CLPR stack on this chain, alongside {@link #contracts()}.
+     *
+     * <p>Yields a fresh {@code ClprService} + {@code QBFTVerifier} + {@code E2EApplication} triple
+     * at distinct addresses and runs {@code bootstrapDefaults} on the new service so it is enabled
+     * and ready to accept channel wiring, matching what {@link #deployContracts()} does for the
+     * primary stack.
+     *
+     * @return the additional stack's addresses
+     * @throws IllegalStateException if called before {@link #deployContracts()} has run
+     */
+    public E2eContracts deployAdditionalService() {
+        final E2eContractDeployer d = requireStarted(deployer, "deployAdditionalService()");
+        final E2eContracts extra = d.deployChainStack(caip2());
+        final EthSigner signer = new EthSigner(deployerAccount.privateKeyHex());
+        final ContractInteractor extraInteractor =
+                new ContractInteractor(rpc(), deployerSubmitter, signer, deployerAccount.publicKey64(), extra.core());
+        extraInteractor.bootstrapDefaults(AbiCodec.fromHex(extra.clprService()));
+        return extra;
+    }
+
+    /**
+     * Callback fired from each {@link BesuNode}'s {@code start()}. Skips the refresh when the
+     * primary node is not running — that happens when a non-primary node is restarted while the
+     * primary is still down, and there is nothing meaningful to rebuild a client against.
+     */
+    private void refreshHostClientsIfPrimaryUp() {
+        if (!primaryNode().isRunning()) {
+            return;
+        }
+        refreshHostClients();
+    }
+
+    /**
+     * Stop every node and delete its data volume. Terminal — for environment teardown only.
+     *
+     * <p>Separate from {@link #stop()} because that one is a restart point: a test may stop a chain
+     * and bring it back up expecting its state. Deleting the volumes there would silently turn every
+     * such restart into a reset to genesis.
+     */
+    public void destroy() {
+        stop();
+        for (final BesuNode node : nodes) {
+            node.discardState();
+        }
+    }
+
+    /**
+     * Rebuild every host-JVM-facing client so it points at the primary node's current mapped port.
+     *
+     * <p>Testcontainers assigns a fresh host port whenever a container is recreated (which is what
+     * {@link BesuNode#stop()} + {@link BesuNode#start()} does — the underlying {@code GenericContainer}
+     * is destroyed and rebuilt). The relay itself is unaffected because it dials the chain over the
+     * Docker network alias ({@code besu-N-M:8545}), which is stable across restarts. The test JVM
+     * dials the host-mapped port, so its cached {@link EvmJsonRpcClient}, {@link RawJsonRpc},
+     * {@link ChainInspector}, deployer, submitter, and {@link ContractInteractor} all point at a
+     * port that no longer exists. Runs after every node start so helpers reached through
+     * {@link #rpc()}/{@link #inspect()}/{@link #interactor()} pick up the new client.
+     *
+     * <p>Callers that captured a client or interactor reference before the restart (e.g. through
+     * ) must re-request theirs; callers that resolve those on
+     * each use pick up the refreshed clients automatically.
+     */
+    private void refreshHostClients() {
+        if (rawRpc != null) {
+            try {
+                rawRpc.close();
+            } catch (final RuntimeException ignored) {
+                // best-effort
+            }
+        }
+        this.rpc = new TestEvmJsonRpcClient(primaryNode().jsonRpcUrl());
+        this.rawRpc = new RawJsonRpc(primaryNode().jsonRpcUrl());
+        this.inspector = new ChainInspector(rawRpc);
+        if (deployerAccount != null && contracts != null) {
+            final EthSigner signer = new EthSigner(deployerAccount.privateKeyHex());
+            this.deployerSubmitter = new AnvilTxSubmitter(rpc, signer, spec.chainId());
+            this.deployer = new E2eContractDeployer(rpc, deployerSubmitter);
+            this.interactor = new ContractInteractor(
+                    rpc, deployerSubmitter, signer, deployerAccount.publicKey64(), contracts.core());
+        }
+    }
+
     /** Stop every node. Host data directories survive, so the chain can be restarted. */
     public void stop() {
         if (rawRpc != null) {
@@ -333,6 +471,16 @@ public final class BesuNetwork {
             }
             rawRpc = null;
             inspector = null;
+        }
+        // Stop the filter proxy before its upstream so its outstanding forwards don't retry against
+        // a node that is already tearing down.
+        if (rpcFilterProxy != null) {
+            try {
+                rpcFilterProxy.stop();
+            } catch (final RuntimeException e) {
+                // best-effort teardown
+            }
+            rpcFilterProxy = null;
         }
         for (final BesuNode node : nodes) {
             try {

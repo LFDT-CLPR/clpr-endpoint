@@ -14,12 +14,12 @@ import org.junit.jupiter.api.condition.EnabledIfEnvironmentVariable;
  *
  * <p>Builds on {@link OneSidedStubPeerTestBase}, whose channel roster points at a live
  * {@link org.hiero.clpr.relay.test.harness.StubPeer}. Closing that peer turns its bound port into a
- * dead port; {@link #restartFullDuplex()} then starts the relay's outbound sync loop, which dials
- * that dead port. A single unacked outbound message gives the relay real progress to push — without
- * it the relay constructs no bundle and never dials the peer (post-C7 push-iff-progress), so
- * {@code outbound.attempts} would stay 0. Each failed dial routes through {@code FailState}
- * (exponential backoff, never terminates); the arithmetic is unit-tested in
- * {@code ChannelSyncTaskTest}.
+ * dead port; {@link #restartFullDuplex()} then starts the relay's outbound sync loop. Under the
+ * two-phase protocol that loop dials the peer every cycle (a phase-1 {@code bundle_request}) for any
+ * live channel with a peer available — the dial does not depend on having outbound progress to deliver,
+ * so no message needs to be staged for {@code outbound.attempts} to climb against the dead port. Each
+ * failed dial routes through {@code FailState} (exponential backoff, never terminates); the arithmetic
+ * is unit-tested in {@code ChannelSyncTaskTest}.
  */
 @EnabledIfEnvironmentVariable(named = "RUN_INTEGRATION_TESTS", matches = ".*")
 class UnreachablePeerTest extends OneSidedStubPeerTestBase {
@@ -29,12 +29,10 @@ class UnreachablePeerTest extends OneSidedStubPeerTestBase {
     @Test
     void relayWithUnreachablePeer_survivesAndKeepsAttemptingSync() throws Exception {
         // Make the peer unreachable, then bring up the relay's outbound sync loop against the now-dead port.
+        // No outbound progress is staged: the two-phase loop dials the peer every cycle regardless, so the
+        // dead port is hit and retried purely from the sync cadence.
         peer.close();
         restartFullDuplex();
-
-        // Give the relay something to push. A pending unacked message makes BundleConstructor produce a
-        // non-empty bundle every cycle, so the relay dials the (dead) peer instead of skipping silently.
-        interactor.sendMessage(channelId, connectorId, targetApp(), "ping".getBytes());
 
         TestConditions.awaitCondition(
                 FIRST_ATTEMPT_TIMEOUT, Duration.ofMillis(500), () -> RelayTestSupport.outboundAttempts(relay) > 0);

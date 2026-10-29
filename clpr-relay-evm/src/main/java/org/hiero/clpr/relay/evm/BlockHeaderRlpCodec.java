@@ -9,6 +9,8 @@ import com.hedera.pbj.runtime.io.buffer.Bytes;
 import java.util.ArrayList;
 import java.util.List;
 import org.hiero.clpr.relay.evm.model.BlockHeader;
+import org.hiero.clpr.relay.evm.qbft.QbftBundleConstructor;
+import org.hiero.clpr.relay.evm.qbft.QbftLedgerConfigurationProvider;
 
 /**
  * RLP-encodes Ethereum block headers.
@@ -18,7 +20,7 @@ import org.hiero.clpr.relay.evm.model.BlockHeader;
  * (EIP-1559, EIP-4895, EIP-4844, EIP-4788, EIP-7685).
  *
  * <p>Consumers: {@link QbftBundleConstructor} (for the bundle proof's first RLP element) and
- * {@link EvmQbftLedgerConfigurationProvider} (for the headers in the getLedgerConfiguration
+ * {@link QbftLedgerConfigurationProvider} (for the headers in the getLedgerConfiguration
  * payload). Header parsing from JSON lives in
  * {@link org.hiero.clpr.relay.evm.jsonrpc.EvmJsonRpcClient}.
  */
@@ -42,7 +44,7 @@ public final class BlockHeaderRlpCodec {
      * {@link #encodeRlp} variant that returns the raw {@code byte[]} — useful inside other RLP
      * encoders that compose the header into a larger list.
      */
-    static byte[] encodeRlpBytes(final BlockHeader h) {
+    public static byte[] encodeRlpBytes(final BlockHeader h) {
         final List<byte[]> fields = new ArrayList<>();
         fields.add(rlpBytes(h.parentHash().toByteArray()));
         fields.add(rlpBytes(h.sha3Uncles().toByteArray()));

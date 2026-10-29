@@ -89,8 +89,28 @@ val stageEndpointImage =
         into(layout.buildDirectory.dir("e2e-image"))
     }
 
+// ── RPC filter proxy jar ──────────────────────────────────────────────────────
+// A slim runnable jar containing exactly EvmRpcFilterProxyApp (plus any inner classes) and a
+// Main-Class manifest. Copied into the eclipse-temurin:25-jre proxy container by the
+// EvmRpcFilterProxy fixture. Deliberately not the whole testFixtures jar: a single-class jar drops
+// into any JDK image without dragging in Jackson, testcontainers, or the rest of the framework.
+val rpcFilterProxyJar =
+    tasks.register<Jar>("rpcFilterProxyJar") {
+        description =
+            "Slim runnable jar containing EvmRpcFilterProxyApp for the E2E RPC filter fixture"
+        dependsOn("compileTestFixturesJava")
+        from(sourceSets.testFixtures.get().output) {
+            include("org/hiero/clpr/relay/e2e/fault/EvmRpcFilterProxyApp*.class")
+        }
+        archiveFileName.set("proxy.jar")
+        destinationDirectory.set(layout.buildDirectory.dir("rpc-filter"))
+        manifest {
+            attributes("Main-Class" to "org.hiero.clpr.relay.e2e.fault.EvmRpcFilterProxyApp")
+        }
+    }
+
 tasks.withType<Test>().configureEach {
-    dependsOn(stageEndpointImage)
+    dependsOn(stageEndpointImage, rpcFilterProxyJar)
 
     // Forward the Docker plumbing the same way clpr-relay-integration-tests does: Testcontainers
     // needs DOCKER_HOST on macOS, and DOCKER_API_VERSION clamps the docker-java/daemon mismatch.
@@ -111,6 +131,10 @@ tasks.withType<Test>().configureEach {
     systemProperty("clpr.e2e.imageDir", layout.buildDirectory.dir("e2e-image").get().asFile.path)
     systemProperty("clpr.e2e.outputDir", layout.buildDirectory.dir("e2e-output").get().asFile.path)
     systemProperty(
+        "clpr.e2e.rpcFilterJar",
+        layout.buildDirectory.file("rpc-filter/proxy.jar").get().asFile.path,
+    )
+    systemProperty(
         "clpr.e2e.profile",
         providers.systemProperty("clpr.e2e.profile").getOrElse("local"),
     )
@@ -128,6 +152,17 @@ tasks.withType<Test>().configureEach {
             .gradleProperty("clpr.e2e.enabled")
             .orElse(providers.systemProperty("clpr.e2e.enabled"))
             .getOrElse("false"),
+    )
+
+    // Artifact-retention policy: `failure` (default), `always`, or `never`. Forwarded so a run can
+    // be triggered with `-Pclpr.e2e.keepArtifacts=always` from the command line, or preset in
+    // gradle.properties. Set from an IDE via -Dclpr.e2e.keepArtifacts=always.
+    systemProperty(
+        "clpr.e2e.keepArtifacts",
+        providers
+            .gradleProperty("clpr.e2e.keepArtifacts")
+            .orElse(providers.systemProperty("clpr.e2e.keepArtifacts"))
+            .getOrElse("failure"),
     )
 
     testLogging {

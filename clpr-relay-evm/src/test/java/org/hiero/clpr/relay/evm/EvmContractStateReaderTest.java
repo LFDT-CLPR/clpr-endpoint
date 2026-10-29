@@ -2,11 +2,14 @@
 package org.hiero.clpr.relay.evm;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.hedera.hapi.node.state.clpr.ClprChannel;
 import com.hedera.hapi.node.state.clpr.ClprChannelStatus;
+import com.hedera.hapi.node.state.clpr.ClprEndpoint;
 import com.hedera.hapi.node.state.clpr.ClprEndpointManifest;
 import com.hedera.hapi.node.state.clpr.ClprLedgerConfiguration;
+import com.hedera.hapi.node.state.clpr.ClprServiceEndpoint;
 import com.hedera.pbj.runtime.io.buffer.Bytes;
 import java.io.ByteArrayOutputStream;
 import java.nio.charset.StandardCharsets;
@@ -825,7 +828,7 @@ class EvmContractStateReaderTest {
     @Test
     void readPeerEndpointManifest_decodesPopulatedEndpoints() {
         final byte[] ep0 = encodeEndpoint("10.0.0.1", 9545, new byte[] {(byte) 0xAA, (byte) 0xBB}, new byte[] {0x01});
-        // ep1 has an empty on-chain accountId, which the decoder synthesises as "ip:port".
+        // ep1 has an empty on-chain accountId, which the decoder must keep empty (never synthesise).
         final byte[] ep1 = encodeEndpoint("10.0.0.2", 9546, new byte[0], new byte[0]);
         final EvmJsonRpcClient stub = TestEvmJsonRpcClient.newStubClient(
                 encodeGetEndpointManifestReturnWithEndpoints(5L, new byte[20], List.of(ep0, ep1)));
@@ -846,6 +849,139 @@ class EvmContractStateReaderTest {
         final var e1 = manifest.endpoints().get(1);
         assertThat(e1.serviceEndpoint().ipAddress()).isEqualTo("10.0.0.2");
         assertThat(e1.serviceEndpoint().port()).isEqualTo(9546);
-        assertThat(e1.accountId()).isEqualTo(Bytes.wrap("10.0.0.2:9546".getBytes(StandardCharsets.UTF_8)));
+        assertThat(e1.accountId()).isEqualTo(Bytes.EMPTY);
+    }
+
+    @Test
+    void readEndpointManifest_reEncodesByteExactWithoutSynthesisedAccountId() {
+        // The decoded local manifest is re-encoded as the protobuf preimage of the slot-18
+        // commitment. An endpoint registered with an empty accountId must therefore re-encode
+        // without field 3, exactly as the contract committed it.
+        final byte[] ep = encodeEndpoint("10.0.0.2", 9546, new byte[0], new byte[0]);
+        final EvmJsonRpcClient stub = TestEvmJsonRpcClient.newStubClient(
+                encodeGetEndpointManifestReturnWithEndpoints(2L, new byte[20], List.of(ep)));
+        final EvmContractStateReader reader = new EvmContractStateReader(stub, "0xdeadbeef");
+
+        final ClprEndpointManifest decoded = reader.readEndpointManifest("latest");
+
+        final ClprEndpointManifest committed = ClprEndpointManifest.newBuilder()
+                .version(2L)
+                .serviceAddress(Bytes.wrap(new byte[20]))
+                .endpoints(List.of(ClprEndpoint.newBuilder()
+                        .serviceEndpoint(new ClprServiceEndpoint("10.0.0.2", 9546))
+                        .build()))
+                .build();
+        assertThat(ClprEndpointManifest.PROTOBUF.toBytes(decoded))
+                .isEqualTo(ClprEndpointManifest.PROTOBUF.toBytes(committed));
+    }
+
+    // =========================================================================
+    // readChannelCount, bytes32 guard, and eth_call failure fallbacks
+    // =========================================================================
+
+    /** A stub whose {@code ethCall} always throws the given RPC error. */
+    private static EvmJsonRpcClient rpcThrowing(final JsonRpcException ex) {
+        return new TestEvmJsonRpcClient("http://unused") {
+            @Override
+            public String ethCall(final String to, final String data, final String blockTag) {
+                throw ex;
+            }
+        };
+    }
+
+    /** A stub whose {@code ethCall} returns the given (possibly malformed) hex string. */
+    private static EvmJsonRpcClient rpcReturningHex(final String hex) {
+        return new TestEvmJsonRpcClient("http://unused") {
+            @Override
+            public String ethCall(final String to, final String data, final String blockTag) {
+                return hex;
+            }
+        };
+    }
+
+    @Test
+    void readChannelCount_decodesCountFromWord() {
+        final EvmJsonRpcClient stub = TestEvmJsonRpcClient.newStubClient(AbiCodec.encodeUint(7));
+        final EvmContractStateReader reader = new EvmContractStateReader(stub, "0xdeadbeef");
+        assertThat(reader.readChannelCount("latest")).isEqualTo(7L);
+    }
+
+    @Test
+    void readChannelCount_shortReturn_throwsIllegalState() {
+        // A return shorter than one 32-byte word is malformed — must throw, not fabricate 0.
+        final EvmJsonRpcClient stub = TestEvmJsonRpcClient.newStubClient(new byte[16]);
+        final EvmContractStateReader reader = new EvmContractStateReader(stub, "0xdeadbeef");
+        assertThatThrownBy(() -> reader.readChannelCount("latest"))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("malformed data");
+    }
+
+    @Test
+    void readChannelCount_rpcFailure_propagates() {
+        // Unlike the read views, channelCount must NOT swallow the error into a sentinel.
+        final EvmContractStateReader reader =
+                new EvmContractStateReader(rpcThrowing(new JsonRpcException(-32000, "boom")), "0xdeadbeef");
+        assertThatThrownBy(() -> reader.readChannelCount("latest"))
+                .isInstanceOf(JsonRpcException.class)
+                .hasMessageContaining("boom");
+    }
+
+    @Test
+    void readPeerEndpointManifest_non32ChannelId_throws() {
+        final EvmContractStateReader reader =
+                new EvmContractStateReader(TestEvmJsonRpcClient.newStubClient(new byte[0]), "0xdeadbeef");
+        assertThatThrownBy(() -> reader.readPeerEndpointManifest(Bytes.wrap(new byte[31]), "latest"))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("bytes32 value must be exactly 32 bytes");
+    }
+
+    @Test
+    void readLedgerConfiguration_commitmentLevelOverload_mapsToBlockTag() {
+        // Empty return decodes to DEFAULT; the point is exercising the CommitmentLevel overload.
+        final EvmContractStateReader reader =
+                new EvmContractStateReader(TestEvmJsonRpcClient.newStubClient(new byte[0]), "0xdeadbeef");
+        assertThat(reader.readLedgerConfiguration(CommitmentLevel.FINALIZED))
+                .isEqualTo(ClprLedgerConfiguration.DEFAULT);
+    }
+
+    @Test
+    void readLedgerConfiguration_rpcFailure_returnsDefault() {
+        final EvmContractStateReader reader =
+                new EvmContractStateReader(rpcThrowing(new JsonRpcException(-32000, "down")), "0xdeadbeef");
+        assertThat(reader.readLedgerConfiguration("latest")).isEqualTo(ClprLedgerConfiguration.DEFAULT);
+    }
+
+    @Test
+    void readLedgerConfiguration_malformedHexReturn_returnsDefault() {
+        // Odd-length hex makes AbiCodec.fromHex throw — a non-RPC decode failure hits the generic catch.
+        final EvmContractStateReader reader = new EvmContractStateReader(rpcReturningHex("0xabc"), "0xdeadbeef");
+        assertThat(reader.readLedgerConfiguration("latest")).isEqualTo(ClprLedgerConfiguration.DEFAULT);
+    }
+
+    @Test
+    void readPeerEndpointManifest_rpcFailure_rethrows() {
+        // A PEER manifest read must NOT degrade to the empty DEFAULT sentinel: the result feeds a
+        // destructive cache replace, so a transient RPC failure rethrows rather than wiping the roster.
+        final EvmContractStateReader reader =
+                new EvmContractStateReader(rpcThrowing(new JsonRpcException(-32000, "down")), "0xdeadbeef");
+        assertThatThrownBy(() -> reader.readPeerEndpointManifest(Bytes.wrap(new byte[32]), "latest"))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("getPeerEndpointManifest read failed");
+    }
+
+    @Test
+    void readPeerEndpointManifest_malformedHexReturn_rethrows() {
+        // Odd-length hex makes AbiCodec.fromHex throw — a decode failure on a PEER read also rethrows.
+        final EvmContractStateReader reader = new EvmContractStateReader(rpcReturningHex("0xabc"), "0xdeadbeef");
+        assertThatThrownBy(() -> reader.readPeerEndpointManifest(Bytes.wrap(new byte[32]), "latest"))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("getPeerEndpointManifest read failed");
+    }
+
+    @Test
+    void readEndpointManifest_rpcFailure_returnsDefault() {
+        final EvmContractStateReader reader =
+                new EvmContractStateReader(rpcThrowing(new JsonRpcException(-32000, "down")), "0xdeadbeef");
+        assertThat(reader.readEndpointManifest("latest")).isEqualTo(ClprEndpointManifest.DEFAULT);
     }
 }

@@ -13,15 +13,9 @@ metadata:
 spec:
   type: {{ .Values.grpc.service.type }}
   ports:
-    {{- /* Both planes are peer-facing: peers dial sync for the data plane and info for bootstrap
-           discovery (discoverEndpoints) / ledger configuration (getLedgerConfiguration). */}}
-    - port: {{ .Values.grpc.sync.port }}
-      targetPort: grpc-sync
+    - port: {{ .Values.grpc.port }}
+      targetPort: grpc
       protocol: TCP
-      name: grpc-sync
-    - port: {{ .Values.grpc.info.port }}
-      targetPort: grpc-info
-      protocol: TCP
-      name: grpc-info
+      name: grpc
   selector:
     {{- include "clpr-evm-endpoint.selectorLabels" . | nindent 4 }}

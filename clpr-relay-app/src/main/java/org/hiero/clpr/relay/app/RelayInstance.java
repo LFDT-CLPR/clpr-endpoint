@@ -6,9 +6,6 @@ import com.swirlds.logging.api.Logger;
 import com.swirlds.logging.api.Loggers;
 import com.swirlds.metrics.api.LongGauge;
 import com.swirlds.metrics.api.Metrics;
-import java.nio.file.Files;
-import java.nio.file.Path;
-import java.time.Duration;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -17,20 +14,14 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.Function;
-import java.util.function.UnaryOperator;
-import org.hiero.clpr.relay.core.Certs;
+import org.hiero.clpr.relay.core.ClprChannelOps;
 import org.hiero.clpr.relay.core.CommitmentLevel;
-import org.hiero.clpr.relay.core.LeafKeyManager;
-import org.hiero.clpr.relay.core.PeerEndpointTlsRegistry;
-import org.hiero.clpr.relay.core.PeerManifestVersionCache;
 import org.hiero.clpr.relay.core.RelayProtocol;
-import org.hiero.clpr.relay.core.TransactionSubmitter;
 import org.hiero.clpr.relay.core.metrics.SimpleMetrics;
 import org.hiero.clpr.relay.grpc.client.ClprEndpointClient;
 import org.hiero.clpr.relay.grpc.server.ClprGrpcServer;
 import org.hiero.clpr.relay.grpc.server.ClprSyncHandler;
 import org.hiero.clpr.relay.grpc.server.GetLedgerConfigurationHandler;
-import org.hiero.clpr.relay.grpc.server.ThrottleEnforcer;
 
 /**
  * A running CLPR relay instance. Encapsulates all relay components and provides lifecycle methods
@@ -46,9 +37,9 @@ import org.hiero.clpr.relay.grpc.server.ThrottleEnforcer;
  * </ol>
  *
  * <p>The remaining components are relay-global: the inbound gRPC server, the outbound peer client,
- * and the metrics registry. The gRPC {@code ClprSyncHandler} / {@code discoverEndpoints} paths reach
- * channel-scoped state through resolver adapters ({@link ChannelMappedTransactionSubmitter}
- * and friends) that look a channel handler up by id across every {@link ClprServiceHandler}.
+ * and the metrics registry. The gRPC {@code ClprSyncHandler} reaches channel-scoped state by resolving
+ * the owning {@link ClprChannelHandler} ({@link org.hiero.clpr.relay.core.ClprChannelOps}) for a channel
+ * id — via a {@code ChannelLookup} — across every {@link ClprServiceHandler}.
  *
  * <p>This class lets integration tests and embedding applications drive a full relay from code
  * without going through {@link ClprRelayMain#main()}.
@@ -136,7 +127,7 @@ public final class RelayInstance {
     }
 
     /**
-     * Build a {@link RelayInstance} using the supplied metrics registry and log-context label.
+     * Terminal build: supplied metrics registry and log-context label.
      *
      * @param config       the relay configuration
      * @param metrics      the registry submodules will record into
@@ -145,41 +136,6 @@ public final class RelayInstance {
      * @return a new, not-yet-started relay instance
      */
     public static RelayInstance build(final RelayConfig config, final Metrics metrics, final String instanceName) {
-        return build(config, metrics, instanceName, UnaryOperator.identity());
-    }
-
-    /**
-     * Build a {@link RelayInstance} with a test-supplied submitter decorator (e.g. the integration
-     * suite's CLPRSTUB re-encoder). Production builds use {@link UnaryOperator#identity()}.
-     *
-     * @param config             the relay configuration
-     * @param instanceName       worker-loop log-context label; a blank value adds no context entry
-     * @param submitterDecorator wraps each channel's EVM {@link TransactionSubmitter} before the
-     *                           dedup/serialisation guard — applied only in test wiring
-     * @return a new, not-yet-started relay instance
-     */
-    public static RelayInstance build(
-            final RelayConfig config,
-            final String instanceName,
-            final UnaryOperator<TransactionSubmitter> submitterDecorator) {
-        return build(config, new SimpleMetrics(), instanceName, submitterDecorator);
-    }
-
-    /**
-     * Terminal build: supplied metrics registry, log-context label, and submitter decorator.
-     *
-     * @param config             the relay configuration
-     * @param metrics            the registry submodules will record into
-     * @param instanceName       worker-loop log-context label; a blank value adds no context entry
-     * @param submitterDecorator wraps each channel's EVM {@link TransactionSubmitter} before the
-     *                           dedup/serialisation guard ({@link UnaryOperator#identity()} in production)
-     * @return a new, not-yet-started relay instance
-     */
-    public static RelayInstance build(
-            final RelayConfig config,
-            final Metrics metrics,
-            final String instanceName,
-            final UnaryOperator<TransactionSubmitter> submitterDecorator) {
 
         // 1. One shared adapter per local network (RPC client, gas strategy, CometBFT client).
         //    A repeated localNetworks id is ignored (warned), keeping the first entry.
@@ -198,55 +154,14 @@ public final class RelayInstance {
         final Function<Bytes, Optional<ClprChannelHandler>> channelLookup =
                 channelId -> findChannelHandler(clprServices, channelId);
 
-        // 3. Parse the CA key once and create a leaf key manager shared by both the outbound client
-        //    and the inbound sync listener. The manager re-mints its leaf on demand when the rotation
-        //    window elapses; rotation is disabled when leafCertValiditySeconds == 0.
-        final var sync = config.sync();
-        final LeafKeyManager leafKeyManager;
-        if (sync.tlsEnabled()) {
-            try {
-                final var caKey = Certs.parsePrivateKey(Files.readAllBytes(Path.of(sync.tlsKeyPath())));
-                Certs.requireEcP384(caKey);
-                leafKeyManager = new LeafKeyManager(caKey, Duration.ofSeconds(sync.leafCertValiditySeconds()), metrics);
-            } catch (final Exception e) {
-                throw new IllegalStateException(
-                        "Failed to load TLS CA key from relay.grpc.sync.tlsKeyPath=" + sync.tlsKeyPath(), e);
-            }
-        } else {
-            leafKeyManager = null;
-        }
+        // 3. Outbound peer client (shared by every channel's sync loop).
+        final var clprEndpointClient = new ClprEndpointClient(config.grpc().maxMessageSize());
 
-        // Outbound peer client (shared by every channel's sync loop).
-
-        final var clprEndpointClient = new ClprEndpointClient(config.grpc().maxMessageSize(), leafKeyManager);
-
-        // 4. gRPC glue: resolver-backed adapters that present the whole channel topology to the
-        //    inbound sync handler as single core interfaces, dispatching by channel id.
-        final var mappedSubmitter = new ChannelMappedTransactionSubmitter(channelLookup);
-        final var mappedChannelLookup = new ChannelMappedChannelLookup(channelLookup);
-        final var mappedConstructor = new ChannelMappedBundleConstructor(channelLookup);
-        final var codecResolver = new ChannelMappedProofCodec(channelLookup);
-        final Function<Bytes, ThrottleEnforcer> throttleResolver = channelId -> channelLookup
-                .apply(channelId)
-                .map(ClprChannelHandler::throttleEnforcer)
-                .orElse(null);
-
-        final var tlsRegistry = new PeerEndpointTlsRegistry();
-
-        // Shared per-channel record of the manifest version each peer has cached of our manifest:
-        // written by the inbound sync handler from received metadata, read by the (per-channel)
-        // bundle constructors to gate re-sending our local manifest proof.
-        final var peerManifestVersions = new PeerManifestVersionCache();
-
+        // Two-phase sync (responder side): resolves the per-channel collaborators by channel id, and
+        // builds a bundle ad hoc for the peer's request via createBundle. The peer's held manifest
+        // version arrives in the request, so no local per-channel manifest-version cache is needed.
         final var syncHandler = new ClprSyncHandler(
-                codecResolver,
-                mappedConstructor,
-                mappedSubmitter,
-                throttleResolver,
-                mappedChannelLookup,
-                peerManifestVersions,
-                metrics,
-                instanceName);
+                channelId -> channelLookup.apply(channelId).map(ClprChannelOps.class::cast), metrics, instanceName);
 
         // Route getLedgerConfiguration by the request's service_address. An empty selector preserves
         // the prior behavior of serving the single/primary deployment (the first available channel's
@@ -269,10 +184,9 @@ public final class RelayInstance {
                 new GetLedgerConfigurationHandler(ledgerConfigResolver, CommitmentLevel.FINALIZED);
 
         final var grpcServer = new ClprGrpcServer(
-                new ClprGrpcServer.Listeners(sync.port(), config.info().port(), leafKeyManager),
+                config.grpc().port(),
                 config.grpc().maxMessageSize(),
                 syncHandler,
-                tlsRegistry,
                 getLedgerConfigurationHandler,
                 instanceName);
 
@@ -296,11 +210,8 @@ public final class RelayInstance {
                             metrics,
                             config.backoff(),
                             instanceName,
-                            submitterDecorator,
                             clprEndpointClient,
-                            config.peerProofTypes(),
-                            peerManifestVersions,
-                            tlsRegistry));
+                            config.peerProofTypes()));
         }
 
         return new RelayInstance(localNetworks, clprServices, grpcServer, clprEndpointClient, metrics);
@@ -352,22 +263,12 @@ public final class RelayInstance {
     }
 
     /**
-     * Returns the data-plane ({@code sync}) gRPC port, or {@code -1} if not started.
+     * Returns the gRPC port, or {@code -1} if not started.
      *
-     * @return the sync gRPC port
+     * @return the gRPC port
      */
     public int grpcPort() {
         return grpcServer.port();
-    }
-
-    /**
-     * Returns the info-plane gRPC port ({@code discoverEndpoints}, {@code getLedgerConfiguration}),
-     * or {@code -1} if not started.
-     *
-     * @return the info gRPC port
-     */
-    public int infoPort() {
-        return grpcServer.infoPort();
     }
 
     /**
@@ -466,7 +367,8 @@ public final class RelayInstance {
                     if (syncStreak > syncMaxStreak) {
                         syncMaxStreak = syncStreak;
                     }
-                    final int listenerStreak = handler.stateChangeFailState().consecutiveFailures();
+                    final int listenerStreak =
+                            handler.manifestRefreshFailState().consecutiveFailures();
                     if (listenerStreak > 0) {
                         listenerFailingCount++;
                     }

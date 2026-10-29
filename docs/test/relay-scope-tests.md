@@ -1,6 +1,6 @@
 # CLPR EVM Relay — Spec Conformance Test Cases
 
-Scope: **relay-side** obligations only. Each item is an observable behavior derived from the [CLPR protocol spec](https://github.com/hiero-hackers/CLPR-spec/blob/main/clpr-service-spec.md).
+Scope: **relay-side** obligations only. Each item is an observable behavior derived from the [CLPR protocol spec](https://github.com/LFDT-CLPR/clpr-spec/blob/main/clpr-service-spec.md).
 
 Out of scope for this catalog:
 
@@ -34,7 +34,7 @@ it must react to state changes produced on-chain by any submitter.
    running-hash fields, `trust_anchor_id`, `endpoint_manifest_version` —
    at the start of each sync cycle so bundle construction is grounded in
    the current on-chain state
-   ([spec §2.1](https://github.com/hiero-hackers/CLPR-spec/blob/main/clpr-service-spec.md#21-channel)).
+   ([spec §2.1](https://github.com/LFDT-CLPR/clpr-spec/blob/main/clpr-service-spec.md#21-channel)).
 2. The relay routes each connection's `submitBundle` transactions and
    view reads to the `ClprService` address it was configured with for
    that connection's ledger; a relay configured with multiple
@@ -47,8 +47,8 @@ it must react to state changes produced on-chain by any submitter.
    (produced by any submitter, including inbound bundles carrying
    `metadata.status ∈ {CLOSING, DRAINED, CLOSED}`); per-status reactions
    live in section #7
-   ([spec §2.1.1](https://github.com/hiero-hackers/CLPR-spec/blob/main/clpr-service-spec.md#211-channel-status-transitions),
-   [§4.2 Step 5a](https://github.com/hiero-hackers/CLPR-spec/blob/main/clpr-service-spec.md#42-bundle-verification-algorithm)).
+   ([spec §2.1.1](https://github.com/LFDT-CLPR/clpr-spec/blob/main/clpr-service-spec.md#211-channel-status-transitions),
+   [§4.2 Step 5a](https://github.com/LFDT-CLPR/clpr-spec/blob/main/clpr-service-spec.md#42-bundle-verification-algorithm)).
 5. When the local CLPR Service has lazily enqueued a `ConfigUpdate`
    Control Message on the outbound queue (triggered by the next
    `submitBundle` or `sendMessage` after
@@ -56,9 +56,9 @@ it must react to state changes produced on-chain by any submitter.
    `Channel.last_config_timestamp`), the relay includes it in the next
    outbound bundle in queue order, without special-casing it relative to
    Data or Response Messages
-   ([spec §1.3](https://github.com/hiero-hackers/CLPR-spec/blob/main/clpr-service-spec.md#13-control-messages),
-   [§4.2 Step 5c](https://github.com/hiero-hackers/CLPR-spec/blob/main/clpr-service-spec.md#42-bundle-verification-algorithm),
-   [§4.3 Step 1a](https://github.com/hiero-hackers/CLPR-spec/blob/main/clpr-service-spec.md#43-message-enqueue-algorithm)).
+   ([spec §1.3](https://github.com/LFDT-CLPR/clpr-spec/blob/main/clpr-service-spec.md#13-control-messages),
+   [§4.2 Step 5c](https://github.com/LFDT-CLPR/clpr-spec/blob/main/clpr-service-spec.md#42-bundle-verification-algorithm),
+   [§4.3 Step 1a](https://github.com/LFDT-CLPR/clpr-spec/blob/main/clpr-service-spec.md#43-message-enqueue-algorithm)).
 
 ---
 
@@ -81,15 +81,15 @@ does not imply the others.
    `BundleRequest.current_received_message_id + 1`; if that ID does not
    yet exist in the local queue (≥ local `next_message_id`), the relay
    falls back to `acked_message_id + 1`
-   ([spec §1.5](https://github.com/hiero-hackers/CLPR-spec/blob/main/clpr-service-spec.md#15-sync-protocol)).
+   ([spec §1.5](https://github.com/LFDT-CLPR/clpr-spec/blob/main/clpr-service-spec.md#15-sync-protocol)).
 3. Message IDs in the bundle are contiguous and ascending, with no gaps
-   ([spec §4.2 Step 3](https://github.com/hiero-hackers/CLPR-spec/blob/main/clpr-service-spec.md#42-bundle-verification-algorithm)).
+   ([spec §4.2 Step 3](https://github.com/LFDT-CLPR/clpr-spec/blob/main/clpr-service-spec.md#42-bundle-verification-algorithm)).
 4. The bundle honors the **peer's** advertised `max_messages_per_bundle`
    (cached on the local Channel as `peerThrottles`). No source-contract
    check enforces this at enqueue — it is a per-bundle cap, so only the
    relay can honor it at construction. A bundle exceeding the cap is
    rejected wholesale by the destination at
-   [§4.2 Step 2](https://github.com/hiero-hackers/CLPR-spec/blob/main/clpr-service-spec.md#42-bundle-verification-algorithm)
+   [§4.2 Step 2](https://github.com/LFDT-CLPR/clpr-spec/blob/main/clpr-service-spec.md#42-bundle-verification-algorithm)
    (see also the §1.5 `ClprQueueMetadata` comment noting "the bundle
    may be a prefix limited by `max_messages_per_bundle`"). Throttles
    are ledger-wide
@@ -97,61 +97,61 @@ does not imply the others.
 5. On the happy path, no relay-side check on `max_message_payload_bytes`
    is required: the source contract enforces the peer's advertised
    limit at `sendMessage` time
-   ([§4.3 Step 4](https://github.com/hiero-hackers/CLPR-spec/blob/main/clpr-service-spec.md#43-message-enqueue-algorithm))
+   ([§4.3 Step 4](https://github.com/LFDT-CLPR/clpr-spec/blob/main/clpr-service-spec.md#43-message-enqueue-algorithm))
    using `peer_config.throttles`, so no oversized message reaches the
    queue. Edge case: if the peer lowers `max_message_payload_bytes` via
    `ConfigUpdate` after a message is already queued, that message would
    now be rejected by the destination at
-   [§4.2 Step 2](https://github.com/hiero-hackers/CLPR-spec/blob/main/clpr-service-spec.md#42-bundle-verification-algorithm)
+   [§4.2 Step 2](https://github.com/LFDT-CLPR/clpr-spec/blob/main/clpr-service-spec.md#42-bundle-verification-algorithm)
    — and the relay cannot skip it without breaking §4.2 Step 3
    contiguity, so the Channel wedges pending admin redaction or the
    peer restoring the prior limit.
 6. The serialized `ClprSyncPayload` honors the **peer's** advertised
    `max_sync_bytes` (from `peerThrottles`); the peer will reject on the
    wire otherwise
-   ([spec §1.5](https://github.com/hiero-hackers/CLPR-spec/blob/main/clpr-service-spec.md#15-sync-protocol),
-   [§7](https://github.com/hiero-hackers/CLPR-spec/blob/main/clpr-service-spec.md#7-configuration-parameters)).
+   ([spec §1.5](https://github.com/LFDT-CLPR/clpr-spec/blob/main/clpr-service-spec.md#15-sync-protocol),
+   [§7](https://github.com/LFDT-CLPR/clpr-spec/blob/main/clpr-service-spec.md#7-configuration-parameters)).
 7. `ClprQueueMetadata.sent_running_hash` covers the last message
    *included in this bundle*, not the tail of the whole queue
-   ([spec §4.1](https://github.com/hiero-hackers/CLPR-spec/blob/main/clpr-service-spec.md#41-running-hash-computation),
-   [§4.2 Step 4](https://github.com/hiero-hackers/CLPR-spec/blob/main/clpr-service-spec.md#42-bundle-verification-algorithm)).
+   ([spec §4.1](https://github.com/LFDT-CLPR/clpr-spec/blob/main/clpr-service-spec.md#41-running-hash-computation),
+   [§4.2 Step 4](https://github.com/LFDT-CLPR/clpr-spec/blob/main/clpr-service-spec.md#42-bundle-verification-algorithm)).
 8. `ClprQueueMetadata.next_message_id` equals
    `last_included_message_id + 1`, not the current on-chain
    `Channel.next_message_id`
-   ([spec §4.2 Step 3](https://github.com/hiero-hackers/CLPR-spec/blob/main/clpr-service-spec.md#42-bundle-verification-algorithm)
+   ([spec §4.2 Step 3](https://github.com/LFDT-CLPR/clpr-spec/blob/main/clpr-service-spec.md#42-bundle-verification-algorithm)
    consistency).
 9. `ClprQueueMetadata.received_message_id` and `.received_running_hash`
    reflect the local Channel's current inbound state so the peer can
    advance their `acked_message_id`
-   ([spec §1.5](https://github.com/hiero-hackers/CLPR-spec/blob/main/clpr-service-spec.md#15-sync-protocol)
+   ([spec §1.5](https://github.com/LFDT-CLPR/clpr-spec/blob/main/clpr-service-spec.md#15-sync-protocol)
    `ClprQueueMetadata` field definitions;
-   [§4.2 Step 5](https://github.com/hiero-hackers/CLPR-spec/blob/main/clpr-service-spec.md#42-bundle-verification-algorithm)
+   [§4.2 Step 5](https://github.com/LFDT-CLPR/clpr-spec/blob/main/clpr-service-spec.md#42-bundle-verification-algorithm)
    for the receiver's use).
 10. `ClprQueueMetadata.status` reflects the local Channel's current
     status so the peer can trigger their own
     `CLOSING`/`DRAINED`/`CLOSED` transitions
-    ([spec §4.2 Step 5a](https://github.com/hiero-hackers/CLPR-spec/blob/main/clpr-service-spec.md#42-bundle-verification-algorithm)).
+    ([spec §4.2 Step 5a](https://github.com/LFDT-CLPR/clpr-spec/blob/main/clpr-service-spec.md#42-bundle-verification-algorithm)).
 11. `ClprQueueMetadata.trust_anchor_id` reflects the local Channel's
     current `trust_anchor_id`
-    ([spec §3.2](https://github.com/hiero-hackers/CLPR-spec/blob/main/clpr-service-spec.md#32-endpoint-trust-anchor-rotation-obligations)).
+    ([spec §3.2](https://github.com/LFDT-CLPR/clpr-spec/blob/main/clpr-service-spec.md#32-endpoint-trust-anchor-rotation-obligations)).
 12. `ClprQueueMetadata.endpoint_manifest_version` reflects the local
     Channel's current `endpoint_manifest_version` so the peer sees when
     the manifest has advanced
-    ([spec §1.5](https://github.com/hiero-hackers/CLPR-spec/blob/main/clpr-service-spec.md#15-sync-protocol)
+    ([spec §1.5](https://github.com/LFDT-CLPR/clpr-spec/blob/main/clpr-service-spec.md#15-sync-protocol)
     field def,
-    [§2.1](https://github.com/hiero-hackers/CLPR-spec/blob/main/clpr-service-spec.md#21-channel)
+    [§2.1](https://github.com/LFDT-CLPR/clpr-spec/blob/main/clpr-service-spec.md#21-channel)
     Channel state).
 13. When `BundleRequest.current_endpoint_manifest_version` is less than
     the local `endpoint_manifest_version`, the relay attaches the full
     local `ClprEndpointManifest` bytes plus its inclusion proof so the
     peer's verifier can adopt it
-    ([spec §2.4.2 Refresh](https://github.com/hiero-hackers/CLPR-spec/blob/main/clpr-service-spec.md#242-peer-manifest-on-ledger-per-channel),
-    [§4.2 Step 1b](https://github.com/hiero-hackers/CLPR-spec/blob/main/clpr-service-spec.md#42-bundle-verification-algorithm)).
+    ([spec §2.4.2 Refresh](https://github.com/LFDT-CLPR/clpr-spec/blob/main/clpr-service-spec.md#242-peer-manifest-on-ledger-per-channel),
+    [§4.2 Step 1b](https://github.com/LFDT-CLPR/clpr-spec/blob/main/clpr-service-spec.md#42-bundle-verification-algorithm)).
 14. The relay pre-checks the five Bundle Progress Criteria (new
     messages, trust-anchor advancement, acknowledgement progress,
     channel state transition, endpoint manifest advancement) against the
     peer's cached view and suppresses the bundle when none holds
-    ([spec §2.1.2](https://github.com/hiero-hackers/CLPR-spec/blob/main/clpr-service-spec.md#212-bundle-progress-criteria)).
+    ([spec §2.1.2](https://github.com/LFDT-CLPR/clpr-spec/blob/main/clpr-service-spec.md#212-bundle-progress-criteria)).
 15. The bundle is assembled from the current on-chain Channel state and
     the current peer `BundleRequest` — not a stale snapshot cached
     across cycles. Successive cycles reflect state advancements made by
@@ -176,12 +176,12 @@ mechanics) is proof-type-specific.
    X in the source chain's rotation record, the relay produces a
    transition bundle advancing the peer's anchor from X to its immediate
    successor — not skipping ahead and not restarting the sequence
-   ([spec §3.2](https://github.com/hiero-hackers/CLPR-spec/blob/main/clpr-service-spec.md#32-endpoint-trust-anchor-rotation-obligations)).
+   ([spec §3.2](https://github.com/LFDT-CLPR/clpr-spec/blob/main/clpr-service-spec.md#32-endpoint-trust-anchor-rotation-obligations)).
 2. Each sync cycle, the relay reads `trust_anchor_id` from the most
    recently received sync payload and identifies which of its source
    chain's signing authorities is currently installed on the peer's
    ledger
-   ([spec §3.2](https://github.com/hiero-hackers/CLPR-spec/blob/main/clpr-service-spec.md#32-endpoint-trust-anchor-rotation-obligations)).
+   ([spec §3.2](https://github.com/LFDT-CLPR/clpr-spec/blob/main/clpr-service-spec.md#32-endpoint-trust-anchor-rotation-obligations)).
 3. The relay proactively constructs a transition bundle when it detects
    an authority rotation on its own source chain. For **single-authority
    encodings** the transition bundle MUST be delivered before any
@@ -189,46 +189,46 @@ mechanics) is proof-type-specific.
    encodings** the window-advance MAY be batched into a regular
    application bundle at any point while the current window still covers
    all in-flight proofs
-   ([spec §3.2 — Timing depends on trust anchor encoding](https://github.com/hiero-hackers/CLPR-spec/blob/main/clpr-service-spec.md#timing-depends-on-trust-anchor-encoding)).
+   ([spec §3.2 — Timing depends on trust anchor encoding](https://github.com/LFDT-CLPR/clpr-spec/blob/main/clpr-service-spec.md#timing-depends-on-trust-anchor-encoding)).
 4. The relay reactively constructs a transition bundle when it observes
    — from a received sync payload or after a restart — that the peer's
    `trust_anchor_id` names an authority under which the relay cannot
    produce proofs
-   ([spec §3.2 — Triggering, "Reactive"](https://github.com/hiero-hackers/CLPR-spec/blob/main/clpr-service-spec.md#triggering)).
+   ([spec §3.2 — Triggering, "Reactive"](https://github.com/LFDT-CLPR/clpr-spec/blob/main/clpr-service-spec.md#triggering)).
 5. When the peer's `trust_anchor_id` matches the current authority on
    the relay's source chain, the relay constructs an application bundle
    without attaching any rotation payload
-   ([spec §3.2](https://github.com/hiero-hackers/CLPR-spec/blob/main/clpr-service-spec.md#32-endpoint-trust-anchor-rotation-obligations)).
+   ([spec §3.2](https://github.com/LFDT-CLPR/clpr-spec/blob/main/clpr-service-spec.md#32-endpoint-trust-anchor-rotation-obligations)).
 6. A transition bundle's `bundle_payload` is verifiable by an authority
    currently encoded in the peer's `Channel.trust_anchor`; the relay
    never builds a transition bundle proven under an authority the peer
    has not yet adopted
-   ([spec §3.2](https://github.com/hiero-hackers/CLPR-spec/blob/main/clpr-service-spec.md#32-endpoint-trust-anchor-rotation-obligations)).
+   ([spec §3.2](https://github.com/LFDT-CLPR/clpr-spec/blob/main/clpr-service-spec.md#32-endpoint-trust-anchor-rotation-obligations)).
 7. A transition bundle embeds a state-proven commitment to the new (or
    additional) authority so the peer's verifier returns non-empty
    `new_trust_anchor` / `new_trust_anchor_id`
-   ([spec §3.2](https://github.com/hiero-hackers/CLPR-spec/blob/main/clpr-service-spec.md#32-endpoint-trust-anchor-rotation-obligations)).
+   ([spec §3.2](https://github.com/LFDT-CLPR/clpr-spec/blob/main/clpr-service-spec.md#32-endpoint-trust-anchor-rotation-obligations)).
 8. A trust-only transition bundle (zero application messages) is
    delivered without waiting to be batched with application messages
-   ([spec §3.2](https://github.com/hiero-hackers/CLPR-spec/blob/main/clpr-service-spec.md#32-endpoint-trust-anchor-rotation-obligations),
-   [§2.1.2 Criterion 2](https://github.com/hiero-hackers/CLPR-spec/blob/main/clpr-service-spec.md#212-bundle-progress-criteria)).
+   ([spec §3.2](https://github.com/LFDT-CLPR/clpr-spec/blob/main/clpr-service-spec.md#32-endpoint-trust-anchor-rotation-obligations),
+   [§2.1.2 Criterion 2](https://github.com/LFDT-CLPR/clpr-spec/blob/main/clpr-service-spec.md#212-bundle-progress-criteria)).
 9. The relay maintains, per Channel, a local ordered sequence of the
    `trust_anchor_id` values it has observed on its own source chain —
    which authority succeeded which. This sequence determines the order
    of transition bundles produced under item #4
-   ([spec §3.2 — Endpoint local record](https://github.com/hiero-hackers/CLPR-spec/blob/main/clpr-service-spec.md#32-endpoint-trust-anchor-rotation-obligations)).
+   ([spec §3.2 — Endpoint local record](https://github.com/LFDT-CLPR/clpr-spec/blob/main/clpr-service-spec.md#32-endpoint-trust-anchor-rotation-obligations)).
 10. When the peer's `trust_anchor_id` names an authority N rotations
     behind the relay's current source-chain authority, the relay
     produces N consecutive transition bundles (or, if the local verifier
     supports multi-rotation batching, a single bundle that walks the
     chain internally). Each intermediate bundle is verifiable under the
     authority installed by the previous transition
-    ([spec §3.2 — Catch-up across multiple missed rotations](https://github.com/hiero-hackers/CLPR-spec/blob/main/clpr-service-spec.md#catch-up-across-multiple-missed-rotations)).
+    ([spec §3.2 — Catch-up across multiple missed rotations](https://github.com/LFDT-CLPR/clpr-spec/blob/main/clpr-service-spec.md#catch-up-across-multiple-missed-rotations)).
 11. When the `trust_anchor_id` from a received sync payload is not in
     the relay's local sequence, the relay reads the peer chain's
     `Channel.trust_anchor` bytes on-demand and caches them by
     identifier before deciding whether to produce a transition bundle
-    ([spec §3.2 step 2](https://github.com/hiero-hackers/CLPR-spec/blob/main/clpr-service-spec.md#32-endpoint-trust-anchor-rotation-obligations)).
+    ([spec §3.2 step 2](https://github.com/LFDT-CLPR/clpr-spec/blob/main/clpr-service-spec.md#32-endpoint-trust-anchor-rotation-obligations)).
 
 ---
 
@@ -241,34 +241,26 @@ advancement is covered in Section #1.
 1. For outbound gRPC sync, the relay draws its peer list exclusively
    from the peer manifest read on the local Channel — not from static
    config, DNS, service discovery, or any other out-of-band directory
-   ([spec §2.4.2](https://github.com/hiero-hackers/CLPR-spec/blob/main/clpr-service-spec.md#242-peer-manifest-on-ledger-per-channel),
-   [§5.2](https://github.com/hiero-hackers/CLPR-spec/blob/main/clpr-service-spec.md#52-endpoint-discovery)).
-2. When a peer initiates INBOUND gRPC sync, the relay verifies the
-   peer's mTLS leaf certificate against the CA certificates stored in
-   the peer manifest entries — a leaf not chaining to any CA in the
-   manifest is rejected before serving the sync
-   ([spec §2.4.2](https://github.com/hiero-hackers/CLPR-spec/blob/main/clpr-service-spec.md#242-peer-manifest-on-ledger-per-channel),
-   [§1.2](https://github.com/hiero-hackers/CLPR-spec/blob/main/clpr-service-spec.md#12-endpoint-identity)).
-3. When `Channel.endpoint_manifest_version` advances on-chain, the
+   ([spec §2.4.2](https://github.com/LFDT-CLPR/clpr-spec/blob/main/clpr-service-spec.md#242-peer-manifest-on-ledger-per-channel),
+   [§5.2](https://github.com/LFDT-CLPR/clpr-spec/blob/main/clpr-service-spec.md#52-endpoint-discovery)).
+2. When `Channel.endpoint_manifest_version` advances on-chain, the
    relay reloads the peer manifest and updates its working set to match
    the new state: newly-added endpoints become eligible for outbound
-   sync and their CAs become trusted for inbound mTLS; removed
-   endpoints are no longer selected for outbound sync and their CAs are
-   no longer trusted; endpoints whose address or CA changed use the new
-   values on subsequent connections — all without requiring a restart
-   ([spec §2.4.2 Refresh](https://github.com/hiero-hackers/CLPR-spec/blob/main/clpr-service-spec.md#242-peer-manifest-on-ledger-per-channel)).
-4. A peer manifest with `version ≥ 1` and an empty endpoint list is
+   sync; removed endpoints are no longer selected for outbound sync;
+   endpoints whose address changed use the new address on subsequent
+   connections — all without requiring a restart
+   ([spec §2.4.2 Refresh](https://github.com/LFDT-CLPR/clpr-spec/blob/main/clpr-service-spec.md#242-peer-manifest-on-ledger-per-channel)).
+3. A peer manifest with `version ≥ 1` and an empty endpoint list is
    accepted as a valid state — the relay does not treat this as an
-   error or refuse to work on the Channel; sync is simply idle in both
-   directions (no outbound peers to contact; no trusted CAs for inbound
-   mTLS) until the manifest is repopulated
-   ([spec §2.4.2 Empty manifest](https://github.com/hiero-hackers/CLPR-spec/blob/main/clpr-service-spec.md#242-peer-manifest-on-ledger-per-channel)).
-5. A Channel whose peer manifest version is 0 (uninitialized, PENDING)
+   error or refuse to work on the Channel; outbound sync is simply idle
+   (no peers to contact) until the manifest is repopulated
+   ([spec §2.4.2 Empty manifest](https://github.com/LFDT-CLPR/clpr-spec/blob/main/clpr-service-spec.md#242-peer-manifest-on-ledger-per-channel)).
+4. A Channel whose peer manifest version is 0 (uninitialized, PENDING)
    is not sync'd against — the relay attempts no peer selection until
    `completeChannel` has populated the manifest to version ≥ 1
-   ([spec §2.1](https://github.com/hiero-hackers/CLPR-spec/blob/main/clpr-service-spec.md#21-channel)
+   ([spec §2.1](https://github.com/LFDT-CLPR/clpr-spec/blob/main/clpr-service-spec.md#21-channel)
    initial values,
-   [§2.4.2](https://github.com/hiero-hackers/CLPR-spec/blob/main/clpr-service-spec.md#242-peer-manifest-on-ledger-per-channel)
+   [§2.4.2](https://github.com/LFDT-CLPR/clpr-spec/blob/main/clpr-service-spec.md#242-peer-manifest-on-ledger-per-channel)
    population at `completeChannel`).
 
 ---
@@ -286,7 +278,7 @@ as operational and not enumerated here.
    against the configured `ClprService` and skips the on-chain broadcast
    when pre-verify reverts, so no gas is paid on definitively rejected
    bundles.
-   [§2.1.2](https://github.com/hiero-hackers/CLPR-spec/blob/main/clpr-service-spec.md#212-bundle-progress-criteria)
+   [§2.1.2](https://github.com/LFDT-CLPR/clpr-spec/blob/main/clpr-service-spec.md#212-bundle-progress-criteria)
    defines the required in-endpoint progress pre-check (evaluated
    against the cached destination Channel view).
 2. The relay broadcasts the exact `bundle_payload` bytes that
@@ -298,8 +290,8 @@ as operational and not enumerated here.
    despite passing the endpoint pre-check), the relay refetches the
    local Channel state and re-drives from that fresh state on the next
    cycle, rather than blindly resubmitting the same transaction
-   ([§4.2 Step 1a](https://github.com/hiero-hackers/CLPR-spec/blob/main/clpr-service-spec.md#42-bundle-verification-algorithm),
-   [§2.1.2 Service post-check](https://github.com/hiero-hackers/CLPR-spec/blob/main/clpr-service-spec.md#212-bundle-progress-criteria)).
+   ([§4.2 Step 1a](https://github.com/LFDT-CLPR/clpr-spec/blob/main/clpr-service-spec.md#42-bundle-verification-algorithm),
+   [§2.1.2 Service post-check](https://github.com/LFDT-CLPR/clpr-spec/blob/main/clpr-service-spec.md#212-bundle-progress-criteria)).
 4. The relay serializes `submitBundle` transactions per signing account
    — at most one submission is in flight for a given signing key at any
    time.
@@ -307,8 +299,8 @@ as operational and not enumerated here.
    `registrant_account` in the local endpoint manifest — submission is
    permissionless, and no internal self-check gates the call on
    manifest membership
-   ([spec §2.4.1 note](https://github.com/hiero-hackers/CLPR-spec/blob/main/clpr-service-spec.md#241-local-endpoint-manifest),
-   [§6.5](https://github.com/hiero-hackers/CLPR-spec/blob/main/clpr-service-spec.md#65-endpoint-management)).
+   ([spec §2.4.1 note](https://github.com/LFDT-CLPR/clpr-spec/blob/main/clpr-service-spec.md#241-local-endpoint-manifest),
+   [§6.5](https://github.com/LFDT-CLPR/clpr-spec/blob/main/clpr-service-spec.md#65-endpoint-management)).
 
 ---
 
@@ -322,36 +314,36 @@ throttle enforcement is in section #4.
 1. The relay rejects an inbound `ClprSyncPayload` whose `channel_id`
    length is not exactly 32 bytes; the payload is discarded before any
    further processing
-   ([spec §1.5](https://github.com/hiero-hackers/CLPR-spec/blob/main/clpr-service-spec.md#15-sync-protocol)).
+   ([spec §1.5](https://github.com/LFDT-CLPR/clpr-spec/blob/main/clpr-service-spec.md#15-sync-protocol)).
 2. The relay rejects an inbound `ClprSyncPayload` whose `channel_id`
    does not name a Channel this relay is configured to serve; unknown
    channel_ids are dropped before pre-verify
-   ([§1.5](https://github.com/hiero-hackers/CLPR-spec/blob/main/clpr-service-spec.md#15-sync-protocol)
+   ([§1.5](https://github.com/LFDT-CLPR/clpr-spec/blob/main/clpr-service-spec.md#15-sync-protocol)
    requires that a stream be scoped to one Channel; discarding payloads
    for unknown Channels is a defensive extension of that scope
    requirement).
 3. Within a single sync stream, the relay rejects any subsequent
    `ClprSyncPayload` whose `channel_id` differs from the one first seen
    on that stream — each stream is scoped to a single Channel
-   ([spec §1.5](https://github.com/hiero-hackers/CLPR-spec/blob/main/clpr-service-spec.md#15-sync-protocol)).
+   ([spec §1.5](https://github.com/LFDT-CLPR/clpr-spec/blob/main/clpr-service-spec.md#15-sync-protocol)).
 4. The relay rejects an inbound `ClprSyncPayload` whose serialized size
    exceeds the **local Channel's** own `max_sync_bytes` (the
    destination-side check — the relay's own ledger's throttle applies
    here, not the sender's); the payload is discarded before pre-verify
-   ([spec §7](https://github.com/hiero-hackers/CLPR-spec/blob/main/clpr-service-spec.md#7-configuration-parameters)
+   ([spec §7](https://github.com/LFDT-CLPR/clpr-spec/blob/main/clpr-service-spec.md#7-configuration-parameters)
    — "Endpoints MUST reject messages exceeding this limit";
-   [§1.5](https://github.com/hiero-hackers/CLPR-spec/blob/main/clpr-service-spec.md#15-sync-protocol)).
+   [§1.5](https://github.com/LFDT-CLPR/clpr-spec/blob/main/clpr-service-spec.md#15-sync-protocol)).
 5. When a received `bundle_payload` decodes to more messages than the
    **local Channel's own** `max_messages_per_bundle`, the relay skips
    submission — the on-chain check at
-   [§4.2 Step 2](https://github.com/hiero-hackers/CLPR-spec/blob/main/clpr-service-spec.md#42-bundle-verification-algorithm)
+   [§4.2 Step 2](https://github.com/LFDT-CLPR/clpr-spec/blob/main/clpr-service-spec.md#42-bundle-verification-algorithm)
    would reject anyway, so skipping saves the pre-verify round-trip
    (defensive).
 6. When a received `bundle_payload` decodes to any message whose
    serialized payload exceeds the **local Channel's own**
    `max_message_payload_bytes`, the relay skips submission — same
    rationale
-   ([§4.2 Step 2](https://github.com/hiero-hackers/CLPR-spec/blob/main/clpr-service-spec.md#42-bundle-verification-algorithm),
+   ([§4.2 Step 2](https://github.com/LFDT-CLPR/clpr-spec/blob/main/clpr-service-spec.md#42-bundle-verification-algorithm),
    defensive).
 7. **Endpoint hygiene (not spec-mandated).** Before submitting, the
    relay trims messages whose IDs are ≤ the current local
@@ -362,19 +354,19 @@ throttle enforcement is in section #4.
    submitter may advance our `received_message_id` in the interim, and
    the on-chain replay-defense check would otherwise reject the entire
    bundle
-   ([§4.2 Step 3](https://github.com/hiero-hackers/CLPR-spec/blob/main/clpr-service-spec.md#42-bundle-verification-algorithm)
+   ([§4.2 Step 3](https://github.com/LFDT-CLPR/clpr-spec/blob/main/clpr-service-spec.md#42-bundle-verification-algorithm)
    defines the validity rule but does not spell out this endpoint
    trimming obligation).
 8. When a received `bundle_payload` decodes to a `ClprControlMessage`
    whose `oneof payload` variant is unset (an unknown control message
    type from a newer protocol version), the relay treats the entire
    bundle as invalid and does not submit it
-   ([spec §1.3](https://github.com/hiero-hackers/CLPR-spec/blob/main/clpr-service-spec.md#13-control-messages)
+   ([spec §1.3](https://github.com/LFDT-CLPR/clpr-spec/blob/main/clpr-service-spec.md#13-control-messages)
    — "MUST reject the entire bundle").
 9. The relay MUST reject inbound `ClprSyncPayload` messages containing
    unrecognized protobuf fields, unknown message types, or malformed
    metadata; no silent field-drop is permitted
-   ([spec §8.1](https://github.com/hiero-hackers/CLPR-spec/blob/main/clpr-service-spec.md#81-protocol-strictness)).
+   ([spec §8.1](https://github.com/LFDT-CLPR/clpr-spec/blob/main/clpr-service-spec.md#81-protocol-strictness)).
 
 ---
 
@@ -388,40 +380,40 @@ Message passthrough (folded in from the former ORD section).
 1. In `PENDING`, the relay performs no sync work — the Channel is not
    yet operational; peer selection and bundle construction are both
    idle for the Channel
-   ([spec §2.1.1](https://github.com/hiero-hackers/CLPR-spec/blob/main/clpr-service-spec.md#211-channel-status-transitions)).
+   ([spec §2.1.1](https://github.com/LFDT-CLPR/clpr-spec/blob/main/clpr-service-spec.md#211-channel-status-transitions)).
 2. In `PAUSED`, the relay continues sync cycles — outbound bundles
    still deliver so acks and queued messages flow; inbound bundles are
    still submitted, and a correctly-ordered response bundle triggers
    the on-chain `PAUSED`→`ACTIVE` recovery via the ClprService
-   ([spec §2.1.1 PAUSED](https://github.com/hiero-hackers/CLPR-spec/blob/main/clpr-service-spec.md#211-channel-status-transitions),
-   [§4.5 recovery](https://github.com/hiero-hackers/CLPR-spec/blob/main/clpr-service-spec.md#45-response-ordering-verification)).
+   ([spec §2.1.1 PAUSED](https://github.com/LFDT-CLPR/clpr-spec/blob/main/clpr-service-spec.md#211-channel-status-transitions),
+   [§4.5 recovery](https://github.com/LFDT-CLPR/clpr-spec/blob/main/clpr-service-spec.md#45-response-ordering-verification)).
 3. In `CLOSING`, the relay continues sync cycles — outbound bundles
    still deliver so the queue drains; inbound bundles are still
    submitted so peer Data Messages get dispatched and generate Response
    Messages
-   ([spec §2.1.1 CLOSING](https://github.com/hiero-hackers/CLPR-spec/blob/main/clpr-service-spec.md#211-channel-status-transitions)).
+   ([spec §2.1.1 CLOSING](https://github.com/LFDT-CLPR/clpr-spec/blob/main/clpr-service-spec.md#211-channel-status-transitions)).
 4. In `DRAINED`, the relay continues sync cycles — inbound bundles are
    still submitted so the peer can still drain its own queue, and
    outbound Response Messages generated during `CLOSING` drain out
-   ([spec §2.1.1 DRAINED](https://github.com/hiero-hackers/CLPR-spec/blob/main/clpr-service-spec.md#211-channel-status-transitions)).
+   ([spec §2.1.1 DRAINED](https://github.com/LFDT-CLPR/clpr-spec/blob/main/clpr-service-spec.md#211-channel-status-transitions)).
 5. When the local Channel transitions to `CLOSED`, the relay constructs
    and delivers one final close-notification bundle (a normal bundle
    with `ClprQueueMetadata.status = CLOSED` and the final
    `received_message_id`, `next_message_id`, and running-hash values),
    retrying until the remote either accepts it or rejects it because
    the peer's Channel is already `CLOSED`
-   ([spec §3.4](https://github.com/hiero-hackers/CLPR-spec/blob/main/clpr-service-spec.md#34-endpoint-close-notification-obligation),
-   [§2.1.1 CLOSED terminal](https://github.com/hiero-hackers/CLPR-spec/blob/main/clpr-service-spec.md#211-channel-status-transitions)).
+   ([spec §3.4](https://github.com/LFDT-CLPR/clpr-spec/blob/main/clpr-service-spec.md#34-endpoint-close-notification-obligation),
+   [§2.1.1 CLOSED terminal](https://github.com/LFDT-CLPR/clpr-spec/blob/main/clpr-service-spec.md#211-channel-status-transitions)).
 6. In `CLOSED`, once the close-notification obligation (item #5) has
    been satisfied, the relay ceases all sync activity for the Channel —
    no peer selection, no outbound bundles, no inbound submission
-   ([spec §2.1.1 CLOSED terminal](https://github.com/hiero-hackers/CLPR-spec/blob/main/clpr-service-spec.md#211-channel-status-transitions)).
+   ([spec §2.1.1 CLOSED terminal](https://github.com/LFDT-CLPR/clpr-spec/blob/main/clpr-service-spec.md#211-channel-status-transitions)).
 7. The relay does not decide status transitions itself — status is
    derived exclusively from on-chain Channel reads. Local ordering
    violations, network failures, or peer misbehavior do not cause the
    relay to change its local view of Channel status independently of
    the on-chain record
-   ([spec §2.1.1](https://github.com/hiero-hackers/CLPR-spec/blob/main/clpr-service-spec.md#211-channel-status-transitions)).
+   ([spec §2.1.1](https://github.com/LFDT-CLPR/clpr-spec/blob/main/clpr-service-spec.md#211-channel-status-transitions)).
 8. Within the ID range being included in an outbound bundle, the relay
    preserves the queue order and completeness of Response Messages —
    it does not cherry-pick which responses to include or reorder them
@@ -429,7 +421,7 @@ Message passthrough (folded in from the former ORD section).
    tailoring per the peer's `BundleRequest` is a separate concern,
    covered in section #2 item #2). This outbound obligation is inferred
    from the receive-side ordering rule in
-   [spec §4.5](https://github.com/hiero-hackers/CLPR-spec/blob/main/clpr-service-spec.md#45-response-ordering-verification)
+   [spec §4.5](https://github.com/LFDT-CLPR/clpr-spec/blob/main/clpr-service-spec.md#45-response-ordering-verification)
    (mismatch pauses the destination Channel) — the spec does not state
    it directly on the sender.
 9. When retrying the close-notification bundle (item #5), the relay
@@ -438,91 +430,40 @@ Message passthrough (folded in from the former ORD section).
    conflate this with a `NoProgress` revert — §3.4 states that a
    close-notification carrying no new information is rejected as
    `CLOSED`, not as `NoProgress`
-   ([spec §3.4 — Remote already CLOSED](https://github.com/hiero-hackers/CLPR-spec/blob/main/clpr-service-spec.md#34-endpoint-close-notification-obligation)).
+   ([spec §3.4 — Remote already CLOSED](https://github.com/LFDT-CLPR/clpr-spec/blob/main/clpr-service-spec.md#34-endpoint-close-notification-obligation)).
 
 ---
 
 ## 8. Sync protocol (gRPC)
 
 Scope: relay obligations for the `ClprEndpointService.sync` bidirectional
-gRPC stream, its mTLS identity, and payload framing. Peer selection is
-covered in section #9. Peer-manifest-driven mTLS trust (verifying incoming
-leaves against manifest CAs) is covered in section #4 item #2.
+gRPC stream and payload framing. Peer selection is covered in section #9.
 
 1. The relay exposes `ClprEndpointService.sync` as a bidirectional
    streaming RPC
-   ([spec §1.5 gRPC Endpoint Service](https://github.com/hiero-hackers/CLPR-spec/blob/main/clpr-service-spec.md#15-sync-protocol)).
+   ([spec §1.5 gRPC Endpoint Service](https://github.com/LFDT-CLPR/clpr-spec/blob/main/clpr-service-spec.md#15-sync-protocol)).
 2. In each outbound `ClprSyncPayload` where the relay describes its own
    state to the peer, it populates `BundleRequest` with
    `current_received_message_id`, `current_status`,
    `current_trust_anchor_id`, and `current_endpoint_manifest_version`
    read from the local Channel
-   ([spec §1.5 BundleRequest](https://github.com/hiero-hackers/CLPR-spec/blob/main/clpr-service-spec.md#15-sync-protocol)).
+   ([spec §1.5 BundleRequest](https://github.com/LFDT-CLPR/clpr-spec/blob/main/clpr-service-spec.md#15-sync-protocol)).
 3. In each outbound `ClprSyncPayload` where the relay answers the
    peer's `BundleRequest`, it populates `BundleResponse.bundle_payload`
    shaped by the peer's requested state; content shape obligations
    live in section #2 and #3
-   ([spec §1.5 BundleResponse](https://github.com/hiero-hackers/CLPR-spec/blob/main/clpr-service-spec.md#15-sync-protocol)).
+   ([spec §1.5 BundleResponse](https://github.com/LFDT-CLPR/clpr-spec/blob/main/clpr-service-spec.md#15-sync-protocol)).
 4. A `ClprSyncPayload` with both `bundle_request` and `bundle_response`
    absent closes the stream — the relay honors this signal from a peer
    and stops sending on that stream
-   ([spec §1.5](https://github.com/hiero-hackers/CLPR-spec/blob/main/clpr-service-spec.md#15-sync-protocol)).
+   ([spec §1.5](https://github.com/LFDT-CLPR/clpr-spec/blob/main/clpr-service-spec.md#15-sync-protocol)).
 5. The relay configures its gRPC transport layer's max message size
    (both send and receive directions) to be ≥ the local Channel's
    `max_sync_bytes`, so legitimate payloads up to that limit can flow
    through the transport before reaching application-layer checks
-   ([spec §1.5](https://github.com/hiero-hackers/CLPR-spec/blob/main/clpr-service-spec.md#15-sync-protocol)
+   ([spec §1.5](https://github.com/LFDT-CLPR/clpr-spec/blob/main/clpr-service-spec.md#15-sync-protocol)
    — "Implementations MUST configure gRPC max message sizes to
    accommodate `max_sync_bytes`").
-6. mTLS handshakes use TLS 1.3; the relay's leaf certificate is Ed25519
-   and chains to the ECDSA P-384 self-signed CA whose public part is
-   registered on the local endpoint manifest
-   ([spec §1.2](https://github.com/hiero-hackers/CLPR-spec/blob/main/clpr-service-spec.md#12-endpoint-identity)
-   for the CA constraints;
-   [ADR 2026-07-14 endpoint-sync-streaming-and-mtls](https://github.com/hiero-hackers/CLPR-spec/blob/main/ADR/2026-07-14-endpoint-sync-streaming-and-mtls.md)
-   for TLS 1.3 + Ed25519 leaf).
-7. The relay's mTLS leaf certificate is ephemeral — regenerated at
-   process startup and after the configured rotation interval
-   (`leaf_certificate_validity_seconds`, default 86400 = 24 hours),
-   and held only in memory, not persisted to disk. Rotation under a
-   long-running process is observable via successive handshakes
-   presenting distinct leaf certificates chaining to the same CA
-   ([ADR 2026-07-14 endpoint-sync-streaming-and-mtls](https://github.com/hiero-hackers/CLPR-spec/blob/main/ADR/2026-07-14-endpoint-sync-streaming-and-mtls.md)).
-8. The relay rejects a peer mTLS handshake presenting a leaf
-   certificate whose validity window has expired (`notAfter` in the
-   past); no sync stream is established (implicit via standard TLS 1.3
-   handshake validation against the CA constraints in
-   [spec §1.2](https://github.com/hiero-hackers/CLPR-spec/blob/main/clpr-service-spec.md#12-endpoint-identity)).
-9. The relay rejects a peer mTLS handshake presenting a leaf
-   certificate that is not yet valid (`notBefore` in the future); no
-   sync stream is established (implicit via standard TLS 1.3 handshake
-   validation against the CA constraints in
-   [spec §1.2](https://github.com/hiero-hackers/CLPR-spec/blob/main/clpr-service-spec.md#12-endpoint-identity)).
-10. The relay rejects a peer mTLS handshake presenting a leaf
-    certificate that does not chain to any trusted CA — the generic
-    "unknown peer" case; the peer-manifest-CA specialization is in
-    section #4 item #2 (implicit via standard TLS 1.3 chain validation
-    against the manifest CAs;
-    [spec §1.2](https://github.com/hiero-hackers/CLPR-spec/blob/main/clpr-service-spec.md#12-endpoint-identity)
-    defines the CA format,
-    [§2.4.2](https://github.com/hiero-hackers/CLPR-spec/blob/main/clpr-service-spec.md#242-peer-manifest-on-ledger-per-channel)
-    sources the trusted CA set).
-11. The relay accepts a peer mTLS handshake presenting a leaf
-    certificate that is within its validity window and chains to a CA
-    registered in the peer manifest — the sync stream proceeds to the
-    application-layer `ClprSyncPayload` exchange (positive case of the
-    above; implicit via standard TLS 1.3 against
-    [spec §1.2](https://github.com/hiero-hackers/CLPR-spec/blob/main/clpr-service-spec.md#12-endpoint-identity)
-    +
-    [§2.4.2](https://github.com/hiero-hackers/CLPR-spec/blob/main/clpr-service-spec.md#242-peer-manifest-on-ledger-per-channel)).
-12. When the leaf certificate is rotated (interval or manual), rotation
-    takes effect between sync attempts; an established gRPC sync stream
-    is not re-handshaked mid-cycle
-    ([ADR 2026-07-14 endpoint-sync-streaming-and-mtls](https://github.com/hiero-hackers/CLPR-spec/blob/main/ADR/2026-07-14-endpoint-sync-streaming-and-mtls.md)).
-13. Setting `leaf_certificate_validity_seconds = 0` disables periodic
-    rotation; the leaf certificate generated at startup remains in use
-    until the process restarts
-    ([ADR 2026-07-14 endpoint-sync-streaming-and-mtls](https://github.com/hiero-hackers/CLPR-spec/blob/main/ADR/2026-07-14-endpoint-sync-streaming-and-mtls.md)).
 
 ---
 
@@ -530,7 +471,7 @@ leaves against manifest CAs) is covered in section #4 item #2.
 
 Scope: relay obligations for choosing which peer to sync with and when
 to sync. The spec provides only a SHOULD-level directive on peer
-selection ([§5.2](https://github.com/hiero-hackers/CLPR-spec/blob/main/clpr-service-spec.md#52-endpoint-discovery));
+selection ([§5.2](https://github.com/LFDT-CLPR/clpr-spec/blob/main/clpr-service-spec.md#52-endpoint-discovery));
 the rest is operator policy. Peer manifest consumption is covered in
 section #4.
 
@@ -538,21 +479,21 @@ section #4.
    and the Channel is in a sync-eligible status (`ACTIVE`, `PAUSED`,
    `CLOSING`, `DRAINED`), the relay initiates sync cycles against those
    peers — no eligible Channel with viable peers sits idle indefinitely
-   ([spec §5.2](https://github.com/hiero-hackers/CLPR-spec/blob/main/clpr-service-spec.md#52-endpoint-discovery),
-   [§2.1.1](https://github.com/hiero-hackers/CLPR-spec/blob/main/clpr-service-spec.md#211-channel-status-transitions)).
+   ([spec §5.2](https://github.com/LFDT-CLPR/clpr-spec/blob/main/clpr-service-spec.md#52-endpoint-discovery),
+   [§2.1.1](https://github.com/LFDT-CLPR/clpr-spec/blob/main/clpr-service-spec.md#211-channel-status-transitions)).
 2. When multiple peers are present in the peer manifest, the relay
    distributes outbound sync attempts across them across cycles — no
    single peer is monopolized or perpetually starved
-   ([spec §5.2](https://github.com/hiero-hackers/CLPR-spec/blob/main/clpr-service-spec.md#52-endpoint-discovery)).
+   ([spec §5.2](https://github.com/LFDT-CLPR/clpr-spec/blob/main/clpr-service-spec.md#52-endpoint-discovery)).
 3. The relay SHOULD prefer peers that reciprocate (return useful
    bundles) over peers that only consume; peers deemed non-reciprocating
    are deprioritized in subsequent selection cycles
-   ([spec §5.2](https://github.com/hiero-hackers/CLPR-spec/blob/main/clpr-service-spec.md#52-endpoint-discovery)).
+   ([spec §5.2](https://github.com/LFDT-CLPR/clpr-spec/blob/main/clpr-service-spec.md#52-endpoint-discovery)).
 4. A peer that is non-responsive across recent selection attempts
    (failed handshakes, timed-out streams, or persistently empty
    bundles) is deprioritized relative to healthy peers in subsequent
    selection cycles (operator-policy extension of
-   [§5.2](https://github.com/hiero-hackers/CLPR-spec/blob/main/clpr-service-spec.md#52-endpoint-discovery)'s
+   [§5.2](https://github.com/LFDT-CLPR/clpr-spec/blob/main/clpr-service-spec.md#52-endpoint-discovery)'s
    reciprocation SHOULD — spec text only covers persistently empty
    bundles).
 5. A previously deprioritized peer that resumes responding
@@ -564,11 +505,11 @@ section #4.
    wedge the Channel — it continues attempts with backoff and resumes
    normal cadence as soon as any peer recovers (operator-policy
    extension; not spelled out in
-   [§5.2](https://github.com/hiero-hackers/CLPR-spec/blob/main/clpr-service-spec.md#52-endpoint-discovery)).
+   [§5.2](https://github.com/LFDT-CLPR/clpr-spec/blob/main/clpr-service-spec.md#52-endpoint-discovery)).
 7. Peer selection incorporates a randomization component so that under
    a stable manifest the same peer pair does not persistently
    monopolize a Channel across cycles
-   ([spec §8.4](https://github.com/hiero-hackers/CLPR-spec/blob/main/clpr-service-spec.md#84-endpoint-sybil-resistance)).
+   ([spec §8.4](https://github.com/LFDT-CLPR/clpr-spec/blob/main/clpr-service-spec.md#84-endpoint-sybil-resistance)).
 
 ## Comparing against the implementation
 
@@ -578,49 +519,48 @@ section #4.
 2. **Section 7 item 5** — no final close-notification bundle; relay stops on CLOSED.
 3. **Section 6 item 1** — `channel_id` length is not validated.
 4. **Section 2 item 8** — `nextMessageId` uses on-chain frontier, not `last_included + 1`.
-5. **Section 2 item 14 / Bundle Progress Criteria** — the outbound
-   pre-check does not honor the five criteria as stated in §2.1.2:
-   * **Criterion 3 (ack progress)** is over-permissive — both proof-type
-     constructors treat `connection.receivedMessageId() > 0` as
-     sufficient ack progress (`QbftBundleConstructor.java:261`;
-     `SeiBundleConstructor.java:271`), rather than "advanced since last
-     cycle". A `hasStateChanged()` gate at
-     `EvmConnectionStateChangeTask.java:340` does perform a delta
-     comparison against the previous `ClprConnection` snapshot, so the
-     constructor is not re-invoked on an idle cycle; but the constructor
-     itself has no cached prior value and, once entered for any reason,
-     treats any non-zero ack as reason to build.
+5. **Section 2 item 14 / Bundle Progress Criteria** — in the two-phase
+   pull model a bundle is built on demand inside
+   `BundleConstructor.createBundle(channelId, request)` from the peer's
+   `BundleRequest`; there is no push-based `onStateChanged` pre-check any
+   more (canonical description: `docs/sync-protocol.md` → "Progress
+   criteria — when the payload is non-empty"). Measured against §2.1.2's
+   five criteria:
+   * **Criterion 2 (trust-anchor advancement)** — now honored on both
+     paths, and the move to pull resolved the old gap. The peer states
+     its `current_trust_anchor_id` in the request, so when it is behind,
+     catch-up evidence is included and the payload is non-empty (QBFT
+     epoch headers, `QbftBundleConstructor.java:267`; Sei validator-set
+     updates / rotation, `SeiBundleConstructor.java:346-347`). The former
+     push path could miss this because its change check excluded the
+     trust anchor; a request-driven build cannot.
+   * **Criterion 3 (ack progress)** is over-permissive — both
+     constructors treat `channel.receivedMessageId() > 0` as sufficient
+     ack progress (`QbftBundleConstructor.java:268`;
+     `SeiBundleConstructor.java:348`), rather than "advanced since the
+     peer's last request". The responder holds no per-peer prior value,
+     so any non-zero ack builds a metadata-only bundle.
    * **Criterion 4 (channel-state transition, QBFT path)** — the
      `conveysLifecycle` flag treats only `CLOSING` / `DRAINED` as a
-     lifecycle-carrying status, so the `DRAINED → CLOSED` sub-condition
+     lifecycle-carrying status, so the `DRAINED → CLOSED` sub-transition
      never triggers construction on its own
-     (`QbftBundleConstructor.java:257-258, 259-268`).
+     (`QbftBundleConstructor.java:265-269`).
    * **Criterion 4 (channel-state transition, Sei path)** — no
-     lifecycle-status check exists in the skip condition; the Sei
+     lifecycle-status term exists in the skip condition, so the Sei
      constructor never fires solely on a channel-state transition
-     (`SeiBundleConstructor.java:268-275`, entire
-     `onStateChanged` path at `:159-245`).
+     (`SeiBundleConstructor.java:345-348`).
    * **Criterion 5 (manifest advancement)** — a manifest-only advance
-     never causes construction to fire (both paths). Manifest-version
-     changes take the `refreshPeerManifest()` branch and deliberately
-     skip `proofConstructor.onStateChanged()`; the manifest proof is
-     only attached inside an already-triggered bundle
-     (`EvmConnectionStateChangeTask.java:271-278`;
-     `QbftBundleConstructor.java:368-392`;
-     `SeiBundleConstructor.java:397-421`).
-   * **Criterion 2 (trust-anchor advancement)** — a pure trust-anchor
-     rotation never causes construction to fire (both paths).
-     `hasStateChanged()` intentionally excludes `trustAnchor`, so
-     `onStateChanged()` is never invoked on rotation alone
-     (`EvmConnectionStateChangeTask.java:340-348, 231-233`;
-     QBFT epoch-header path at
-     `QbftBundleConstructor.java:229-247` is unreachable without the
-     `onStateChanged()` call).
-6. **Section 4 item 2 / Section 8 items 10–11** — mTLS match is
-   union-of-rosters, not per-connection. Documented as TODO in
-   `ClprSyncHandler.java:115-120` (it may be impossible to solve).
-7. **Section 4 item 2** — no startup self-check of listen-address / CA vs manifest (there is a ticket for CA, the listener address might be difficult as it might hide behind a LB).
-8. **Section 2 items 4, 5, 6** — outbound bundle construction does not
+     never causes construction to fire (both paths). The endpoint-manifest
+     proof is attached only *after* the skip check, riding along an
+     already-triggered bundle — never the sole reason to build one
+     (skip check `QbftBundleConstructor.java:266-276`, manifest step
+     `:362`; skip check `SeiBundleConstructor.java:345-352`, manifest step
+     `:461`).
+6. **Section 4** — no startup self-check of the listen address vs the local manifest (it might be difficult as the listener might hide behind a LB).
+7. **Section 2 items 4, 5, 6** — outbound bundle construction does not
    honor the peer's advertised throttles. `peerThrottles` is decoded
-   (`EvmContractStateReader.java:232`) but never consumed; bundle limits
-   come from local YAML instead (`ClprConnectionHandler.java:182,196`).
+   (`EvmContractStateReader.java:232`) and stored on the channel state but
+   never consumed; outbound message-count / size limits come from the
+   local ledger configuration instead — the per-format
+   `maxMessagesPerBundle()` passed to each constructor in
+   `ClprChannelHandler.java` (QBFT `:211`, Sei `:229`, beacon `:264`).

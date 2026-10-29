@@ -54,6 +54,33 @@ class BesuNetworkE2ETest {
                 .isEqualTo(besu.primaryNode().nodeKey().address());
     }
 
+    /**
+     * The restart-resume promise the chain layer is built on: {@code stop()} is a restart point, not
+     * a reset.
+     *
+     * <p>Testcontainers destroys the container on {@code stop()}, so this only holds because the
+     * node's chain data lives in a Docker volume that outlives it. Without that, a restarted node
+     * would come back at genesis and every node-restart test above it would pass for the wrong
+     * reason — the chain would look healthy because it was freshly born, not because it recovered.
+     */
+    @E2ETest(timeoutSeconds = 420)
+    void a_stopped_node_resumes_its_chain_rather_than_resetting_to_genesis(final E2EEnvironment env) {
+        final BesuNetwork besu = env.besuNetworks().add(BesuNetworkSpec.singleNode());
+
+        // Chains only: contracts and endpoints would add minutes and prove nothing about this claim.
+        env.besuNetworks().startAll();
+
+        final long before = besu.inspect().headBlockNumber();
+        assertThat(before).isGreaterThanOrEqualTo(1L);
+
+        besu.stop();
+        besu.start();
+
+        assertThat(besu.inspect().headBlockNumber())
+                .as("the restarted node resumed the existing chain instead of starting a new one")
+                .isGreaterThanOrEqualTo(before);
+    }
+
     @E2ETest(timeoutSeconds = 420)
     void two_independent_networks_get_distinct_chain_ids(final E2EEnvironment env) {
         final BesuNetwork besuA = env.besuNetworks().add(BesuNetworkSpec.singleNode());

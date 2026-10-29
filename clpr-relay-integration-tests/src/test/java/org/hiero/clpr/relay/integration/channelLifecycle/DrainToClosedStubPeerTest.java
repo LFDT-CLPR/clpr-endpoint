@@ -38,7 +38,7 @@ class DrainToClosedStubPeerTest extends OneSidedStubPeerTestBase {
 
         // 2. Peer acks + replies to DATA 1 in order → the outbound queue is fully acked → CLOSING → DRAINED.
         final ChannelState closing = interactor.requireChannelState(channelId);
-        final Bytes drain = StubBundles.hieroStateProof()
+        final Bytes drain = StubBundles.stubProof()
                 .ackedMessageId(closing.receivedMessageId())
                 .receivedMessageId(closing.nextMessageId() - 1)
                 .reply(1L, ClprMessageReplyStatus.SUCCESS, new byte[] {1})
@@ -49,7 +49,7 @@ class DrainToClosedStubPeerTest extends OneSidedStubPeerTestBase {
         // 3. Peer (also drained) sends a status-only bundle declaring DRAINED → DRAINED → CLOSED.
         //    Empty payload, no ack progress — accepted only because it carries a state transition.
         final ChannelState drained = interactor.requireChannelState(channelId);
-        final Bytes closeNotification = StubBundles.hieroStateProof()
+        final Bytes closeNotification = StubBundles.stubProof()
                 .ackedMessageId(drained.receivedMessageId())
                 .receivedMessageId(drained.ackedMessageId())
                 .chainFrom(Bytes.wrap(drained.receivedRunningHash()))

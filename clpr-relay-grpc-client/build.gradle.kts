@@ -18,8 +18,8 @@ dependencies {
     implementation("io.grpc:grpc-netty-shaded")
     implementation("com.swirlds:swirlds-logging")
 
-    // ClprEndpointInfoClient is a test-only outbound client for the always-plaintext info-plane
-    // RPCs (discoverEndpoints, getLedgerConfiguration). It has no production caller, so it lives in
+    // ClprEndpointInfoClient is a test-only outbound client for the
+    // getLedgerConfiguration RPC. It has no production caller, so it lives in
     // test fixtures rather than the shipped jar. Its dependencies mirror the main source set's.
     testFixturesImplementation("io.grpc:grpc-api")
     testFixturesImplementation("io.grpc:grpc-stub")
@@ -28,8 +28,6 @@ dependencies {
 }
 
 testModuleInfo {
-    requires("com.swirlds.metrics.api")
-    requires("org.hiero.clpr.relay.core.test.fixtures")
     requires("org.hiero.clpr.relay.grpc.client.test.fixtures")
     runtimeOnly("com.swirlds.config.impl")
 }

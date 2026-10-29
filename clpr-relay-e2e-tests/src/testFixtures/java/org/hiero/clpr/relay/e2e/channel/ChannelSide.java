@@ -4,6 +4,7 @@ package org.hiero.clpr.relay.e2e.channel;
 import com.hedera.hapi.node.state.clpr.ClprChannelStatus;
 import java.util.List;
 import org.hiero.clpr.relay.e2e.chain.BesuNetwork;
+import org.hiero.clpr.relay.e2e.chain.E2eContracts;
 import org.hiero.clpr.relay.e2e.endpoint.EvmEndpoint;
 import org.hiero.clpr.relay.evm.AbiCodec;
 import org.hiero.clpr.relay.integration.ContractInteractor;
@@ -13,6 +14,7 @@ import org.jspecify.annotations.Nullable;
 public final class ChannelSide {
 
     private final BesuNetwork network;
+    private final E2eContracts contracts;
     private final List<EvmEndpoint> endpoints;
     private final byte[] channelId;
     private final String verifierAddress;
@@ -26,15 +28,34 @@ public final class ChannelSide {
 
     ChannelSide(
             final BesuNetwork network,
+            final E2eContracts contracts,
             final List<EvmEndpoint> endpoints,
             final byte[] channelId,
             final String verifierAddress,
             final String applicationAddress) {
         this.network = network;
+        this.contracts = contracts;
         this.endpoints = List.copyOf(endpoints);
         this.channelId = channelId.clone();
         this.verifierAddress = verifierAddress;
         this.applicationAddress = applicationAddress;
+    }
+
+    /**
+     * @return the CLPR stack this side of the channel is wired against. Usually the chain's primary
+     *     ({@code network.contracts()}), but a channel built with {@link ChannelSpec.Builder#services}
+     *     points at a different deployment
+     */
+    public E2eContracts contracts() {
+        return contracts;
+    }
+
+    /**
+     * @return the {@code ClprService} address this side of the channel is wired against.
+     *     Shorthand for {@code contracts().clprService()}
+     */
+    public String clprServiceAddress() {
+        return contracts.clprService();
     }
 
     void connector(final Connector value) {
@@ -104,9 +125,19 @@ public final class ChannelSide {
         return channelId.clone();
     }
 
-    /** @return the decoded on-chain channel record. */
+    /**
+     * The decoded on-chain channel record, read from this side's CLPR stack (which may be an override
+     * service rather than the chain's primary).
+     *
+     * <p>The interactor is resolved on every call: a node restart rebuilds the network's host JSON-RPC
+     * clients, so an interactor captured earlier would keep reading through the closed pre-restart
+     * client.
+     *
+     * @return the decoded on-chain channel record
+     */
     public ContractInteractor.ChannelState state() {
-        return network.interactor().requireChannelState(channelId);
+        return network.interactorFor(network.deployerAccount(), contracts.core())
+                .requireChannelState(channelId);
     }
 
     /**

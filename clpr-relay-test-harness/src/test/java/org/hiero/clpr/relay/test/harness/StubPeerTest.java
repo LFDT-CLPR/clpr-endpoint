@@ -3,6 +3,7 @@ package org.hiero.clpr.relay.test.harness;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+import com.hedera.hapi.node.state.clpr.BundleResponse;
 import com.hedera.hapi.node.state.clpr.ClprChannelStatus;
 import com.hedera.hapi.node.state.clpr.ClprSyncPayload;
 import com.hedera.pbj.runtime.io.buffer.Bytes;
@@ -24,38 +25,40 @@ class StubPeerTest {
         try (StubPeer peer = StubPeer.start()) {
             final ClprSyncPayload request = ClprSyncPayload.newBuilder()
                     .channelId(channelId)
-                    .bundlePayload(Bytes.wrap(new byte[] {1, 2, 3}))
+                    .bundleResponse(BundleResponse.newBuilder()
+                            .bundlePayload(Bytes.wrap(new byte[] {1, 2, 3}))
+                            .build())
                     .build();
 
             final ClprSyncPayload reply = peer.pokeSync("127.0.0.1", peer.port(), request);
 
-            assertThat(reply.bundlePayload().length()).isZero();
-            assertThat(peer.syncCount()).isEqualTo(1);
-            assertThat(peer.received()).hasSize(1);
-            assertThat(peer.received().get(0).bundlePayload()).isEqualTo(Bytes.wrap(new byte[] {1, 2, 3}));
+            // The default responder asks for our data (a bundle_request) and injects no bundle of its own.
+            assertThat(reply.hasBundleResponse()).isFalse();
+            // A two-phase pokeSync records both the phase-1 request and the phase-2 follow-up.
+            assertThat(peer.syncCount()).isEqualTo(2);
+            assertThat(peer.received()).hasSize(2);
+            assertThat(peer.received().get(0).bundleResponse().bundlePayload())
+                    .isEqualTo(Bytes.wrap(new byte[] {1, 2, 3}));
         }
     }
 
     @Test
     void onSyncReplyDependsOnRequest() throws Exception {
         try (StubPeer peer = StubPeer.start()) {
-            final Bytes crafted = StubBundles.hieroStateProof()
-                    .status(ClprChannelStatus.CLOSING)
-                    .build();
+            final Bytes crafted =
+                    StubBundles.stubProof().status(ClprChannelStatus.CLOSING).build();
             peer.onSync(req -> ClprSyncPayload.newBuilder()
                     .channelId(req.channelId())
-                    .bundlePayload(crafted)
+                    .bundleResponse(
+                            BundleResponse.newBuilder().bundlePayload(crafted).build())
                     .build());
 
             final ClprSyncPayload reply = peer.pokeSync(
                     "127.0.0.1",
                     peer.port(),
-                    ClprSyncPayload.newBuilder()
-                            .channelId(channelId)
-                            .bundlePayload(Bytes.EMPTY)
-                            .build());
+                    ClprSyncPayload.newBuilder().channelId(channelId).build());
 
-            assertThat(reply.bundlePayload()).isEqualTo(crafted);
+            assertThat(reply.bundleResponse().bundlePayload()).isEqualTo(crafted);
         }
     }
 
@@ -67,12 +70,14 @@ class StubPeerTest {
                     peer.port(),
                     ClprSyncPayload.newBuilder()
                             .channelId(channelId)
-                            .bundlePayload(Bytes.wrap(new byte[] {9}))
+                            .bundleResponse(BundleResponse.newBuilder()
+                                    .bundlePayload(Bytes.wrap(new byte[] {9}))
+                                    .build())
                             .build());
 
             final ClprSyncPayload captured = peer.awaitSync(TIMEOUT);
             assertThat(captured).isNotNull();
-            assertThat(captured.bundlePayload()).isEqualTo(Bytes.wrap(new byte[] {9}));
+            assertThat(captured.bundleResponse().bundlePayload()).isEqualTo(Bytes.wrap(new byte[] {9}));
         }
     }
 }

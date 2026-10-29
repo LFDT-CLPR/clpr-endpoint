@@ -7,7 +7,6 @@ module org.hiero.clpr.relay.grpc.server {
     requires com.hedera.pbj.grpc.helidon;
     requires com.swirlds.base;
     requires com.swirlds.logging;
-    requires io.helidon.common.tls;
     requires io.helidon.common;
     requires io.helidon.webserver;
     requires static org.jspecify;

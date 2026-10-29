@@ -3,9 +3,11 @@ package org.hiero.clpr.relay.evm.sei;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.hiero.clpr.relay.evm.ByteUtils.ZERO_HASH;
 import static org.hiero.clpr.relay.evm.storage.ClprServiceStorageLayout.ENDPOINT_MANIFEST_COMMITMENT_SLOT;
 import static org.hiero.clpr.relay.evm.storage.ClprServiceStorageLayout.buildEvmStorageAbciKey;
 
+import com.hedera.hapi.node.state.clpr.BundleRequest;
 import com.hedera.hapi.node.state.clpr.ClprBundleContent;
 import com.hedera.hapi.node.state.clpr.ClprChannel;
 import com.hedera.hapi.node.state.clpr.ClprChannelStatus;
@@ -30,23 +32,25 @@ import java.util.stream.Stream;
 import org.hiero.clpr.relay.core.BundleConstructor;
 import org.hiero.clpr.relay.core.CommitmentLevel;
 import org.hiero.clpr.relay.core.ContractStateReader;
-import org.hiero.clpr.relay.core.PeerManifestVersionCache;
 import org.hiero.clpr.relay.evm.BundleConstructorManifestContract;
+import org.hiero.clpr.relay.evm.jsonrpc.EvmJsonRpcClient;
 import org.hiero.clpr.relay.evm.model.Address;
+import org.hiero.clpr.relay.evm.model.BlockHeader;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.MethodSource;
 
 /**
- * Unit tests for {@link SeiBundleConstructor}, exercising every branch of {@code onStateChanged}
- * against a stubbed {@link CometBftRpcClient} (no Docker required).
+ * Unit tests for {@link SeiBundleConstructor#createBundle}, exercising every branch against a stubbed
+ * {@link CometBftRpcClient} (no Docker required). In the two-phase protocol the channel state, queued
+ * messages and local manifest come from a stub {@link ContractStateReader}, while the requested
+ * message range, trust anchor and peer-known manifest version come from the {@link BundleRequest}.
  */
 class SeiBundleConstructorTest {
 
     private static final Address ADDR = Address.fromHexString("0x" + "cc".repeat(20));
     private static final Bytes CONN_ID = Bytes.wrap(new byte[32]);
-    private static final Bytes OTHER_CONN_ID = Bytes.fromHex("00".repeat(31) + "ff");
 
     private static final Bytes VALIDATORS_HASH = Bytes.fromHex("aa".repeat(32));
     private static final Bytes NEXT_VALIDATORS_HASH_DIFFERENT = Bytes.fromHex("bb".repeat(32));
@@ -56,32 +60,93 @@ class SeiBundleConstructorTest {
     private static final Bytes IAVL_PROOF = Bytes.fromHex("aabb");
     private static final Bytes MULTISTORE_PROOF = Bytes.fromHex("ccdd");
 
-    private static final BigInteger STATE_HEIGHT = BigInteger.valueOf(100);
+    /** stateHeight = evm head (102) - proofLag (2) = 100. */
+    private static final long STATE_HEIGHT = 100L;
 
-    // ── cache / construction ────────────────────────────────────────────────────
+    private static final long EVM_HEAD = 102L;
+    private static final int PROOF_LAG = 2;
+
+    /** Trust anchor matching the head validator set (validatorsHash || height) → no rotation. */
+    private static final Bytes NO_ROTATION_ANCHOR = anchorId(VALIDATORS_HASH, 101L);
+
+    // ── construction / helpers ──────────────────────────────────────────────────
+
+    private static SeiBundleConstructor sei(final CometBftRpcClient comet, final ContractStateReader reader) {
+        return sei(comet, reader, 10, 10);
+    }
+
+    private static SeiBundleConstructor sei(
+            final CometBftRpcClient comet, final ContractStateReader reader, final int maxMsgs, final int maxPrior) {
+        return new SeiBundleConstructor(
+                ADDR, maxMsgs, maxPrior, comet, evmStub(EVM_HEAD), reader, CommitmentLevel.LATEST, PROOF_LAG);
+    }
+
+    /** An EVM JSON-RPC stub whose head block is at {@code headNumber}. */
+    private static EvmJsonRpcClient evmStub(final long headNumber) {
+        return new EvmJsonRpcClient("http://localhost:8545", 3, Duration.ofSeconds(30)) {
+            @Override
+            public BlockHeader ethGetBlockHeaderByNumber(final String blockTag) {
+                return blockHeaderAtNumber(headNumber);
+            }
+        };
+    }
+
+    private static BundleRequest request(final Bytes trustAnchor, final long manifestVersion) {
+        return BundleRequest.newBuilder()
+                .currentReceivedMessageId(0L)
+                .currentTrustAnchorId(trustAnchor)
+                .currentEndpointManifestVersion(manifestVersion)
+                .build();
+    }
+
+    private static ContractStateReader reader(
+            final ClprChannel channel, final List<ContractStateReader.QueuedMessage> messages) {
+        return new StubStateReader(Optional.of(channel), messages, ClprEndpointManifest.DEFAULT);
+    }
+
+    private static ContractStateReader reader(
+            final ClprChannel channel,
+            final List<ContractStateReader.QueuedMessage> messages,
+            final ClprEndpointManifest manifest) {
+        return new StubStateReader(Optional.of(channel), messages, manifest);
+    }
+
+    private static ContractStateReader emptyReader() {
+        return new StubStateReader(Optional.empty(), List.of(), ClprEndpointManifest.DEFAULT);
+    }
 
     @Test
-    void getLatestBundlePayload_emptyBeforeAnyStateChange() {
-        final var constructor = new SeiBundleConstructor(ADDR, 10, 10, new StubCometBftRpcClient());
-        assertThat(constructor.getLatestBundlePayload(CONN_ID)).isEmpty();
+    void createBundle_emptyWhenChannelUnregistered() {
+        final var payload = sei(stubNoRotation(), emptyReader())
+                .createBundle(CONN_ID, request(NO_ROTATION_ANCHOR, 0L))
+                .bundlePayload();
+        assertThat(payload.length()).isZero();
     }
 
     @Test
     void constructor_rejectsNonPositiveMaxMessages() {
-        assertThatThrownBy(() -> new SeiBundleConstructor(ADDR, 0, 10, new StubCometBftRpcClient()))
+        assertThatThrownBy(() -> new SeiBundleConstructor(
+                        ADDR,
+                        0,
+                        10,
+                        new StubCometBftRpcClient(),
+                        evmStub(EVM_HEAD),
+                        emptyReader(),
+                        CommitmentLevel.LATEST,
+                        PROOF_LAG))
                 .isInstanceOf(IllegalArgumentException.class);
     }
 
     // ── happy paths ──────────────────────────────────────────────────────────────
 
     @Test
-    void onStateChanged_withMessage_cachesDeserializablePayloadWithFiveProofs() throws Exception {
+    void createBundle_withMessage_producesDeserializablePayloadWithSixProofs() throws Exception {
         final var cometBftRpcClient = stubNoRotation();
-        final var constructor = new SeiBundleConstructor(ADDR, 10, 10, cometBftRpcClient);
+        final var constructor = sei(cometBftRpcClient, reader(channel(0L), List.of(message(1L, RUNNING_HASH))));
 
-        constructor.onStateChanged(STATE_HEIGHT, CONN_ID, channel(0L), List.of(message(1L, RUNNING_HASH)));
-
-        final var raw = constructor.getLatestBundlePayload(CONN_ID).orElseThrow();
+        final var raw = constructor
+                .createBundle(CONN_ID, request(NO_ROTATION_ANCHOR, 0L))
+                .bundlePayload();
         final var payload = ClprSeiBundlePayload.PROTOBUF.parse(raw);
 
         assertThat(payload.hasStateProof()).isTrue();
@@ -99,21 +164,42 @@ class SeiBundleConstructorTest {
         assertThat(cometBftRpcClient.abciCallCount).isEqualTo(6);
         // No rotation → validator set must not be fetched.
         assertThat(cometBftRpcClient.lastValidatorSetHeight).isEqualTo(-1L);
-
-        // The cache is keyed per channel.
-        assertThat(constructor.getLatestBundlePayload(OTHER_CONN_ID)).isEmpty();
     }
 
     @Test
-    void onStateChanged_ackOnlyNoMessages_cachesFourProofs() throws Exception {
+    void createBundle_exceedingMaxBundleSize_yieldsEmptyPayload() {
+        // A channel with a pending message builds a non-empty bundle (see
+        // createBundle_withMessage_producesDeserializablePayloadWithSixProofs). With maxBundleSize = 1 byte the
+        // assembled proof exceeds the cap, so createBundle suppresses it (returns an empty payload) rather than
+        // emitting a bundle a peer's submitBundle would choke on.
         final var cometBftRpcClient = stubNoRotation();
-        final var constructor = new SeiBundleConstructor(ADDR, 10, 10, cometBftRpcClient);
+        final var constructor = new SeiBundleConstructor(
+                ADDR,
+                10,
+                10,
+                cometBftRpcClient,
+                evmStub(EVM_HEAD),
+                reader(channel(0L), List.of(message(1L, RUNNING_HASH))),
+                CommitmentLevel.LATEST,
+                PROOF_LAG,
+                1L);
 
+        final var payload = constructor
+                .createBundle(CONN_ID, request(NO_ROTATION_ANCHOR, 0L))
+                .bundlePayload();
+
+        assertThat(payload.length()).isZero();
+    }
+
+    @Test
+    void createBundle_ackOnlyNoMessages_producesFiveProofs() throws Exception {
+        final var cometBftRpcClient = stubNoRotation();
         // No pending messages, but a received message id > 0 means there is an ACK to prove.
-        constructor.onStateChanged(STATE_HEIGHT, CONN_ID, channel(5L), List.of());
+        final var constructor = sei(cometBftRpcClient, reader(channel(5L), List.of()));
 
-        final var payload = ClprSeiBundlePayload.PROTOBUF.parse(
-                constructor.getLatestBundlePayload(CONN_ID).orElseThrow());
+        final var payload = ClprSeiBundlePayload.PROTOBUF.parse(constructor
+                .createBundle(CONN_ID, request(NO_ROTATION_ANCHOR, 0L))
+                .bundlePayload());
         assertThat(payload.stateProof().storageProofs()).hasSize(5); // 5 channel fields, no message-hash slot
         assertThat(ClprBundleContent.PROTOBUF.parse(payload.bundleContent()).messages())
                 .isEmpty();
@@ -121,94 +207,96 @@ class SeiBundleConstructorTest {
     }
 
     @Test
-    void onStateChanged_rotation_includesNextValidatorSet() throws Exception {
+    void createBundle_rotation_includesNextValidatorSet() throws Exception {
         final var cometBftRpcClient = stubNoRotation();
         // next_validators_hash != validators_hash → rotation required.
         cometBftRpcClient.signedHeaderResponse = signedHeader(VALIDATORS_HASH, NEXT_VALIDATORS_HASH_DIFFERENT);
         cometBftRpcClient.validatorSetResponse = validatorSet(100L);
-        final var constructor = new SeiBundleConstructor(ADDR, 10, 10, cometBftRpcClient);
+        final var constructor = sei(cometBftRpcClient, reader(channel(0L), List.of()));
 
         // Rotation alone justifies a bundle even with no messages and no ACKs.
-        constructor.onStateChanged(STATE_HEIGHT, CONN_ID, channel(0L), List.of());
-
-        final var payload = ClprSeiBundlePayload.PROTOBUF.parse(
-                constructor.getLatestBundlePayload(CONN_ID).orElseThrow());
+        final var payload = ClprSeiBundlePayload.PROTOBUF.parse(constructor
+                .createBundle(CONN_ID, request(NO_ROTATION_ANCHOR, 0L))
+                .bundlePayload());
         assertThat(payload.hasNextValidatorSet()).isTrue();
         assertThat(payload.nextValidatorSet()).isEqualTo(cometBftRpcClient.validatorSetResponse);
         // next_validators_hash at H+1 is the hash of validators at H+2.
         assertThat(cometBftRpcClient.lastValidatorSetHeight).isEqualTo(102L);
     }
 
-    // ── deferral / skip branches (nothing cached) ────────────────────────────────
+    // ── deferral / skip branches (empty payload) ─────────────────────────────────
 
     @Test
-    void onStateChanged_skipsWhenNothingToProve() {
+    void createBundle_skipsWhenNothingToProve() {
         final var cometBftRpcClient = stubNoRotation();
-        final var constructor = new SeiBundleConstructor(ADDR, 10, 10, cometBftRpcClient);
-
         // No messages, no ACKs (receivedMessageId 0), no rotation → nothing to prove.
-        constructor.onStateChanged(STATE_HEIGHT, CONN_ID, channel(0L), List.of());
+        final var constructor = sei(cometBftRpcClient, reader(channel(0L), List.of()));
 
-        assertThat(constructor.getLatestBundlePayload(CONN_ID)).isEmpty();
+        final var payload = constructor
+                .createBundle(CONN_ID, request(NO_ROTATION_ANCHOR, 0L))
+                .bundlePayload();
+        assertThat(payload.length()).isZero();
         assertThat(cometBftRpcClient.abciCallCount).isEqualTo(0);
     }
 
     @Test
-    void onStateChanged_defersWhenRotationValidatorFetchFails() {
+    void createBundle_defersWhenRotationValidatorFetchFails() {
         final var cometBftRpcClient = stubNoRotation();
         cometBftRpcClient.signedHeaderResponse = signedHeader(VALIDATORS_HASH, NEXT_VALIDATORS_HASH_DIFFERENT);
         cometBftRpcClient.failValidatorSet = true;
-        final var constructor = new SeiBundleConstructor(ADDR, 10, 10, cometBftRpcClient);
+        final var constructor = sei(cometBftRpcClient, reader(channel(0L), List.of()));
 
-        constructor.onStateChanged(STATE_HEIGHT, CONN_ID, channel(0L), List.of());
-
-        assertThat(constructor.getLatestBundlePayload(CONN_ID)).isEmpty();
+        final var payload = constructor
+                .createBundle(CONN_ID, request(NO_ROTATION_ANCHOR, 0L))
+                .bundlePayload();
+        assertThat(payload.length()).isZero();
         assertThat(cometBftRpcClient.abciCallCount).isEqualTo(0);
     }
 
     @Test
-    void onStateChanged_defersOnRunningHashMismatch() {
+    void createBundle_defersOnRunningHashMismatch() {
         final var cometBftRpcClient = stubNoRotation();
         // The proven message-hash slot value will not match the message's running hash.
         cometBftRpcClient.abciProofResult =
                 new CometBftRpcClient.SeiAbciProofResult(Bytes.fromHex("dd".repeat(32)), IAVL_PROOF, MULTISTORE_PROOF);
-        final var constructor = new SeiBundleConstructor(ADDR, 10, 10, cometBftRpcClient);
+        final var constructor = sei(cometBftRpcClient, reader(channel(0L), List.of(message(1L, RUNNING_HASH))));
 
-        constructor.onStateChanged(STATE_HEIGHT, CONN_ID, channel(0L), List.of(message(1L, RUNNING_HASH)));
-
-        assertThat(constructor.getLatestBundlePayload(CONN_ID)).isEmpty();
+        final var payload = constructor
+                .createBundle(CONN_ID, request(NO_ROTATION_ANCHOR, 0L))
+                .bundlePayload();
+        assertThat(payload.length()).isZero();
     }
 
     @Test
-    void onStateChanged_defersOnEmptyMultistoreProof() {
+    void createBundle_defersOnEmptyMultistoreProof() {
         final var cometBftRpcClient = stubNoRotation();
         cometBftRpcClient.abciProofResult =
                 new CometBftRpcClient.SeiAbciProofResult(RUNNING_HASH, IAVL_PROOF, Bytes.EMPTY);
-        final var constructor = new SeiBundleConstructor(ADDR, 10, 10, cometBftRpcClient);
+        final var constructor = sei(cometBftRpcClient, reader(channel(0L), List.of(message(1L, RUNNING_HASH))));
 
-        constructor.onStateChanged(STATE_HEIGHT, CONN_ID, channel(0L), List.of(message(1L, RUNNING_HASH)));
-
-        assertThat(constructor.getLatestBundlePayload(CONN_ID)).isEmpty();
+        final var payload = constructor
+                .createBundle(CONN_ID, request(NO_ROTATION_ANCHOR, 0L))
+                .bundlePayload();
+        assertThat(payload.length()).isZero();
     }
 
     @Test
-    void onStateChanged_defersWhenAbciQueryFails() {
+    void createBundle_defersWhenAbciQueryFails() {
         final var cometBftRpcClient = stubNoRotation();
         cometBftRpcClient.failAbci = true;
-        final var constructor = new SeiBundleConstructor(ADDR, 10, 10, cometBftRpcClient);
+        final var constructor = sei(cometBftRpcClient, reader(channel(0L), List.of(message(1L, RUNNING_HASH))));
 
-        constructor.onStateChanged(STATE_HEIGHT, CONN_ID, channel(0L), List.of(message(1L, RUNNING_HASH)));
-
-        assertThat(constructor.getLatestBundlePayload(CONN_ID)).isEmpty();
+        final var payload = constructor
+                .createBundle(CONN_ID, request(NO_ROTATION_ANCHOR, 0L))
+                .bundlePayload();
+        assertThat(payload.length()).isZero();
     }
 
     // ── truncation ───────────────────────────────────────────────────────────────
 
     @Test
-    void onStateChanged_truncatesToMaxMessagesPerBundle() throws Exception {
+    void createBundle_truncatesToMaxMessagesPerBundle() throws Exception {
         final var cometBftRpcClient = stubNoRotation();
-        final var constructor = new SeiBundleConstructor(ADDR, 2, 10, cometBftRpcClient);
-
         // Five pending messages, but maxMessagesPerBundle is 2 → only the first two are included.
         // Every message shares RUNNING_HASH so the last *included* one passes the consistency check.
         final var messages = List.of(
@@ -217,11 +305,11 @@ class SeiBundleConstructorTest {
                 message(3L, RUNNING_HASH),
                 message(4L, RUNNING_HASH),
                 message(5L, RUNNING_HASH));
+        final var constructor = sei(cometBftRpcClient, reader(channel(0L), messages), 2, 10);
 
-        constructor.onStateChanged(STATE_HEIGHT, CONN_ID, channel(0L), messages);
-
-        final var payload = ClprSeiBundlePayload.PROTOBUF.parse(
-                constructor.getLatestBundlePayload(CONN_ID).orElseThrow());
+        final var payload = ClprSeiBundlePayload.PROTOBUF.parse(constructor
+                .createBundle(CONN_ID, request(NO_ROTATION_ANCHOR, 0L))
+                .bundlePayload());
         assertThat(ClprBundleContent.PROTOBUF.parse(payload.bundleContent()).messages())
                 .hasSize(2);
         assertThat(payload.stateProof().storageProofs()).hasSize(6); // 5 channel fields + 1 message hash
@@ -231,20 +319,18 @@ class SeiBundleConstructorTest {
     // ── endpoint-manifest proof branch (spec §4.2 Step 1b) ───────────────────────
 
     @Test
-    void onStateChanged_manifestDue_attachesManifestProof() throws Exception {
+    void createBundle_manifestDue_attachesManifestProof() throws Exception {
         final var cometBftRpcClient = stubNoRotation();
         final var manifest = ClprEndpointManifest.newBuilder()
                 .version(1L)
                 .serviceAddress(Bytes.wrap(new byte[20]))
                 .build();
-        final var constructor = new SeiBundleConstructor(
-                ADDR, 10, 10, cometBftRpcClient, new StubManifestReader(manifest), new PeerManifestVersionCache());
+        final var constructor = sei(cometBftRpcClient, reader(channel(5L), List.of(), manifest));
 
-        // Ack-only bundle (5 queue slots) + the manifest commitment slot = 6 ABCI queries.
-        constructor.onStateChanged(STATE_HEIGHT, CONN_ID, channel(5L), List.of());
-
-        final var payload = ClprSeiBundlePayload.PROTOBUF.parse(
-                constructor.getLatestBundlePayload(CONN_ID).orElseThrow());
+        // Ack-only bundle (5 queue slots) + the manifest commitment slot = 6 ABCI queries. Peer holds v0.
+        final var payload = ClprSeiBundlePayload.PROTOBUF.parse(constructor
+                .createBundle(CONN_ID, request(NO_ROTATION_ANCHOR, 0L))
+                .bundlePayload());
         assertThat(payload.hasManifestStorageProof()).isTrue();
         assertThat(payload.manifestStorageProof().key())
                 .isEqualTo(Bytes.wrap(buildEvmStorageAbciKey(ADDR, ENDPOINT_MANIFEST_COMMITMENT_SLOT)));
@@ -253,53 +339,47 @@ class SeiBundleConstructorTest {
     }
 
     @Test
-    void onStateChanged_peerAlreadyCurrent_skipsManifestProof() throws Exception {
+    void createBundle_peerAlreadyCurrent_skipsManifestProof() throws Exception {
         final var cometBftRpcClient = stubNoRotation();
         final var manifest = ClprEndpointManifest.newBuilder()
                 .version(1L)
                 .serviceAddress(Bytes.wrap(new byte[20]))
                 .build();
-        // The peer has already reported holding version 1, so 1 > 1 is false → no manifest proof.
-        final var peerVersions = new PeerManifestVersionCache();
-        peerVersions.record(CONN_ID, 1L);
-        final var constructor = new SeiBundleConstructor(
-                ADDR, 10, 10, cometBftRpcClient, new StubManifestReader(manifest), peerVersions);
+        final var constructor = sei(cometBftRpcClient, reader(channel(5L), List.of(), manifest));
 
-        constructor.onStateChanged(STATE_HEIGHT, CONN_ID, channel(5L), List.of());
-
-        final var payload = ClprSeiBundlePayload.PROTOBUF.parse(
-                constructor.getLatestBundlePayload(CONN_ID).orElseThrow());
+        // The peer already reports holding version 1, so 1 > 1 is false → no manifest proof.
+        final var payload = ClprSeiBundlePayload.PROTOBUF.parse(constructor
+                .createBundle(CONN_ID, request(NO_ROTATION_ANCHOR, 1L))
+                .bundlePayload());
         assertThat(payload.hasManifestStorageProof()).isFalse();
         assertThat(payload.endpointManifest()).isEqualTo(Bytes.EMPTY);
         assertThat(cometBftRpcClient.abciCallCount).isEqualTo(5); // queue slots only, no manifest slot
     }
 
     @Test
-    void onStateChanged_emptyServiceAddressManifest_skipsManifestProof() throws Exception {
+    void createBundle_emptyServiceAddressManifest_skipsManifestProof() throws Exception {
         final var cometBftRpcClient = stubNoRotation();
         // A version >= 1 manifest with an empty serviceAddress must not be proven (it would be rejected
         // on-chain by ManifestServiceAddressMismatch).
         final var manifest = ClprEndpointManifest.newBuilder().version(1L).build();
-        final var constructor = new SeiBundleConstructor(
-                ADDR, 10, 10, cometBftRpcClient, new StubManifestReader(manifest), new PeerManifestVersionCache());
+        final var constructor = sei(cometBftRpcClient, reader(channel(5L), List.of(), manifest));
 
-        constructor.onStateChanged(STATE_HEIGHT, CONN_ID, channel(5L), List.of());
-
-        final var payload = ClprSeiBundlePayload.PROTOBUF.parse(
-                constructor.getLatestBundlePayload(CONN_ID).orElseThrow());
+        final var payload = ClprSeiBundlePayload.PROTOBUF.parse(constructor
+                .createBundle(CONN_ID, request(NO_ROTATION_ANCHOR, 0L))
+                .bundlePayload());
         assertThat(payload.hasManifestStorageProof()).isFalse();
         assertThat(cometBftRpcClient.abciCallCount).isEqualTo(5);
     }
 
     @Test
-    void onStateChanged_noStateReader_attachesNoManifestProof() throws Exception {
+    void createBundle_defaultManifest_attachesNoManifestProof() throws Exception {
         final var cometBftRpcClient = stubNoRotation();
-        final var constructor = new SeiBundleConstructor(ADDR, 10, 10, cometBftRpcClient); // no manifest reader wired
+        // The default (version 0) local manifest is never strictly ahead of the peer → no proof.
+        final var constructor = sei(cometBftRpcClient, reader(channel(5L), List.of()));
 
-        constructor.onStateChanged(STATE_HEIGHT, CONN_ID, channel(5L), List.of());
-
-        final var payload = ClprSeiBundlePayload.PROTOBUF.parse(
-                constructor.getLatestBundlePayload(CONN_ID).orElseThrow());
+        final var payload = ClprSeiBundlePayload.PROTOBUF.parse(constructor
+                .createBundle(CONN_ID, request(NO_ROTATION_ANCHOR, 0L))
+                .bundlePayload());
         assertThat(payload.hasManifestStorageProof()).isFalse();
         assertThat(cometBftRpcClient.abciCallCount).isEqualTo(5);
     }
@@ -343,8 +423,6 @@ class SeiBundleConstructorTest {
                 .receivedMessageId(receivedMessageId)
                 .receivedRunningHash(Bytes.wrap(new byte[32]))
                 .trustAnchorId(Bytes.EMPTY)
-                .remoteTrustAnchorId(VALIDATORS_HASH.append(
-                        Bytes.wrap(ByteBuffer.allocate(8).putLong(101L).array())))
                 .build();
     }
 
@@ -356,8 +434,36 @@ class SeiBundleConstructorTest {
         return new ContractStateReader.QueuedMessage(BigInteger.valueOf(id), value);
     }
 
-    /** Minimal {@link ContractStateReader} that only supplies a fixed local endpoint manifest. */
-    private record StubManifestReader(ClprEndpointManifest manifest) implements ContractStateReader {
+    private static BlockHeader blockHeaderAtNumber(final long blockNumber) {
+        return new BlockHeader(
+                ZERO_HASH,
+                ZERO_HASH,
+                Address.ZERO,
+                ZERO_HASH,
+                ZERO_HASH,
+                ZERO_HASH,
+                ZERO_HASH,
+                BigInteger.ZERO,
+                BigInteger.valueOf(blockNumber),
+                BigInteger.ZERO,
+                BigInteger.ZERO,
+                BigInteger.ZERO,
+                Bytes.EMPTY,
+                ZERO_HASH,
+                ZERO_HASH,
+                BigInteger.ZERO,
+                ZERO_HASH,
+                BigInteger.ZERO,
+                BigInteger.ZERO,
+                ZERO_HASH,
+                ZERO_HASH,
+                ZERO_HASH);
+    }
+
+    /** Supplies a fixed channel, message list and local endpoint manifest. */
+    private record StubStateReader(
+            Optional<ClprChannel> channel, List<QueuedMessage> messages, ClprEndpointManifest manifest)
+            implements ContractStateReader {
         @Override
         public ClprEndpointManifest readEndpointManifest(final String blockTag) {
             return manifest;
@@ -365,13 +471,13 @@ class SeiBundleConstructorTest {
 
         @Override
         public Optional<ClprChannel> readChannelState(final Bytes channelId, final String blockTag) {
-            return Optional.empty();
+            return channel;
         }
 
         @Override
         public List<QueuedMessage> readQueuedMessages(
                 final Bytes channelId, final long fromId, final long toId, final String blockTag) {
-            return List.of();
+            return messages;
         }
 
         @Override
@@ -427,7 +533,7 @@ class SeiBundleConstructorTest {
     // ── parametrized trust-anchor rotation scenarios ─────────────────────────────
 
     private enum Outcome {
-        /** onStateChanged returns without caching anything. */
+        /** createBundle returns an empty payload. */
         NO_BUNDLE,
         /** A full bundle: state proof + content, optionally next_validator_set and/or prior updates. */
         REGULAR,
@@ -525,20 +631,21 @@ class SeiBundleConstructorTest {
 
     @ParameterizedTest(name = "{0}")
     @MethodSource("rotationScenarios")
-    void onStateChanged_producesExpectedRotations(final Scenario s) throws Exception {
+    void createBundle_producesExpectedRotations(final Scenario s) throws Exception {
         final var stub = new ChainStub(s.changeIntoHeights());
-        final var constructor = new SeiBundleConstructor(ADDR, 10, s.maxPriorValidatorSetUpdates(), stub);
         final var messages =
                 s.withMessage() ? List.of(message(1L, RUNNING_HASH)) : List.<ContractStateReader.QueuedMessage>of();
+        final var constructor = sei(stub, reader(channel(0L), messages), 10, s.maxPriorValidatorSetUpdates());
 
-        constructor.onStateChanged(STATE_HEIGHT, CONN_ID, channel(0L, s.remoteTrustAnchorId()), messages);
+        final var raw = constructor
+                .createBundle(CONN_ID, request(s.remoteTrustAnchorId(), 0L))
+                .bundlePayload();
 
-        final var cached = constructor.getLatestBundlePayload(CONN_ID);
         if (s.outcome() == Outcome.NO_BUNDLE) {
-            assertThat(cached).as("expected no bundle to be cached").isEmpty();
+            assertThat(raw.length()).as("expected no bundle").isZero();
             return;
         }
-        final var payload = ClprSeiBundlePayload.PROTOBUF.parse(cached.orElseThrow());
+        final var payload = ClprSeiBundlePayload.PROTOBUF.parse(raw);
 
         // Expected prior validator-set updates: for each change-announcing height h, the header at h
         // (signed by the still-trusted set) paired with the set that becomes active at h+1.
@@ -621,20 +728,6 @@ class SeiBundleConstructorTest {
                 Bytes.wrap(ByteBuffer.allocate(8).putLong(height).array()));
     }
 
-    private static ClprChannel channel(final long receivedMessageId, final Bytes remoteTrustAnchorId) {
-        return ClprChannel.newBuilder()
-                .channelId(CONN_ID)
-                .status(ClprChannelStatus.ACTIVE)
-                .nextMessageId(2L)
-                .ackedMessageId(0L)
-                .sentRunningHash(Bytes.wrap(new byte[32]))
-                .receivedMessageId(receivedMessageId)
-                .receivedRunningHash(Bytes.wrap(new byte[32]))
-                .trustAnchorId(Bytes.EMPTY)
-                .remoteTrustAnchorId(remoteTrustAnchorId)
-                .build();
-    }
-
     /**
      * Height-aware CometBFT stub: models a chain whose validator set changes at the configured
      * heights. {@code getSignedHeader(h)} and {@code getValidatorSet(h)} are pure functions of the
@@ -672,15 +765,15 @@ class SeiBundleConstructorTest {
     @Nested
     class ManifestAttachmentContract extends BundleConstructorManifestContract {
         @Override
-        protected BundleConstructor newConstructor(
-                final ContractStateReader manifestReader, final PeerManifestVersionCache peerVersions) {
-            return new SeiBundleConstructor(ADDR, 10, 10, stubNoRotation(), manifestReader, peerVersions);
+        protected BundleConstructor newConstructor(final ContractStateReader stateReader) {
+            return sei(stubNoRotation(), stateReader);
         }
 
         @Override
-        protected void driveOneBundle(final BundleConstructor constructor) {
-            // Ack-only bundle (receivedMessageId > 0, no pending messages) → a bundle is produced.
-            constructor.onStateChanged(STATE_HEIGHT, CONN, channel(5L), List.of());
+        protected Bytes driveOneBundle(final BundleConstructor constructor, final long peerKnownVersion) {
+            return constructor
+                    .createBundle(CONN, request(NO_ROTATION_ANCHOR, peerKnownVersion))
+                    .bundlePayload();
         }
 
         @Override

@@ -4,6 +4,7 @@ package org.hiero.clpr.relay.sync;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import com.hedera.hapi.node.state.clpr.ClprEndpoint;
+import com.hedera.hapi.node.state.clpr.ClprServiceEndpoint;
 import com.hedera.pbj.runtime.io.buffer.Bytes;
 import java.util.List;
 import org.hiero.clpr.relay.core.PeerEndpointCache;
@@ -21,8 +22,32 @@ class PeerSelectorTest {
     void setUp() {
         cache = new PeerEndpointCache();
         selector = new PeerSelector(cache);
-        peer1 = ClprEndpoint.newBuilder().accountId(Bytes.wrap(new byte[] {1})).build();
-        peer2 = ClprEndpoint.newBuilder().accountId(Bytes.wrap(new byte[] {2})).build();
+        peer1 = endpoint(1);
+        peer2 = endpoint(2);
+    }
+
+    /** An endpoint at {@code 10.0.0.<n>:9545} with no account id. */
+    private static ClprEndpoint endpoint(int n) {
+        return ClprEndpoint.newBuilder()
+                .serviceEndpoint(new ClprServiceEndpoint("10.0.0." + n, 9545))
+                .build();
+    }
+
+    @Test
+    void backoffIsTrackedPerHostPortNotPerAccountId() {
+        // Both peers share one account id; a failing peer1 must not back off peer2.
+        final var shared = Bytes.wrap(new byte[] {7});
+        final var a = peer1.copyBuilder().accountId(shared).build();
+        final var b = peer2.copyBuilder().accountId(shared).build();
+        cache.replaceAll(List.of(a, b));
+
+        for (int i = 0; i < 10; i++) {
+            selector.recordFailure(a);
+        }
+
+        for (int i = 0; i < 20; i++) {
+            assertThat(selector.selectPeer()).contains(b);
+        }
     }
 
     @Test
@@ -81,6 +106,25 @@ class PeerSelectorTest {
             var selected = selector.selectPeer();
             assertThat(selected).isPresent();
             assertThat(selected.get()).isEqualTo(peer2);
+        }
+    }
+
+    @Test
+    void allPeersBackedOff_fallsBackToUniformSelection() {
+        cache.replaceAll(List.of(peer1, peer2));
+
+        // Back off every known peer.
+        for (int i = 0; i < 5; i++) {
+            selector.recordFailure(peer1);
+            selector.recordFailure(peer2);
+        }
+
+        // The eligible list is empty, so the selector must fall back to uniform random over the full
+        // list and still return *some* peer rather than empty.
+        for (int i = 0; i < 20; i++) {
+            var selected = selector.selectPeer();
+            assertThat(selected).isPresent();
+            assertThat(selected.get()).isIn(peer1, peer2);
         }
     }
 }

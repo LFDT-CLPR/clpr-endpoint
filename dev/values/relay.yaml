@@ -22,10 +22,7 @@ metrics:
 
 # ── gRPC ───────────────────────────────────────────────────────────────────────
 grpc:
-  info:
-    port: 9546
-  sync:
-    port: 9545
+  port: 9545
   service:
     type: ClusterIP
 

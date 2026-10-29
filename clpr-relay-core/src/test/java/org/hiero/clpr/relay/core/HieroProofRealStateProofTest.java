@@ -25,12 +25,6 @@ class HieroProofRealStateProofTest {
 
         final ParsedBundle verified = new HieroProofCodec().decodeBundle(proof);
 
-        System.out.println("[stateProof.bin] bytes=" + raw.length + " nextMessageId="
-                + verified.metadata().nextMessageId() + " receivedMessageId="
-                + verified.metadata().receivedMessageId() + " state="
-                + verified.metadata().status() + " messages="
-                + verified.messages().size());
-
         // Surface what we decoded in the assertion description so a failure (or -i run) shows it.
         assertThat(verified.metadata())
                 .as(
@@ -40,6 +34,6 @@ class HieroProofRealStateProofTest {
                         verified.metadata().status(),
                         verified.messages().size())
                 .isNotNull();
-        assertThat(verified.rawProofBytes()).isEqualTo(proof);
+        assertThat(verified.rawBundleBytes()).isEqualTo(proof);
     }
 }

@@ -12,11 +12,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.Function;
-import java.util.function.UnaryOperator;
 import org.hiero.clpr.relay.core.CommitmentLevel;
-import org.hiero.clpr.relay.core.PeerEndpointTlsRegistry;
-import org.hiero.clpr.relay.core.PeerManifestVersionCache;
-import org.hiero.clpr.relay.core.TransactionSubmitter;
 import org.hiero.clpr.relay.core.metrics.LabeledCounter;
 import org.hiero.clpr.relay.evm.EthSigner;
 import org.hiero.clpr.relay.evm.EvmContractStateReader;
@@ -57,10 +53,7 @@ public final class ClprServiceHandler {
     private final Metrics metrics;
     private final RelayConfig.BackoffConfig backoff;
     private final String instanceName;
-    private final UnaryOperator<TransactionSubmitter> submitterDecorator;
     private final ClprEndpointClient clprEndpointClient;
-    private final PeerManifestVersionCache peerManifestVersions;
-    private final PeerEndpointTlsRegistry tlsRegistry;
 
     // Resolved once for this service: the commitment level, sync cadence, and proof lag applied to
     // every channel it serves, plus the peer proof-type resolver and the normalised per-channel
@@ -88,21 +81,15 @@ public final class ClprServiceHandler {
             final Metrics metrics,
             final RelayConfig.BackoffConfig backoff,
             final String instanceName,
-            final UnaryOperator<TransactionSubmitter> submitterDecorator,
             final ClprEndpointClient clprEndpointClient,
-            final Map<String, ProofType> peerProofTypes,
-            final PeerManifestVersionCache peerManifestVersions,
-            final PeerEndpointTlsRegistry tlsRegistry) {
+            final Map<String, ProofType> peerProofTypes) {
         this.network = network;
         this.serviceAddress = config.serviceAddress();
         this.config = config;
         this.metrics = metrics;
         this.backoff = backoff;
         this.instanceName = instanceName;
-        this.submitterDecorator = submitterDecorator;
         this.clprEndpointClient = clprEndpointClient;
-        this.peerManifestVersions = peerManifestVersions;
-        this.tlsRegistry = tlsRegistry;
 
         this.commitmentLevel = CommitmentLevel.LATEST;
         this.syncIntervalMs = ChannelSyncTask.DEFAULT_INTERVAL_MS;
@@ -129,13 +116,8 @@ public final class ClprServiceHandler {
      * @param metrics               metrics registry
      * @param backoff               per-loop failure-backoff policy
      * @param instanceName          worker-loop log-context label
-     * @param submitterDecorator    wraps each channel's EVM submitter before the guard
      * @param clprEndpointClient    outbound gRPC client shared with the sync loops
      * @param peerProofTypes        CAIP-2 {@code chainId → ProofType} map used to resolve peers
-     * @param peerManifestVersions  global cache of the endpoint-manifest version each peer last
-     *                              reported, shared across every channel this handler serves
-     * @param tlsRegistry           global TLS registry updated whenever a channel's peer endpoint
-     *                              manifest changes, so the mTLS trust manager stays current
      * @return a not-yet-started service handler
      * @throws IllegalArgumentException if {@code config.localNetwork()} is unknown
      */
@@ -145,27 +127,15 @@ public final class ClprServiceHandler {
             final Metrics metrics,
             final RelayConfig.BackoffConfig backoff,
             final String instanceName,
-            final UnaryOperator<TransactionSubmitter> submitterDecorator,
             final ClprEndpointClient clprEndpointClient,
-            final Map<String, ProofType> peerProofTypes,
-            final PeerManifestVersionCache peerManifestVersions,
-            final PeerEndpointTlsRegistry tlsRegistry) {
+            final Map<String, ProofType> peerProofTypes) {
         final var network = localNetworkAdapters.get(config.localNetwork());
         if (network == null) {
             throw new IllegalArgumentException("clprServices['" + config.serviceAddress() + "'].localNetwork='"
                     + config.localNetwork() + "' does not reference a known localNetworks id");
         }
         return new ClprServiceHandler(
-                network,
-                config,
-                metrics,
-                backoff,
-                instanceName,
-                submitterDecorator,
-                clprEndpointClient,
-                peerProofTypes,
-                peerManifestVersions,
-                tlsRegistry);
+                network, config, metrics, backoff, instanceName, clprEndpointClient, peerProofTypes);
     }
 
     /**
@@ -245,10 +215,7 @@ public final class ClprServiceHandler {
                     metrics,
                     backoff,
                     instanceName,
-                    submitterDecorator,
-                    clprEndpointClient,
-                    peerManifestVersions,
-                    tlsRegistry);
+                    clprEndpointClient);
         } catch (final RuntimeException e) {
             // A bootstrap read (protocol version / ledger config / roster) failed. Leave nothing
             // behind so discovery retries on its next cycle and a predefined channel is not
@@ -268,6 +235,9 @@ public final class ClprServiceHandler {
         final Bytes channelId;
         try {
             channelId = RelayInstance.hexToBytes(idHex);
+            if (channelId.length() != 32) {
+                throw new RuntimeException("Channel ID must be exactly 32 bytes");
+            }
         } catch (final RuntimeException e) {
             log.error(
                     "Skipping predefined channel '{}' on service {}: invalid channelId ({})",

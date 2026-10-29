@@ -29,7 +29,7 @@ class DedupStubPeerTest extends OneSidedStubPeerTestBase {
         // Give the relay an outbound DATA to ack/reply, then craft a bundle that the contract accepts.
         interactor.sendMessage(channelId, connectorId, targetApp(), "A->B 0".getBytes());
         final ContractInteractor.ChannelState state = interactor.requireChannelState(channelId);
-        final Bytes bundle = StubBundles.hieroStateProof()
+        final Bytes bundle = StubBundles.stubProof()
                 .ackedMessageId(state.receivedMessageId())
                 .receivedMessageId(state.nextMessageId() - 1)
                 .reply(1L, ClprMessageReplyStatus.SUCCESS, new byte[] {1})

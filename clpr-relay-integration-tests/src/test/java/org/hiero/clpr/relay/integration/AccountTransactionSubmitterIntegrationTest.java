@@ -3,7 +3,6 @@ package org.hiero.clpr.relay.integration;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
-import com.hedera.hapi.node.state.clpr.ClprChannel;
 import com.hedera.hapi.node.state.clpr.ClprChannelStatus;
 import com.hedera.hapi.node.state.clpr.ClprMessagePayload;
 import com.hedera.hapi.node.state.clpr.ClprQueueMetadata;
@@ -82,7 +81,7 @@ class AccountTransactionSubmitterIntegrationTest {
     void submit_landsOnChainAndAdvancesLatestNonceByOne() {
         final long before = latestNonce();
 
-        submitter.submit(TARGET, channel(CONN_A), bundle((byte) 0x01, 2L, 1L));
+        submitter.submit(TARGET, channel(CONN_A), bundle((byte) 0x01, 2L, 1L), null);
 
         awaitSubmissions(CONN_A, 1);
         // Exactly one transaction reached the chain for this account.
@@ -93,8 +92,8 @@ class AccountTransactionSubmitterIntegrationTest {
     void sequentialBundles_bothDeliverAndNonceAdvancesByTwo() {
         final long before = latestNonce();
 
-        submitter.submit(TARGET, channel(CONN_A), bundle((byte) 0x01, 2L, 1L));
-        submitter.submit(TARGET, channel(CONN_A), bundle((byte) 0x02, 3L, 2L));
+        submitter.submit(TARGET, channel(CONN_A), bundle((byte) 0x01, 2L, 1L), null);
+        submitter.submit(TARGET, channel(CONN_A), bundle((byte) 0x02, 3L, 2L), null);
 
         awaitSubmissions(CONN_A, 2);
         assertThat(latestNonce()).isEqualTo(before + 2);
@@ -104,8 +103,8 @@ class AccountTransactionSubmitterIntegrationTest {
     void twoChannels_bothProgress() {
         final long before = latestNonce();
 
-        submitter.submit(TARGET, channel(CONN_A), bundle((byte) 0x0a, 2L, 1L));
-        submitter.submit(TARGET, channel(CONN_B), bundle((byte) 0x0b, 2L, 1L));
+        submitter.submit(TARGET, channel(CONN_A), bundle((byte) 0x0a, 2L, 1L), null);
+        submitter.submit(TARGET, channel(CONN_B), bundle((byte) 0x0b, 2L, 1L), null);
 
         awaitSubmissions(CONN_A, 1);
         awaitSubmissions(CONN_B, 1);
@@ -129,7 +128,7 @@ class AccountTransactionSubmitterIntegrationTest {
         final long before = latestNonce();
 
         for (int i = 0; i < connectionCount; i++) {
-            submitter.submit(TARGET, connection(connId(i)), bundle((byte) (i & 0xff), 2L, 1L));
+            submitter.submit(TARGET, channel(channelId(i)), bundle((byte) (i & 0xff), 2L, 1L), null);
         }
 
         // All 100 bundles must land as unique transactions — nonce advances by exactly 100.
@@ -144,8 +143,8 @@ class AccountTransactionSubmitterIntegrationTest {
         return rpc.ethGetTransactionCount(AnvilContainer.DEV_ADDRESS, "latest");
     }
 
-    /** A unique 32-byte connection id from an integer index (b[0]=high byte, b[1]=low byte). */
-    private static byte[] connId(final int index) {
+    /** A unique 32-byte channel id from an integer index (b[0]=high byte, b[1]=low byte). */
+    private static byte[] channelId(final int index) {
         final byte[] b = new byte[32];
         b[0] = (byte) (index >> 8);
         b[1] = (byte) index;
@@ -157,8 +156,8 @@ class AccountTransactionSubmitterIntegrationTest {
     }
 
     private void awaitSubmissions(final byte[] connId, final int count) {
-        awaitTrue(
-                () -> render().contains("clpr_sync_bundle_submissions{channel_id=\"" + label(connId) + "\"} " + count));
+        awaitTrue(() -> render().contains("clpr_sync_bundle_submissions{channel_id=\"" + label(connId)
+                + "\",peer=\"anonymous\"} " + count));
     }
 
     /** Poll {@code condition} until true or a 30s deadline elapses (Anvil auto-mines instantly). */
@@ -182,8 +181,8 @@ class AccountTransactionSubmitterIntegrationTest {
         }
     }
 
-    private static ClprChannel channel(final byte[] connId) {
-        return ClprChannel.newBuilder().channelId(Bytes.wrap(connId)).build();
+    private static Bytes channel(final byte[] connId) {
+        return Bytes.wrap(connId);
     }
 
     private static ParsedBundle bundle(final byte proofTag, final long next, final long acked) {

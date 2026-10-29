@@ -8,6 +8,9 @@ import java.math.BigInteger;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
+import java.util.Locale;
+import java.util.Map;
+import java.util.stream.Collectors;
 import org.hiero.clpr.relay.evm.AbiCodec;
 
 /**
@@ -36,6 +39,19 @@ public final class BesuQbftGenesis {
      */
     public static final BigInteger DEFAULT_BALANCE_WEI = BigInteger.valueOf(8L).multiply(BigInteger.TEN.pow(18));
 
+    /**
+     * Balance the per-chain deployer account starts with: 100 ETH.
+     *
+     * <p>The deployer runs the wiring for every channel: each per-side connector gets a
+     * {@link org.hiero.clpr.relay.e2e.channel.ChannelSpec#DEFAULT_CONNECTOR_FUNDING_WEI} 1-ETH top-up
+     * from this same account, and at ten channels that alone is 20 ETH — well past what a
+     * {@link #DEFAULT_BALANCE_WEI} 8-ETH account can carry. Safe to raise: endpoint-signer drain
+     * faults do not touch deployer accounts, so sizing this to the test load does not undermine
+     * those faults' invariant.
+     */
+    public static final BigInteger DEPLOYER_BALANCE_WEI =
+            BigInteger.valueOf(100L).multiply(BigInteger.TEN.pow(18));
+
     /** 30,000,000 gas — room for the CLPR contract deploys and multi-message bundles. */
     private static final String GAS_LIMIT = "0x1C9C380";
 
@@ -51,15 +67,24 @@ public final class BesuQbftGenesis {
     private final BesuNetworkSpec spec;
     private final List<TestAccount> validatorKeys;
     private final List<TestAccount> fundedAccounts;
+    private final Map<String, BigInteger> balanceOverrides;
 
     /**
      * @param spec the network being built
      * @param validatorKeys one derived account per validator; its key becomes the Besu node key and
      *     its address a genesis validator
-     * @param fundedAccounts accounts written into {@code alloc}
+     * @param fundedAccounts accounts written into {@code alloc} with {@link #DEFAULT_BALANCE_WEI}
+     *     unless overridden
+     * @param balanceOverrides accounts whose {@code alloc} balance should differ from
+     *     {@link #DEFAULT_BALANCE_WEI}, keyed by {@code 0x}-prefixed address. Deployer-like
+     *     accounts that fund per-channel connectors need this because 10 × 1-ETH funding easily
+     *     exceeds the 8-ETH default.
      */
     public BesuQbftGenesis(
-            final BesuNetworkSpec spec, final List<TestAccount> validatorKeys, final List<TestAccount> fundedAccounts) {
+            final BesuNetworkSpec spec,
+            final List<TestAccount> validatorKeys,
+            final List<TestAccount> fundedAccounts,
+            final Map<String, BigInteger> balanceOverrides) {
         if (validatorKeys.size() != spec.validatorCount()) {
             throw new IllegalArgumentException(
                     "expected " + spec.validatorCount() + " validator keys, got " + validatorKeys.size());
@@ -67,6 +92,13 @@ public final class BesuQbftGenesis {
         this.spec = spec;
         this.validatorKeys = List.copyOf(validatorKeys);
         this.fundedAccounts = List.copyOf(fundedAccounts);
+        // Normalize override keys to lowercase so a caller passing an EIP-55 checksummed
+        // address does not silently miss the lookup against TestAccount.address() (which is
+        // lowercase). Without this, the account would fall through to DEFAULT_BALANCE_WEI and
+        // the deployer would run out of ETH mid-wiring — exactly what the override exists to
+        // prevent.
+        this.balanceOverrides = balanceOverrides.entrySet().stream()
+                .collect(Collectors.toUnmodifiableMap(e -> e.getKey().toLowerCase(Locale.ROOT), Map.Entry::getValue));
     }
 
     /**
@@ -142,13 +174,15 @@ public final class BesuQbftGenesis {
 
         final ObjectNode alloc = root.putObject("alloc");
         for (final TestAccount account : fundedAccounts) {
-            alloc.putObject(account.address()).put("balance", "0x" + DEFAULT_BALANCE_WEI.toString(16));
+            alloc.putObject(account.address())
+                    .put("balance", "0x" + balanceFor(account.address()).toString(16));
         }
         // Validator keys double as node keys; fund them too so a validator can also send
         // transactions if a test wants it to.
         for (final TestAccount validator : validatorKeys) {
             if (!alloc.has(validator.address())) {
-                alloc.putObject(validator.address()).put("balance", "0x" + DEFAULT_BALANCE_WEI.toString(16));
+                alloc.putObject(validator.address())
+                        .put("balance", "0x" + balanceFor(validator.address()).toString(16));
             }
         }
 
@@ -157,6 +191,10 @@ public final class BesuQbftGenesis {
         } catch (final com.fasterxml.jackson.core.JsonProcessingException e) {
             throw new IllegalStateException("failed to render Besu genesis for '" + spec.id() + "'", e);
         }
+    }
+
+    private BigInteger balanceFor(final String address) {
+        return balanceOverrides.getOrDefault(address.toLowerCase(Locale.ROOT), DEFAULT_BALANCE_WEI);
     }
 
     /**

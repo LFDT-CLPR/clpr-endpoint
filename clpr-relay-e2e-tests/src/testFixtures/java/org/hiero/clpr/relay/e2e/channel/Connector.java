@@ -2,6 +2,7 @@
 package org.hiero.clpr.relay.e2e.channel;
 
 import java.math.BigInteger;
+import java.time.Duration;
 import org.hiero.clpr.relay.e2e.chain.BesuNetwork;
 import org.hiero.clpr.relay.e2e.chain.ChainTx;
 import org.hiero.clpr.relay.evm.AbiCodec;
@@ -21,11 +22,13 @@ public final class Connector {
     private final BesuNetwork network;
     private final byte[] id;
     private final String contractAddress;
+    private final Duration fundTimeout;
 
-    Connector(final BesuNetwork network, final byte[] id, final String contractAddress) {
+    Connector(final BesuNetwork network, final byte[] id, final String contractAddress, final Duration fundTimeout) {
         this.network = network;
         this.id = id.clone();
         this.contractAddress = contractAddress;
+        this.fundTimeout = fundTimeout;
     }
 
     /** @return the 32-byte connector id. */
@@ -54,7 +57,13 @@ public final class Connector {
      * @param wei amount to send
      */
     public void fund(final BigInteger wei) {
-        ChainTx.fund(network.rpc(), network.deployerSubmitter(), contractAddress, wei, "fund connector " + idHex());
+        ChainTx.fund(
+                network.rpc(),
+                network.deployerSubmitter(),
+                contractAddress,
+                wei,
+                "fund connector " + idHex(),
+                fundTimeout);
     }
 
     @Override
