@@ -3,6 +3,7 @@ package org.hiero.clpr.relay.integration;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+import com.hedera.hapi.node.state.clpr.BundleRequest;
 import com.hedera.hapi.node.state.clpr.ClprChannel;
 import com.hedera.hapi.node.state.clpr.ClprChannelStatus;
 import com.hedera.hapi.node.state.clpr.ClprMessagePayload;
@@ -14,6 +15,7 @@ import java.math.BigInteger;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.List;
+import org.hiero.clpr.relay.core.CommitmentLevel;
 import org.hiero.clpr.relay.core.ContractStateReader;
 import org.hiero.clpr.relay.evm.AbiCodec;
 import org.hiero.clpr.relay.evm.EthSigner;
@@ -32,7 +34,7 @@ import org.testcontainers.junit.jupiter.Testcontainers;
  *
  * <p>The {@code ClprServiceTestFixture} contract — whose storage layout mirrors the real
  * {@code ClprServiceStorage} at exactly the slots {@link SeiBundleConstructor} reads and proves —
- * is deployed on the Sei EVM, then its {@code setChannel} / {@code setMessage} functions are
+ * is deployed on the Sei EVM, then its {@code setConnection} / {@code setMessage} functions are
  * called to populate one channel plus message 1's running hash. The constructor then ABCI-queries
  * those same slots, fetches real ICS-23 IAVL proofs from the CometBFT node, and assembles a
  * {@link ClprSeiBundlePayload}. The fixture's source is {@code ClprServiceTestFixture.sol}; its
@@ -44,11 +46,11 @@ import org.testcontainers.junit.jupiter.Testcontainers;
 @EnabledIfEnvironmentVariable(named = "RUN_INTEGRATION_TESTS", matches = ".*")
 class SeiBundleConstructorIntegrationTest {
 
-    /** Ordinal of {@code ChannelStatus.ACTIVE} in {@code ClprServiceTestFixture.sol}. */
+    /** Ordinal of {@code ConnectionStatus.ACTIVE} in {@code ClprServiceTestFixture.sol}. */
     private static final long STATUS_ACTIVE = 1L;
 
     /**
-     * All-zero 32-byte channel ID used for slot derivation and bundle cache lookup.
+     * All-zero 32-byte channel ID used for slot derivation.
      * Must match the {@code channelId} set in {@link #minimalChannel()} and written to the fixture.
      */
     static final Bytes CHANNEL_ID = Bytes.wrap(new byte[32]);
@@ -71,19 +73,15 @@ class SeiBundleConstructorIntegrationTest {
     static final Bytes RECEIVED_RUNNING_HASH =
             Bytes.fromHex("2222222222222222222222222222222222222222222222222222222222222222");
 
+    /** Blocks {@code createBundle} backs the EVM head off so CometBFT headers H+1/H+2 are committed. */
+    private static final int PROOF_LAG_BLOCKS = 2;
+
     @Container
     static final SeiContainer SEI = new SeiContainer();
 
     static TestEvmJsonRpcClient evmRpc;
     static CometBftRpcClient cometBftRpcClient;
     static String fixtureAddress;
-
-    /**
-     * The EVM block height at which the fixture state was populated. Used as {@code stateHeight}
-     * when calling {@link SeiBundleConstructor#onStateChanged} — the signed header at
-     * {@code bundleAtHeight + 1} is guaranteed to exist before any test runs.
-     */
-    static long bundleAtHeight;
 
     @BeforeAll
     static void setUp() throws Exception {
@@ -113,8 +111,8 @@ class SeiBundleConstructorIntegrationTest {
                 AbiCodec.encodeBytes32(RECEIVED_RUNNING_HASH.toByteArray()));
         txSubmitter.sendAndWait(fixtureAddress, setChannel, 0L, 300_000L);
 
-        // Populate message 1's running hash — must equal MSG_RUNNING_HASH (the value passed to
-        // onStateChanged) so the constructor's running-hash consistency check passes.
+        // Populate message 1's running hash — must equal MSG_RUNNING_HASH (the fixture value the
+        // constructor reads back from chain) so its running-hash consistency check passes.
         final byte[] setMessage = AbiCodec.encodeFunctionCall(
                 "setMessage(bytes32,uint64,bytes32)",
                 AbiCodec.encodeBytes32(CHANNEL_ID.toByteArray()),
@@ -122,58 +120,77 @@ class SeiBundleConstructorIntegrationTest {
                 AbiCodec.encodeBytes32(MSG_RUNNING_HASH.toByteArray()));
         txSubmitter.sendAndWait(fixtureAddress, setMessage, 0L, 300_000L);
 
-        // Determine the block at which setup completed, then wait for the next block so
-        // SeiBundleConstructor.onStateChanged can successfully fetch the signed header at
-        // stateHeight + 1.
+        // Determine the block at which setup completed, then wait for enough further blocks that
+        // createBundle's chosen height (head - PROOF_LAG_BLOCKS) lands strictly after the fixture write
+        // AND its anchor headers (blockNum + 1 / + 2) are committed.
         final long setupHeight =
                 evmRpc.ethGetBlockHeaderByNumber("latest").number().longValueExact();
-        bundleAtHeight = awaitNextBlock(setupHeight);
+        awaitHeader(setupHeight + PROOF_LAG_BLOCKS + 2);
     }
 
     // ── tests ─────────────────────────────────────────────────────────────────
 
     @Test
-    void cacheIsEmptyBeforeAnyCall() {
-        final var constructor =
-                new SeiBundleConstructor(Address.fromHexString(fixtureAddress), 10, 10, cometBftRpcClient);
-        assertThat(constructor.getLatestBundlePayload(CHANNEL_ID)).isEmpty();
+    void absentConnectionReturnsEmptyBundle() {
+        // A state reader with no channel record models the PENDING / unregistered case: createBundle
+        // short-circuits with an empty payload rather than fetching any proof.
+        final var stateReader = new FixedStateReader(null, List.of());
+        final var constructor = new SeiBundleConstructor(
+                Address.fromHexString(fixtureAddress),
+                10,
+                10,
+                cometBftRpcClient,
+                evmRpc,
+                stateReader,
+                CommitmentLevel.LATEST,
+                PROOF_LAG_BLOCKS);
+        assertThat(constructor
+                        .createBundle(CHANNEL_ID, fromMessageOne())
+                        .bundlePayload()
+                        .length())
+                .isZero();
     }
 
     @Test
-    void onStateChangedCachesBundlePayload() {
-        final var constructor =
-                new SeiBundleConstructor(Address.fromHexString(fixtureAddress), 10, 10, cometBftRpcClient);
+    void createBundleReturnsNonEmptyPayload() {
+        final var constructor = newConstructor();
 
-        constructor.onStateChanged(
-                BigInteger.valueOf(bundleAtHeight),
-                CHANNEL_ID,
-                minimalChannel(),
-                List.of(minimalMessage(1L, MSG_RUNNING_HASH)));
+        final var response = constructor.createBundle(CHANNEL_ID, fromMessageOne());
 
-        assertThat(constructor.getLatestBundlePayload(CHANNEL_ID))
-                .isPresent()
-                .get()
-                .satisfies(p -> assertThat(p.length()).isGreaterThan(0));
+        assertThat(response.bundlePayload().length()).isGreaterThan(0);
     }
 
     @Test
     void bundlePayloadDeserializesAsClprSeiBundlePayload() throws Exception {
-        final var constructor =
-                new SeiBundleConstructor(Address.fromHexString(fixtureAddress), 10, 10, cometBftRpcClient);
+        final var constructor = newConstructor();
 
-        constructor.onStateChanged(
-                BigInteger.valueOf(bundleAtHeight),
-                CHANNEL_ID,
-                minimalChannel(),
-                List.of(minimalMessage(1L, MSG_RUNNING_HASH)));
-
-        final Bytes raw = constructor.getLatestBundlePayload(CHANNEL_ID).orElseThrow();
+        final Bytes raw = constructor.createBundle(CHANNEL_ID, fromMessageOne()).bundlePayload();
         final ClprSeiBundlePayload payload = ClprSeiBundlePayload.PROTOBUF.parse(raw);
 
         assertThat(payload.hasStateProof()).isTrue();
         assertThat(payload.bundleContent().length()).isGreaterThan(0);
         assertThat(payload.stateProof().hasSignedHeader()).isTrue();
-        assertThat(payload.stateProof().storageProofs()).hasSize(6); // 5 conn fields + 1 msg hash
+        assertThat(payload.stateProof().storageProofs())
+                .hasSize(6); // 5 channel fields (incl manifest version) + 1 msg hash
+    }
+
+    /** A constructor wired to the live Sei node and a state reader serving the fixture channel + message 1. */
+    private static SeiBundleConstructor newConstructor() {
+        final var stateReader = new FixedStateReader(minimalChannel(), List.of(minimalMessage(1L, MSG_RUNNING_HASH)));
+        return new SeiBundleConstructor(
+                Address.fromHexString(fixtureAddress),
+                10,
+                10,
+                cometBftRpcClient,
+                evmRpc,
+                stateReader,
+                CommitmentLevel.LATEST,
+                PROOF_LAG_BLOCKS);
+    }
+
+    /** The peer's request: give me everything from message 1. */
+    private static BundleRequest fromMessageOne() {
+        return BundleRequest.newBuilder().currentReceivedMessageId(0L).build();
     }
 
     // ── fixtures ──────────────────────────────────────────────────────────────
@@ -213,20 +230,20 @@ class SeiBundleConstructorIntegrationTest {
     }
 
     /**
-     * Wait until the signed header at {@code stateHeight + 1} is available on the CometBFT node,
-     * then return {@code stateHeight}. This guarantees that {@link SeiBundleConstructor}
-     * can anchor its proofs to an existing header.
+     * Wait until the signed header at {@code height} is available on the CometBFT node. This guarantees
+     * the chain has advanced far enough that {@link SeiBundleConstructor#createBundle} — which reads the
+     * head and backs off {@link #PROOF_LAG_BLOCKS} — anchors its proofs to committed headers at a height
+     * after the fixture write.
      */
-    private static long awaitNextBlock(final long stateHeight) throws InterruptedException {
-        final long target = stateHeight + 1;
+    private static void awaitHeader(final long height) throws InterruptedException {
         for (int i = 0; i < 120; i++) {
             try {
-                cometBftRpcClient.getSignedHeader(target);
-                return stateHeight;
+                cometBftRpcClient.getSignedHeader(height);
+                return;
             } catch (final Exception ignored) {
                 Thread.sleep(500L);
             }
         }
-        throw new IllegalStateException("Block " + target + " not committed within 60s");
+        throw new IllegalStateException("Block " + height + " not committed within 60s");
     }
 }

@@ -3,8 +3,8 @@ package org.hiero.clpr.relay.app;
 
 import com.swirlds.config.api.ConfigData;
 import com.swirlds.config.api.ConfigProperty;
-import com.swirlds.config.api.validation.annotation.Min;
 import com.swirlds.config.api.validation.annotation.Positive;
+import java.math.BigInteger;
 import java.util.List;
 import java.util.Map;
 import org.jspecify.annotations.Nullable;
@@ -17,11 +17,7 @@ import org.jspecify.annotations.Nullable;
  * from the YAML file by {@code RelayConfigLoader}, because list/map-of-objects shapes cannot be
  * represented by the property-based config model.
  *
- * @param grpc                shared gRPC server settings (max message size); the {@code info} and
- *                            {@code sync} listeners are separate top-level params to allow the
- *                            config framework to bind them independently
- * @param info                always-plaintext info listener (discovery + ledger configuration)
- * @param sync                sync (data-plane) listener: port plus optional mTLS material
+ * @param grpc                gRPC server settings (port, max message size)
  * @param localNetworks       named local network entries; each entry declares a proof type and the
  *                            network connection parameters for a chain the relay submits to
  * @param clprServices        {@code ClprService} contract deployments; each references a local
@@ -35,8 +31,6 @@ import org.jspecify.annotations.Nullable;
  */
 public record RelayConfig(
         GrpcConfig grpc,
-        GrpcInfoConfig info,
-        GrpcSyncConfig sync,
         List<LocalNetworkConfig> localNetworks,
         List<ClprServiceConfig> clprServices,
         BackoffConfig backoff,
@@ -103,31 +97,41 @@ public record RelayConfig(
      *
      * <p>The {@code proofType} selects the correct {@code BundlePayloadCodec} for inbound sync payloads
      * and the {@code getLedgerConfiguration} payload type. The typed sub-blocks ({@code evm},
-     * {@code cometBft}, {@code qbft}) carry the network connection and proof parameters required to
-     * make RPC calls and build bundles.
+     * {@code cometBft}, {@code qbft}, {@code qbftContractMode}, {@code beacon}) carry the network
+     * connection and proof parameters required to make RPC calls and build bundles.
      *
-     * @param id        unique identifier for this network (referenced by {@link ClprServiceConfig})
-     * @param proofType proof format discriminator used to build the implementation bundle and to
-     *                  select the {@code BundlePayloadCodec} for inbound bundles
-     * @param evm       EVM network connection parameters; non-null when {@code proofType} is
-     *                  {@link ProofType#QBFT} or {@link ProofType#CometBFT}
-     * @param cometBft  CometBFT proof parameters; non-null when {@code proofType} is
-     *                  {@link ProofType#CometBFT}, otherwise {@code null}
-     * @param qbft      QBFT proof parameters; non-null when {@code proofType} is
-     *                  {@link ProofType#QBFT}, otherwise {@code null}
+     * @param id               unique identifier for this network (referenced by
+     *                         {@link ClprServiceConfig})
+     * @param proofType        proof format discriminator used to build the implementation bundle and
+     *                         to select the {@code BundlePayloadCodec} for inbound bundles
+     * @param evm              EVM network connection parameters; non-null when {@code proofType} is
+     *                         {@link ProofType#QBFT}, {@link ProofType#QBFTContractMode},
+     *                         {@link ProofType#CometBFT}, or {@link ProofType#EthereumPOS}
+     * @param cometBft         CometBFT proof parameters; non-null when {@code proofType} is
+     *                         {@link ProofType#CometBFT}, otherwise {@code null}
+     * @param qbft             QBFT header-mode proof parameters; non-null when {@code proofType} is
+     *                         {@link ProofType#QBFT}, otherwise {@code null}
+     * @param beacon           Ethereum-PoS beacon (consensus-layer) proof parameters; non-null when
+     *                         {@code proofType} is {@link ProofType#EthereumPOS}, otherwise
+     *                         {@code null}
+     * @param qbftContractMode QBFT contract-mode proof parameters; non-null when {@code proofType} is
+     *                         {@link ProofType#QBFTContractMode}, otherwise {@code null}
      */
     public record LocalNetworkConfig(
             String id,
             ProofType proofType,
             CommonEvmParams evm,
             @Nullable CometBftConfig cometBft,
-            @Nullable QbftConfig qbft) {}
+            @Nullable QbftConfig qbft,
+            @Nullable BeaconConfig beacon,
+            @Nullable QbftContractModeConfig qbftContractMode) {}
 
     /**
      * Common EVM network connection parameters. Present on {@link LocalNetworkConfig} entries whose
-     * {@code proofType} is {@link ProofType#QBFT} or {@link ProofType#CometBFT} — both run an EVM
-     * JSON-RPC and the {@code ClprService} contract. Proof-format-specific parameters live in the
-     * separate {@link QbftConfig} and {@link CometBftConfig} blocks.
+     * {@code proofType} is {@link ProofType#QBFT}, {@link ProofType#QBFTContractMode}, or
+     * {@link ProofType#CometBFT} — all run an EVM JSON-RPC and the {@code ClprService} contract.
+     * Proof-format-specific parameters live in the separate {@link QbftConfig},
+     * {@link QbftContractModeConfig}, and {@link CometBftConfig} blocks.
      *
      * @param jsonRpcUrl          HTTP URL of the EVM JSON-RPC endpoint
      *                            (default: {@code http://localhost:8545})
@@ -157,8 +161,8 @@ public record RelayConfig(
             int maxRpcRetries) {}
 
     /**
-     * QBFT proof parameters. Present on {@link LocalNetworkConfig} entries whose {@code proofType} is
-     * {@link ProofType#QBFT}. These drive the epoch-boundary computation for the
+     * QBFT header-mode proof parameters. Present on {@link LocalNetworkConfig} entries whose
+     * {@code proofType} is {@link ProofType#QBFT}. These drive the epoch-boundary computation for the
      * {@code getLedgerConfiguration} payload and bound bundle size.
      *
      * @param epochLength                   QBFT epoch length used to compute the epoch-boundary block
@@ -169,8 +173,68 @@ public record RelayConfig(
      *                                      (default: {@code 5})
      * @param maxMessagesPerBundle          maximum number of messages to include in a single bundle
      *                                      (default: {@code 10})
+     * @param maxBundleSize                 maximum assembled bundle-proof size, in bytes; a bundle
+     *                                      exceeding it is not emitted (defence-in-depth against a
+     *                                      gas/size blowup on the peer's {@code submitBundle}), on top
+     *                                      of {@code maxMessagesPerBundle} (default: {@code 1048576})
      */
-    public record QbftConfig(long epochLength, int maxEpochBlockHeadersPerBundle, int maxMessagesPerBundle) {}
+    public record QbftConfig(
+            long epochLength, int maxEpochBlockHeadersPerBundle, int maxMessagesPerBundle, long maxBundleSize) {
+
+        public QbftConfig {
+            if (maxBundleSize < 1) {
+                throw new IllegalArgumentException("qbft.maxBundleSize must be at least 1 byte");
+            }
+        }
+    }
+
+    /**
+     * QBFT "contract" validator-selection mode proof parameters. Present on
+     * {@link LocalNetworkConfig} entries whose {@code proofType} is
+     * {@link ProofType#QBFTContractMode}: the network's validator set is held by a validator smart
+     * contract (e.g. the Consensys
+     * <a href="https://github.com/Consensys/validator-smart-contracts">validator-smart-contracts</a>
+     * reference implementation) rather than encoded in every block header. Wired to a
+     * {@code ValidatorContractProofSource} implementation in {@code ClprChannelHandler}'s
+     * {@code QBFTContractMode} branch — a customized network can supply its own implementation there
+     * without touching this config shape, as long as it produces the {@code ContractProof} form the
+     * on-chain verifier checks.
+     *
+     * <p>{@code arraySlotHex} depends on the deployed validator contract's storage layout — the
+     * default {@code StandardValidatorContractProofSource} assumes a plain Solidity
+     * {@code address[]} state variable (length at the slot, elements at
+     * {@code keccak256(slot) + i}); read the deployed contract's storage layout to find the slot for
+     * a customized implementation.
+     *
+     * @param validatorContractAddress hex address of the deployed validator contract
+     * @param arraySlotHex             hex-encoded storage slot of the validator contract's
+     *                                 {@code address[]} array (32 bytes, {@code 0x}-prefixed or not)
+     * @param maxMessagesPerBundle     maximum number of messages to include in a single bundle
+     *                                 (default: {@code 10})
+     */
+    public record QbftContractModeConfig(
+            String validatorContractAddress, String arraySlotHex, int maxMessagesPerBundle) {
+
+        /**
+         * Parses {@link #arraySlotHex} into the storage slot it names. The single parse point for
+         * this value — both {@code RelayConfigLoader} (validation) and {@code ClprChannelHandler}
+         * (wiring) call this rather than parsing the hex string themselves.
+         *
+         * @return the parsed slot
+         * @throws IllegalArgumentException if the value is not valid hex, is negative, or exceeds 256 bits
+         */
+        public BigInteger arraySlot() {
+            final String stripped = arraySlotHex.startsWith("0x") || arraySlotHex.startsWith("0X")
+                    ? arraySlotHex.substring(2)
+                    : arraySlotHex;
+            final BigInteger slot = new BigInteger(stripped, 16);
+            if (slot.signum() < 0 || slot.bitLength() > 256) {
+                throw new IllegalArgumentException(
+                        "arraySlotHex '" + arraySlotHex + "' must be a non-negative value not exceeding 256 bits");
+            }
+            return slot;
+        }
+    }
 
     /**
      * CometBFT proof parameters. Present on {@link LocalNetworkConfig} entries whose
@@ -190,71 +254,58 @@ public record RelayConfig(
      *                             failure, in addition to the initial attempt (default: 3)
      * @param requestTimeoutMs     per-request CometBFT RPC response timeout, in milliseconds
      *                             (default: 5000)
+     * @param maxBundleSize        maximum assembled bundle-proof size, in bytes; a bundle exceeding it
+     *                             is not emitted (defence-in-depth against a gas/size blowup on the
+     *                             peer's {@code submitBundle}), on top of {@code maxMessagesPerBundle}
+     *                             (default: {@code 1048576})
      */
     public record CometBftConfig(
             String cometBftRpcUrl,
             int maxMessagesPerBundle,
             int maxPriorValidatorSetUpdates,
             int maxRetries,
-            long requestTimeoutMs) {}
+            long requestTimeoutMs,
+            long maxBundleSize) {
+
+        public CometBftConfig {
+            if (maxBundleSize < 1) {
+                throw new IllegalArgumentException("cometBft.maxBundleSize must be at least 1 byte");
+            }
+        }
+    }
 
     /**
-     * Shared gRPC settings: the max inbound message size applied symmetrically to every inbound
-     * PBJ-Helidon listener and to outbound {@code ClprEndpointClient} Netty channels.
+     * Ethereum-PoS beacon (consensus-layer) configuration. Present on {@link LocalNetworkConfig}
+     * entries whose {@code proofType} is {@link ProofType#EthereumPOS}.
      *
-     * <p>System property: {@code relay.grpc.maxMessageSize}
+     * @param beaconApiUrl         HTTP URL of the beacon node REST API
+     *                             (default: {@code http://localhost:5052})
+     * @param maxMessagesPerBundle maximum number of messages to include in a single bundle
+     *                             (default: {@code 10})
+     * @param maxRetries           maximum retry attempts for a beacon API call on a transient
+     *                             failure, in addition to the initial attempt (default: {@code 3})
+     * @param requestTimeoutMs     per-request beacon API response timeout in milliseconds
+     *                             (default: {@code 30000} = 30 s)
+     */
+    public record BeaconConfig(String beaconApiUrl, int maxMessagesPerBundle, int maxRetries, long requestTimeoutMs) {}
+
+    /**
+     * gRPC server configuration. The server hosts {@code sync} and {@code getLedgerConfiguration} on
+     * one port.
      *
-     * @param maxMessageSize maximum gRPC message size in bytes (default: {@code 1048576} = 1 MiB)
+     * <p>System properties: {@code relay.grpc.port}, {@code relay.grpc.maxMessageSize}
+     *
+     * @param port           TCP port the gRPC server listens on (default: {@code 9545})
+     * @param maxMessageSize maximum gRPC message size in bytes (default: {@code 1048576} = 1 MiB).
+     *                       Applied symmetrically to the inbound PBJ-Helidon server and to
+     *                       outbound {@code ClprEndpointClient} Netty channels
      */
     @ConfigData("relay.grpc")
     public record GrpcConfig(
+            @ConfigProperty(defaultValue = "9545") int port,
+
             @Positive @ConfigProperty(defaultValue = "1048576")
             int maxMessageSize) {}
-
-    /**
-     * The <b>info</b> listener: always plaintext, always served. Hosts the public metadata RPCs
-     * {@code discoverEndpoints} and {@code getLedgerConfiguration}, which return chain-verifiable data, so
-     * they are never put behind TLS.
-     *
-     * <p>System property: {@code relay.grpc.info.port}
-     *
-     * @param port TCP port for the plaintext info listener (default: {@code 9546})
-     */
-    @ConfigData("relay.grpc.info")
-    public record GrpcInfoConfig(
-            @ConfigProperty(defaultValue = "9546") int port) {}
-
-    /**
-     * The <b>sync</b> (data-plane) listener: its port and optional mTLS key. When {@code tlsEnabled} is
-     * {@code true} the sync listener is mandatory mTLS and {@code tlsKeyPath} is required; when
-     * {@code false} the key is ignored and the listener is plaintext.
-     *
-     * <p>{@code tlsKeyPath} is this endpoint's ECDSA P-384 <b>CA private key</b> — the private half of the
-     * CA whose certificate is published on-chain as {@code ClprEndpoint.tls_certificate}. The certificate
-     * itself is never loaded from disk: at startup the relay generates an Ed25519 leaf signed by this key
-     * and presents it at every handshake. A dialer's leaf must chain to a CA in the on-chain roster.
-     *
-     * <p>{@code leafCertValiditySeconds} controls how often the in-memory Ed25519 leaf is re-minted.
-     * The leaf is regenerated on demand the first time a TLS handshake occurs after the window elapses.
-     * Set to {@code 0} to disable rotation (the initial leaf is valid for 10 years). The default of
-     * {@code 86400} (24 h) is a reasonable production value; adjust for compliance requirements.
-     *
-     * <p>System properties: {@code relay.grpc.sync.port}, {@code relay.grpc.sync.tlsEnabled},
-     * {@code relay.grpc.sync.tlsKeyPath}, {@code relay.grpc.sync.leafCertValiditySeconds}
-     *
-     * @param port                     TCP port for the sync listener (default: {@code 9545})
-     * @param tlsEnabled               {@code true} makes the sync listener mandatory mTLS (default: {@code false})
-     * @param tlsKeyPath               path to this endpoint's CA private key (PKCS#8 PEM/DER); required iff
-     *                                 {@code tlsEnabled}
-     * @param leafCertValiditySeconds  seconds between leaf re-mints; {@code 0} disables rotation
-     *                                 (default: {@code 86400})
-     */
-    @ConfigData("relay.grpc.sync")
-    public record GrpcSyncConfig(
-            @ConfigProperty(defaultValue = "9545") int port,
-            @ConfigProperty(defaultValue = "false") boolean tlsEnabled,
-            @ConfigProperty(defaultValue = "") String tlsKeyPath,
-            @ConfigProperty(defaultValue = "86400") @Min(0) long leafCertValiditySeconds) {}
 
     /**
      * Failure-backoff policy for the relay's per-channel loops (the sync loop and the listener

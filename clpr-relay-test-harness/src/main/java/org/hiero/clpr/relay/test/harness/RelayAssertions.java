@@ -29,9 +29,9 @@ public final class RelayAssertions {
     }
 
     /**
-     * Assert on an endpoint counter family, e.g. {@code assertMetric(metrics, "grpc", "sync.requests")}
+     * Assert on an endpoint counter family, e.g. {@code assertMetric(metrics, "sync", "exchanges.started")}
      * or {@code assertMetric(metrics, "sync", "bundle.skipped")}. The value sums every
-     * {@code channel_id}-labelled series sharing the base name.
+     * labelled series sharing the base name.
      */
     public static MetricAssert assertMetric(final Metrics metrics, final String category, final String baseName) {
         return new MetricAssert(metrics, category, baseName);
@@ -51,8 +51,8 @@ public final class RelayAssertions {
         return new QueueMetadataAssert(codec.decodeBundle(bundlePayload).metadata());
     }
 
-    /** Decode the bundle carried in a sync reply/capture and assert on its metadata. */
+    /** Decode the bundle carried in a two-phase sync reply/capture and assert on its metadata. */
     public static QueueMetadataAssert assertReplyMetadata(final BundlePayloadCodec codec, final ClprSyncPayload reply) {
-        return assertBundleMetadata(codec, reply.bundlePayload());
+        return assertBundleMetadata(codec, reply.bundleResponse().bundlePayload());
     }
 }

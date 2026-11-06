@@ -5,6 +5,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import org.hiero.clpr.relay.evm.jsonrpc.EvmJsonRpcClient;
+import org.hiero.clpr.relay.evm.model.BlockHeader;
 import org.hiero.clpr.relay.evm.testfixtures.TestEvmJsonRpcClient;
 import org.junit.jupiter.api.Test;
 
@@ -143,5 +144,35 @@ class Eip1559GasStrategyTest {
     void rejectsNonPositiveMultiplier() {
         assertThatThrownBy(() -> new Eip1559GasStrategy(TestEvmJsonRpcClient.stubWithBaseFee(0L), NO_CAP, 0L, 0.0))
                 .isInstanceOf(IllegalArgumentException.class);
+    }
+
+    // -------------------------------------------------------------------------
+    // Degenerate RPC / arithmetic edges
+    // -------------------------------------------------------------------------
+
+    @Test
+    void nullBlockHeader_throws() {
+        final EvmJsonRpcClient nullHeaderRpc = new TestEvmJsonRpcClient("http://unused") {
+            @Override
+            public BlockHeader ethGetBlockHeaderByNumber(final String blockTag) {
+                return null;
+            }
+        };
+        final var strategy = new Eip1559GasStrategy(nullHeaderRpc, NO_CAP, GWEI, 1.2);
+        assertThatThrownBy(strategy::computeFees)
+                .isInstanceOf(JsonRpcException.class)
+                .hasMessageContaining("returned null for 'latest' block");
+    }
+
+    @Test
+    void feeAdditionOverflow_throwsAsCapExceeded() {
+        // baseFee = Long.MAX_VALUE, multiplier 1.0 → bufferedBase saturates to Long.MAX_VALUE; adding
+        // a positive priority fee overflows to a negative maxFee. The overflow guard must catch this
+        // rather than reporting a bogus (negative) fee.
+        final var strategy =
+                new Eip1559GasStrategy(TestEvmJsonRpcClient.stubWithBaseFee(Long.MAX_VALUE), NO_CAP, 1L, 1.0);
+        assertThatThrownBy(strategy::computeFees)
+                .isInstanceOf(JsonRpcException.class)
+                .hasMessageContaining("gas price cap exceeded");
     }
 }

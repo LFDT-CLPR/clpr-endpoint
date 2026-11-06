@@ -11,7 +11,7 @@ import com.swirlds.metrics.api.Metrics;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import org.hiero.clpr.relay.core.metrics.SimpleMetrics;
-import org.hiero.clpr.relay.evm.QbftProofCodec;
+import org.hiero.clpr.relay.evm.qbft.QbftProofCodec;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.condition.EnabledIfEnvironmentVariable;
 
@@ -23,8 +23,8 @@ import org.junit.jupiter.api.condition.EnabledIfEnvironmentVariable;
  * and the gauges return to zero.
  *
  * <p>If the loops had died on the first throw, the post-recovery message would never reach the peer. The
- * precise no-hot-loop / backoff assertions live in the unit layer ({@code ChannelSyncTaskTest},
- * {@code EvmChannelStateChangeTaskTest}); here each failing iteration is paced by the JSON-RPC request
+ * precise no-hot-loop / backoff assertions live in the unit layer ({@code ConnectionSyncTaskTest},
+ * {@code EvmConnectionStateChangeTaskTest}); here each failing iteration is paced by the JSON-RPC request
  * timeout, so the windows are intentionally generous.
  */
 @EnabledIfEnvironmentVariable(named = "RUN_INTEGRATION_TESTS", matches = ".*")
@@ -75,12 +75,12 @@ class TransientNodeOutageRecoveryTest extends OneSidedStubPeerTestBase {
 
     /** True if {@code payload}'s bundle decodes to a DATA message whose data equals {@code msgData}. */
     private static boolean carriesMessage(final ClprSyncPayload payload, final byte[] msgData) {
-        if (payload.bundlePayload().length() == 0) {
+        if (replyBundle(payload).length() == 0) {
             return false;
         }
         try {
             return new QbftProofCodec(Bytes.wrap(channelId))
-                    .decodeBundle(payload.bundlePayload()).messages().stream()
+                    .decodeBundle(replyBundle(payload)).messages().stream()
                             .anyMatch(m ->
                                     m.hasMessage() && m.message().messageData().equals(Bytes.wrap(msgData)));
         } catch (final RuntimeException e) {

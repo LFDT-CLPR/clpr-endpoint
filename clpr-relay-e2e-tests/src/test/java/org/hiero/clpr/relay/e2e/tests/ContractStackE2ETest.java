@@ -8,6 +8,7 @@ import org.hiero.clpr.relay.e2e.E2EEnvironment;
 import org.hiero.clpr.relay.e2e.E2ETest;
 import org.hiero.clpr.relay.e2e.chain.BesuNetwork;
 import org.hiero.clpr.relay.e2e.chain.BesuNetworkSpec;
+import org.hiero.clpr.relay.e2e.chain.ChainTx;
 import org.hiero.clpr.relay.e2e.chain.E2eContracts;
 
 /**
@@ -44,7 +45,8 @@ class ContractStackE2ETest {
 
         // A per-channel verifier wrapper and connector deploy on demand — this is what channel
         // wiring will do once per channel.
-        final String channelVerifier = besu.deployer().deployChannelVerifier(contracts.qbftVerifier());
+        final String channelVerifier =
+                besu.deployer().deployChannelVerifier(contracts.qbftVerifier(), ChainTx.DEFAULT_RECEIPT_TIMEOUT);
         assertThat(besu.rawRpc().ethGetCode(channelVerifier))
                 .as("QbftE2EVerifier wrapper bytecode")
                 .isNotEqualTo("0x");

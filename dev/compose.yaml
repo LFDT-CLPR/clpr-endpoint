@@ -32,13 +32,8 @@ services:
       - ${CONTRACTS_DIR:-../../clpr-smart-contracts}:/contracts:ro
       - ./scripts/deploy-contracts.sh:/deploy-contracts.sh:ro
       - ./compose/entrypoint-deployer.sh:/entrypoint.sh:ro
-      - ./certs:/certs:ro
       - deployed:/shared
     environment:
-      # Secure (mTLS) transport is on by default; run dev/scripts/gen-certs.sh first.
-      # Set SECURE_TRANSPORT=0 in the environment to fall back to the plaintext profile.
-      SECURE_TRANSPORT: "${SECURE_TRANSPORT:-1}"
-      CERT_DIR: /certs
       ANVIL_URL: http://anvil:8545
       # ClprService validates seed endpoints as IP literals (not hostnames), so the
       # relays are pinned to static IPs on the clprnet network below.
@@ -61,13 +56,11 @@ services:
         condition: service_completed_successfully
     volumes:
       - deployed:/shared:ro
-      - ./certs:/certs:ro
     environment:
       RELAY_SIGNING_KEY: "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
       RELAY_CONFIG_FILE: /shared/relay-a.yaml
     ports:
-      - "9545:9545" # gRPC sync
-      - "9546:9546" # gRPC info
+      - "9545:9545" # gRPC
       - "9547:9547" # Prometheus metrics
     networks:
       clprnet:
@@ -81,13 +74,11 @@ services:
         condition: service_completed_successfully
     volumes:
       - deployed:/shared:ro
-      - ./certs:/certs:ro
     environment:
       RELAY_SIGNING_KEY: "0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d"
       RELAY_CONFIG_FILE: /shared/relay-b.yaml
     ports:
-      - "9555:9545" # gRPC sync
-      - "9556:9546" # gRPC info
+      - "9555:9545" # gRPC
       - "9557:9547" # Prometheus metrics
     networks:
       clprnet:

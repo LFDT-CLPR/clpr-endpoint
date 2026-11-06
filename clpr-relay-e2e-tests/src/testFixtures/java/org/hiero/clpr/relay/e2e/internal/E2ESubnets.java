@@ -76,6 +76,24 @@ public final class E2ESubnets {
             return FIRST_OCTET + "." + SECOND_OCTET + "." + thirdOctet + "." + (10 + index);
         }
 
+        /**
+         * An address in the low range reserved for infrastructure containers (Toxiproxy and friends).
+         *
+         * <p>Reserved so an infrastructure container can be added without renumbering the endpoints,
+         * whose addresses are baked into on-chain rosters and must survive a restart.
+         *
+         * @param index zero-based infrastructure slot, {@code 0..7} → {@code .2..\.9}
+         * @return the dotted-quad address
+         * @throws IllegalArgumentException if {@code index} would collide with the gateway or with
+         *     the host range starting at {@code .10}
+         */
+        public String infrastructureHost(final int index) {
+            if (index < 0 || index > 7) {
+                throw new IllegalArgumentException("infrastructure slot out of range (0..7): " + index);
+            }
+            return FIRST_OCTET + "." + SECOND_OCTET + "." + thirdOctet + "." + (2 + index);
+        }
+
         @Override
         public void close() {
             // The flag is part of the guarded state: reading it outside the lock would let two

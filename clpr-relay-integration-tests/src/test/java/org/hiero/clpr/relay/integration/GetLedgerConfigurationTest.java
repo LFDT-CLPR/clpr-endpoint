@@ -40,7 +40,7 @@ class GetLedgerConfigurationTest extends OneSidedStubPeerTestBase {
         try (var client = new ClprEndpointInfoClient(Duration.ofSeconds(60))) {
             payload = client.getLedgerConfiguration(
                     "127.0.0.1",
-                    relay.infoPort(),
+                    relay.grpcPort(),
                     ClprGetLedgerConfigurationRequest.newBuilder().build());
         }
 
@@ -110,7 +110,7 @@ class GetLedgerConfigurationTest extends OneSidedStubPeerTestBase {
         try (var client = new ClprEndpointInfoClient(Duration.ofSeconds(60))) {
             payload = client.getLedgerConfiguration(
                     "127.0.0.1",
-                    relay.infoPort(),
+                    relay.grpcPort(),
                     ClprGetLedgerConfigurationRequest.newBuilder()
                             .serviceAddress(com.hedera.pbj.runtime.io.buffer.Bytes.wrap(serviceAddress))
                             .build());

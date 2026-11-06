@@ -24,7 +24,7 @@ public final class ClprAbi {
      * @param ipAddress must be a numeric IPv4 literal — {@code EndpointValidation} rejects hostnames
      *     with {@code ClprInvalidEndpointAddress}
      * @param port the endpoint's gRPC sync port
-     * @param tlsCertificate empty for the plaintext transport
+     * @param tlsCertificate always empty
      * @param accountId keys the per-channel peer roster; the contract silently skips an endpoint whose
      *     accountId is empty, so this must be set to something unique
      */

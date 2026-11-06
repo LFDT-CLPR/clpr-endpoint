@@ -2,6 +2,7 @@
 package org.hiero.clpr.relay.core;
 
 import com.hedera.hapi.node.state.clpr.ClprEndpoint;
+import com.hedera.hapi.node.state.clpr.ClprServiceEndpoint;
 
 public class Peers {
     /**
@@ -14,5 +15,19 @@ public class Peers {
             return ep.ipAddress() + ":" + ep.port();
         }
         return "unknown";
+    }
+
+    /**
+     * Returns the identity of {@code peer} within one peer manifest: its advertised service
+     * endpoint {@code (host, port)}. {@code ClprEndpoint.account_id} is deliberately not used — the
+     * spec does not define it, the network does not rely on it, and it may be empty or duplicated.
+     * An endpoint without a service endpoint maps to {@link ClprServiceEndpoint#DEFAULT}; such an
+     * endpoint is not dialable, so collapsing all of them into one key is harmless.
+     *
+     * @param peer the peer endpoint
+     * @return the key identifying {@code peer}
+     */
+    public static ClprServiceEndpoint peerKey(final ClprEndpoint peer) {
+        return peer.serviceEndpointOrElse(ClprServiceEndpoint.DEFAULT);
     }
 }

@@ -54,7 +54,7 @@ class ClosedRequiresAckedAndPeerDrainedStubPeerTest extends OneSidedStubPeerTest
         // The peer acks message 1 only (not message 2) and announces DRAINED. The ack lands, but because
         // the outbound queue is not fully acked the announcement cannot move us past CLOSING.
         final ChannelState beforeA = interactor.requireChannelState(channelId);
-        final Bytes partialAckDrained = StubBundles.hieroStateProof()
+        final Bytes partialAckDrained = StubBundles.stubProof()
                 .ackedMessageId(beforeA.receivedMessageId())
                 .receivedMessageId(1L)
                 .reply(1L, ClprMessageReplyStatus.SUCCESS, new byte[] {1})
@@ -70,7 +70,7 @@ class ClosedRequiresAckedAndPeerDrainedStubPeerTest extends OneSidedStubPeerTest
         // The peer acks the final message and replies in order, but reports itself as still CLOSING. We
         // wind down to DRAINED and must stop there: a fully-drained local side still needs the peer drained.
         final ChannelState beforeB = interactor.requireChannelState(channelId);
-        final Bytes fullAckNotDrained = StubBundles.hieroStateProof()
+        final Bytes fullAckNotDrained = StubBundles.stubProof()
                 .ackedMessageId(beforeB.receivedMessageId())
                 .receivedMessageId(beforeB.nextMessageId() - 1)
                 .chainFrom(Bytes.wrap(beforeB.receivedRunningHash()))
@@ -83,7 +83,7 @@ class ClosedRequiresAckedAndPeerDrainedStubPeerTest extends OneSidedStubPeerTest
 
         // ── Both satisfied: peer announces DRAINED with all outbound acked → DRAINED → CLOSED ──
         final ChannelState drained = interactor.requireChannelState(channelId);
-        final Bytes peerDrained = StubBundles.hieroStateProof()
+        final Bytes peerDrained = StubBundles.stubProof()
                 .ackedMessageId(drained.receivedMessageId())
                 .receivedMessageId(drained.ackedMessageId())
                 .chainFrom(Bytes.wrap(drained.receivedRunningHash()))

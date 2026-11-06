@@ -22,6 +22,11 @@ import java.util.Map;
  * @param image Besu image. 26.5.0 mines PoA automatically from the node key and does not need the
  *     {@code --miner-*} flags that were removed after 25.x
  * @param extraEnv extra container environment, merged last so it can override anything
+ * @param rpcFilterProxy when {@code true} an {@code EvmRpcFilterProxy} container is started in
+ *     front of the primary Besu node and endpoints dial that instead of the node directly. Opt-in
+ *     because it costs one extra container per network; the fault it enables (per-method RPC
+ *     blocking, e.g. break {@code eth_sendRawTransaction} while leaving {@code eth_call} untouched)
+ *     cannot be expressed with {@code docker pause}
  */
 public record BesuNetworkSpec(
         String id,
@@ -31,7 +36,8 @@ public record BesuNetworkSpec(
         int blockPeriodSeconds,
         long minGasPriceWei,
         String image,
-        Map<String, String> extraEnv) {
+        Map<String, String> extraEnv,
+        boolean rpcFilterProxy) {
 
     /** Besu release used by the CLPR contract E2E backend; QBFT-capable without the removed flags. */
     public static final String DEFAULT_IMAGE = "hyperledger/besu:26.5.0";
@@ -70,7 +76,7 @@ public record BesuNetworkSpec(
         if (nodes < 1) {
             throw new IllegalArgumentException("a network needs at least one node, got " + nodes);
         }
-        return new BesuNetworkSpec("besu", FIRST_CHAIN_ID, 1, nodes - 1, 1, 1L, DEFAULT_IMAGE, Map.of());
+        return new BesuNetworkSpec("besu", FIRST_CHAIN_ID, 1, nodes - 1, 1, 1L, DEFAULT_IMAGE, Map.of(), false);
     }
 
     /** Single-node default. */
@@ -90,41 +96,90 @@ public record BesuNetworkSpec(
 
     public BesuNetworkSpec withId(final String newId) {
         return new BesuNetworkSpec(
-                newId, chainId, validatorCount, fullNodeCount, blockPeriodSeconds, minGasPriceWei, image, extraEnv);
+                newId,
+                chainId,
+                validatorCount,
+                fullNodeCount,
+                blockPeriodSeconds,
+                minGasPriceWei,
+                image,
+                extraEnv,
+                rpcFilterProxy);
     }
 
     public BesuNetworkSpec withChainId(final long newChainId) {
         return new BesuNetworkSpec(
-                id, newChainId, validatorCount, fullNodeCount, blockPeriodSeconds, minGasPriceWei, image, extraEnv);
+                id,
+                newChainId,
+                validatorCount,
+                fullNodeCount,
+                blockPeriodSeconds,
+                minGasPriceWei,
+                image,
+                extraEnv,
+                rpcFilterProxy);
     }
 
     public BesuNetworkSpec withValidators(final int count) {
         return new BesuNetworkSpec(
-                id, chainId, count, fullNodeCount, blockPeriodSeconds, minGasPriceWei, image, extraEnv);
+                id, chainId, count, fullNodeCount, blockPeriodSeconds, minGasPriceWei, image, extraEnv, rpcFilterProxy);
     }
 
     public BesuNetworkSpec withFullNodes(final int count) {
         return new BesuNetworkSpec(
-                id, chainId, validatorCount, count, blockPeriodSeconds, minGasPriceWei, image, extraEnv);
+                id,
+                chainId,
+                validatorCount,
+                count,
+                blockPeriodSeconds,
+                minGasPriceWei,
+                image,
+                extraEnv,
+                rpcFilterProxy);
     }
 
     public BesuNetworkSpec withBlockPeriodSeconds(final int seconds) {
         return new BesuNetworkSpec(
-                id, chainId, validatorCount, fullNodeCount, seconds, minGasPriceWei, image, extraEnv);
+                id, chainId, validatorCount, fullNodeCount, seconds, minGasPriceWei, image, extraEnv, rpcFilterProxy);
     }
 
     public BesuNetworkSpec withMinGasPriceWei(final long wei) {
         return new BesuNetworkSpec(
-                id, chainId, validatorCount, fullNodeCount, blockPeriodSeconds, wei, image, extraEnv);
+                id, chainId, validatorCount, fullNodeCount, blockPeriodSeconds, wei, image, extraEnv, rpcFilterProxy);
     }
 
     public BesuNetworkSpec withImage(final String newImage) {
         return new BesuNetworkSpec(
-                id, chainId, validatorCount, fullNodeCount, blockPeriodSeconds, minGasPriceWei, newImage, extraEnv);
+                id,
+                chainId,
+                validatorCount,
+                fullNodeCount,
+                blockPeriodSeconds,
+                minGasPriceWei,
+                newImage,
+                extraEnv,
+                rpcFilterProxy);
     }
 
     public BesuNetworkSpec withExtraEnv(final Map<String, String> env) {
         return new BesuNetworkSpec(
-                id, chainId, validatorCount, fullNodeCount, blockPeriodSeconds, minGasPriceWei, image, env);
+                id,
+                chainId,
+                validatorCount,
+                fullNodeCount,
+                blockPeriodSeconds,
+                minGasPriceWei,
+                image,
+                env,
+                rpcFilterProxy);
+    }
+
+    /**
+     * Bring up an {@code EvmRpcFilterProxy} container in front of the primary Besu node and route
+     * endpoint traffic through it. See the record javadoc for the motivation.
+     */
+    public BesuNetworkSpec withRpcFilterProxy() {
+        return new BesuNetworkSpec(
+                id, chainId, validatorCount, fullNodeCount, blockPeriodSeconds, minGasPriceWei, image, extraEnv, true);
     }
 }

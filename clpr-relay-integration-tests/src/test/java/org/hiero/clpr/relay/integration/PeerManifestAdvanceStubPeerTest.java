@@ -3,6 +3,8 @@ package org.hiero.clpr.relay.integration;
 
 import static org.hiero.clpr.relay.test.harness.RelayAssertions.assertMetric;
 
+import com.hedera.hapi.node.state.clpr.BundleRequest;
+import com.hedera.hapi.node.state.clpr.BundleResponse;
 import com.hedera.hapi.node.state.clpr.ClprSyncPayload;
 import com.hedera.pbj.runtime.io.buffer.Bytes;
 import java.math.BigInteger;
@@ -99,7 +101,7 @@ class PeerManifestAdvanceStubPeerTest {
                         ANVIL.jsonRpcUrl(),
                         relayPort,
                         AnvilContainer.DEV_PRIVATE_KEY_3,
-                        List.of(Triple.of(channelIdHex, contracts.clprServiceAddress(), ProofType.Hiero))),
+                        List.of(Triple.of(channelIdHex, contracts.clprServiceAddress(), ProofType.Stub))),
                 "A");
         relay.start(RelayInstance.StartOptions.inboundOnly());
     }
@@ -136,16 +138,28 @@ class PeerManifestAdvanceStubPeerTest {
         // MockClprVerifier.verifyBundle ignores the bundle content and returns default metadata
         // (receivedMessageId=0) so no actual ACK is applied on-chain; only the manifest update fires.
         final ContractInteractor.ChannelState state = interactor.requireChannelState(channelId);
-        final Bytes bundle = StubBundles.hieroStateProof()
+        final Bytes bundle = StubBundles.stubProof()
                 .ackedMessageId(state.receivedMessageId())
                 .receivedMessageId(1)
                 .build();
+        // Two-phase: phase 1 asks the relay for its data (a bundle_request); phase 2 delivers the crafted
+        // bundle as our bundle_response, which the relay verifies + submits to the local CLPR Service — the
+        // submission drives MockClprVerifier.verifyBundle to return the version-2 manifest.
+        final Bytes connId = Bytes.wrap(channelId);
         peer.pokeSync(
                 RELAY_HOST,
                 relayPort,
                 ClprSyncPayload.newBuilder()
-                        .channelId(Bytes.wrap(channelId))
-                        .bundlePayload(bundle)
+                        .channelId(connId)
+                        .bundleRequest(BundleRequest.newBuilder()
+                                .currentReceivedMessageId(0L)
+                                .build())
+                        .build(),
+                reply -> ClprSyncPayload.newBuilder()
+                        .channelId(connId)
+                        .bundleResponse(BundleResponse.newBuilder()
+                                .bundlePayload(bundle)
+                                .build())
                         .build());
 
         // The listener detects endpointManifestVersion=2 != 1 and refreshes, incrementing the counter.

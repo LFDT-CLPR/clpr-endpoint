@@ -51,18 +51,21 @@ public final class QbftConfigProofBuilder {
     private QbftConfigProofBuilder() {}
 
     /**
-     * Build the ten-field config proof for {@code completeChannel}.
+     * Build the ten-field config proof for {@code completeChannel}, against a specific
+     * {@code ClprService} deployment on the peer chain.
      *
-     * <p>Takes the peer network rather than loose parameters so the validator address, service address
-     * and chain id cannot drift apart from the chain they describe — a proof assembled from a
-     * mismatched trio fails inside the verifier with nothing pointing at the cause.
+     * <p>Takes the peer network AND the exact service address so a channel wired against a
+     * non-primary {@code ClprService} (via {@code BesuNetwork.deployAdditionalService()}) can still
+     * produce a valid trust anchor — the anchor names the peer service, and using the primary
+     * address for a channel that actually lives at a different deployment would leave the on-chain
+     * anchor pointing at the wrong contract.
      *
-     * @param peer the chain being proven — the channel's <em>other</em> side
+     * @param peer the chain being proven
+     * @param peerServiceAddress the {@code ClprService} on {@code peer} the channel is registered on
      * @return the RLP-encoded proof
      */
-    public static byte[] buildConfigProof(final BesuNetwork peer) {
+    public static byte[] buildConfigProof(final BesuNetwork peer, final String peerServiceAddress) {
         final EvmJsonRpcClient peerRpc = peer.rpc();
-        final String peerServiceAddress = peer.contracts().clprService();
         final String peerValidatorAddress = peer.validatorAddress();
         final String peerChainId = peer.caip2();
 
@@ -101,22 +104,15 @@ public final class QbftConfigProofBuilder {
     }
 
     /**
-     * Build the endpoint-manifest proof passed as {@code completeChannel}'s last argument.
-     *
-     * <p>Shape: {@code RLP([header, accountProof, [[slot, nodes]], preimage])}. The manifest storage
-     * proof is entry-wrapped — a one-element list of {@code [slotKey, [nodes]]} — because the verifier
-     * calls {@code RLP.readList} on each entry; a flat list of strings makes it revert.
-     *
-     * <p>Passing a real proof rather than the empty bring-up value means {@code completeChannel}
-     * succeeding actually exercises the verifier's manifest path, and the channel starts with a peer
-     * manifest at version 1 instead of the uninitialised sentinel.
+     * Build the manifest proof against a specific {@code ClprService} on {@code peer}, for channels
+     * wired against an additional deployment rather than the chain's primary.
      *
      * @param peer the chain being proven
-     * @return the RLP-encoded manifest proof
+     * @param peerServiceAddress the {@code ClprService} address whose manifest slot to read
+     * @return the RLP-encoded proof
      */
-    public static byte[] buildManifestProof(final BesuNetwork peer) {
+    public static byte[] buildManifestProof(final BesuNetwork peer, final String peerServiceAddress) {
         final EvmJsonRpcClient peerRpc = peer.rpc();
-        final String peerServiceAddress = peer.contracts().clprService();
         final BlockHeader header = peerRpc.ethGetBlockHeaderByNumber("latest");
         // Pin the proof to the same block the header describes. Reading the header at "latest" and the
         // proof at a later "latest" would pair a state root with a state it does not commit to, and

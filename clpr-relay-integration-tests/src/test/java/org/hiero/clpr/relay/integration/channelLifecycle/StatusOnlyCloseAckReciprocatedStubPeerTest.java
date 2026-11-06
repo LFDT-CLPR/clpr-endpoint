@@ -9,7 +9,7 @@ import com.hedera.pbj.runtime.io.buffer.Bytes;
 import java.time.Duration;
 import java.util.EnumSet;
 import org.hiero.clpr.relay.core.ParsedBundle;
-import org.hiero.clpr.relay.evm.QbftProofCodec;
+import org.hiero.clpr.relay.evm.qbft.QbftProofCodec;
 import org.hiero.clpr.relay.integration.ContractInteractor.ChannelState;
 import org.hiero.clpr.relay.integration.OneSidedStubPeerTestBase;
 import org.hiero.clpr.relay.integration.TestConditions;
@@ -55,7 +55,7 @@ class StatusOnlyCloseAckReciprocatedStubPeerTest extends OneSidedStubPeerTestBas
         // it could ever send the peer is its own status. Peer initiates closing; with nothing queued the
         // relay winds straight down: ACTIVE → CLOSING → DRAINED.
         final ChannelState active = interactor.requireChannelState(channelId);
-        final Bytes peerClosing = StubBundles.hieroStateProof()
+        final Bytes peerClosing = StubBundles.stubProof()
                 .ackedMessageId(active.receivedMessageId())
                 .receivedMessageId(active.ackedMessageId())
                 .chainFrom(Bytes.wrap(active.receivedRunningHash()))
@@ -69,10 +69,10 @@ class StatusOnlyCloseAckReciprocatedStubPeerTest extends OneSidedStubPeerTestBas
         // its own side forward — a non-empty bundle that decodes to a closing status, not an empty payload.
         final ClprSyncPayload reply = awaitNonEmptyReply(TIMEOUT);
 
-        assertThat(reply.bundlePayload().length())
+        assertThat(replyBundle(reply).length())
                 .as("the relay must reciprocate a status-only close with a non-empty bundle, not an empty payload")
                 .isGreaterThan(0L);
-        final ParsedBundle reciprocal = new QbftProofCodec(Bytes.wrap(channelId)).decodeBundle(reply.bundlePayload());
+        final ParsedBundle reciprocal = new QbftProofCodec(Bytes.wrap(channelId)).decodeBundle(replyBundle(reply));
         assertThat(reciprocal.metadata().status())
                 .as("the reciprocated bundle must report the relay's own closing status to the peer")
                 .isIn(ClprChannelStatus.CLOSING, ClprChannelStatus.DRAINED);
@@ -80,7 +80,7 @@ class StatusOnlyCloseAckReciprocatedStubPeerTest extends OneSidedStubPeerTestBas
         // The peer now declares itself CLOSED. The relay, having wound down to DRAINED, completes the
         // handshake: DRAINED → CLOSED.
         final ChannelState drained = interactor.requireChannelState(channelId);
-        final Bytes peerClosed = StubBundles.hieroStateProof()
+        final Bytes peerClosed = StubBundles.stubProof()
                 .ackedMessageId(drained.receivedMessageId())
                 .receivedMessageId(drained.ackedMessageId())
                 .chainFrom(Bytes.wrap(drained.receivedRunningHash()))
@@ -91,14 +91,17 @@ class StatusOnlyCloseAckReciprocatedStubPeerTest extends OneSidedStubPeerTestBas
     }
 
     /**
-     * Ping the relay with an authenticated empty bundle until its reply carries a non-empty payload, or the
-     * timeout elapses. The relay rebuilds its reciprocal proof from a background state poll, so the first
-     * ping after the transition may still observe the pre-transition (empty) cache.
+     * Ping the relay with an authenticated empty-payload request until its reply carries a non-empty
+     * payload, or the timeout elapses. In the two-phase protocol the relay builds its reciprocal
+     * synchronously from the request and its current on-chain channel state — there is no background
+     * poll and no cached bundle — so a single ping after the transition is confirmed normally suffices;
+     * the loop only absorbs the brief window where the relay's commitment-level read has not yet caught
+     * up to the just-confirmed transition.
      */
     private static ClprSyncPayload awaitNonEmptyReply(final Duration timeout) throws Exception {
         final long deadline = System.currentTimeMillis() + timeout.toMillis();
         ClprSyncPayload last = poke(Bytes.EMPTY);
-        while (last.bundlePayload().length() == 0 && System.currentTimeMillis() < deadline) {
+        while (replyBundle(last).length() == 0 && System.currentTimeMillis() < deadline) {
             Thread.sleep(500);
             last = poke(Bytes.EMPTY);
         }

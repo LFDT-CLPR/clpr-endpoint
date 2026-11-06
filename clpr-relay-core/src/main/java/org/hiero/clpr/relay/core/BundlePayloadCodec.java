@@ -53,7 +53,7 @@ public interface BundlePayloadCodec {
      * @param receivedMessageId the highest message id the receiving ledger has already accepted;
      *     messages with id {@code <= receivedMessageId} are dropped
      * @return the parsed bundle with already-received messages removed (or the original when nothing was
-     *     trimmed), whose {@link ParsedBundle#rawProofBytes()} are what to submit on chain
+     *     trimmed), whose {@link ParsedBundle#rawBundleBytes()} are what to submit on chain
      * @throws IllegalArgumentException if the bytes are not a well-formed payload
      */
     ParsedBundle parseBundle(final Bytes proofBytes, final long receivedMessageId);

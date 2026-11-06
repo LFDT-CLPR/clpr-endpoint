@@ -1,0 +1,95 @@
+# SPDX-License-Identifier: Apache-2.0
+name: "200: [FLOW] PR Checks"
+
+on:
+  push:
+    branches: [main, "release/**"]
+  pull_request:
+    branches: [main, "release/**"]
+
+defaults:
+  run:
+    shell: bash
+
+# One in-flight verification per PR. Pushes to a protected branch are never
+# cancelled — each of those commits has to be verified on its own.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: "Build"
+    runs-on: ubuntu-latest
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@ccd8616d44fd3846e67624a50d5aad6d37bf2d25 # v2.22.1
+        with:
+          egress-policy: audit
+
+      - name: Checkout Code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Setup Java
+        uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
+        with:
+          java-version: "25"
+          distribution: "temurin"
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@3f5f9adaf7d9fecd50b5935e54106014257a94e6 # v6.4.0
+
+      - name: Build
+        run: ./gradlew build
+
+  integration-test:
+    name: "Integration Test"
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@ccd8616d44fd3846e67624a50d5aad6d37bf2d25 # v2.22.1
+        with:
+          egress-policy: audit
+
+      - name: Checkout Endpoint
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: clpr-endpoint
+
+      # The integration tests read Foundry output from ../clpr-smart-contracts/out.
+      # They test against contracts main, so drift on the tip surfaces immediately.
+      - name: Checkout Smart Contracts
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: LFDT-CLPR/clpr-smart-contracts
+          ref: main
+          path: clpr-smart-contracts
+          submodules: recursive
+
+      - name: Setup Java
+        uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
+        with:
+          java-version: "25"
+          distribution: "temurin"
+
+      - name: Setup Foundry
+        uses: foundry-rs/foundry-toolchain@908c540300062bd5a7e473851cdb4282204cee09 # v1.9.1
+        with:
+          version: v1.7.1
+
+      - name: Compile Smart Contracts
+        run: forge build
+        working-directory: clpr-smart-contracts
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@3f5f9adaf7d9fecd50b5935e54106014257a94e6 # v6.4.0
+
+      - name: Run Integration Tests
+        run: ./gradlew :clpr-relay-integration-tests:test
+        working-directory: clpr-endpoint
+        env:
+          RUN_INTEGRATION_TESTS: "1"

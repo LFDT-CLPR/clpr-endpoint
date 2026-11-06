@@ -4,6 +4,7 @@ package org.hiero.clpr.relay.core;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import com.hedera.hapi.node.state.clpr.ClprEndpoint;
+import com.hedera.hapi.node.state.clpr.ClprServiceEndpoint;
 import com.hedera.pbj.runtime.io.buffer.Bytes;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -19,8 +20,8 @@ class PeerEndpointCacheTest {
     @BeforeEach
     void setUp() {
         cache = new PeerEndpointCache();
-        peer1 = ClprEndpoint.newBuilder().accountId(Bytes.wrap(new byte[] {1})).build();
-        peer2 = ClprEndpoint.newBuilder().accountId(Bytes.wrap(new byte[] {2})).build();
+        peer1 = endpoint(1);
+        peer2 = endpoint(2);
     }
 
     @Test
@@ -43,9 +44,8 @@ class PeerEndpointCacheTest {
     void addDuplicateUpdatesExisting() {
         cache.replaceAll(List.of(peer1));
 
-        // Create a new endpoint with the same accountId but different tls cert
-        ClprEndpoint peer1Updated = ClprEndpoint.newBuilder()
-                .accountId(Bytes.wrap(new byte[] {1}))
+        // Create a new endpoint with the same host:port but a different tls cert
+        ClprEndpoint peer1Updated = peer1.copyBuilder()
                 .tlsCertificate(Bytes.wrap(new byte[] {9, 9, 9}))
                 .build();
         cache.replaceAll(List.of(peer1Updated));
@@ -73,9 +73,10 @@ class PeerEndpointCacheTest {
         assertThat(cache.size()).isZero();
     }
 
-    private static ClprEndpoint endpoint(int accountId) {
+    /** An endpoint at {@code 10.0.0.<n>:9545} with no account id, as a spec-conformant manifest carries it. */
+    private static ClprEndpoint endpoint(int n) {
         return ClprEndpoint.newBuilder()
-                .accountId(Bytes.wrap(new byte[] {(byte) accountId}))
+                .serviceEndpoint(new ClprServiceEndpoint("10.0.0." + n, 9545))
                 .build();
     }
 
@@ -87,8 +88,9 @@ class PeerEndpointCacheTest {
         cache.replaceAll(List.of(endpoint(2), endpoint(3)));
 
         assertThat(cache.allPeers())
-                .extracting(ClprEndpoint::accountId)
-                .containsExactlyInAnyOrder(endpoint(2).accountId(), endpoint(3).accountId());
+                .extracting(ClprEndpoint::serviceEndpoint)
+                .containsExactlyInAnyOrder(
+                        endpoint(2).serviceEndpoint(), endpoint(3).serviceEndpoint());
     }
 
     @Test
@@ -99,9 +101,35 @@ class PeerEndpointCacheTest {
         cache.replaceAll(List.of(endpoint(2)));
 
         assertThat(cache.allPeers())
-                .extracting(ClprEndpoint::accountId)
-                .containsExactly(endpoint(2).accountId());
+                .extracting(ClprEndpoint::serviceEndpoint)
+                .containsExactly(endpoint(2).serviceEndpoint());
         assertThat(cache.size()).isEqualTo(1);
+    }
+
+    @Test
+    void replaceAll_keepsEndpointsWithEmptyAccountIdApart() {
+        // Neither endpoint carries an account id; they must still be two distinct peers.
+        cache.replaceAll(List.of(endpoint(1), endpoint(2)));
+
+        assertThat(cache.size()).isEqualTo(2);
+        assertThat(cache.allPeers()).containsExactlyInAnyOrder(endpoint(1), endpoint(2));
+    }
+
+    @Test
+    void replaceAll_ignoresAccountIdForIdentity() {
+        final var sharedAccountId = Bytes.wrap(new byte[] {7});
+        final var a = endpoint(1).copyBuilder().accountId(sharedAccountId).build();
+        final var b = endpoint(2).copyBuilder().accountId(sharedAccountId).build();
+
+        // Same account id, different host:port: both are kept.
+        cache.replaceAll(List.of(a, b));
+        assertThat(cache.allPeers()).containsExactlyInAnyOrder(a, b);
+
+        // Same host:port, different account id: one peer, the last entry wins.
+        final var aOtherAccount =
+                a.copyBuilder().accountId(Bytes.wrap(new byte[] {8})).build();
+        cache.replaceAll(List.of(a, aOtherAccount));
+        assertThat(cache.allPeers()).containsExactly(aOtherAccount);
     }
 
     @Test

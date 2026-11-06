@@ -13,5 +13,6 @@ dependencies {
 
 testModuleInfo {
     requires("org.junit.jupiter.params")
+    requires("org.hiero.clpr.relay.core.test.fixtures")
     runtimeOnly("com.swirlds.config.impl")
 }

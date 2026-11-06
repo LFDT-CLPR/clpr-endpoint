@@ -129,6 +129,23 @@ public final class BesuNetworks {
         }
     }
 
+    /**
+     * Stop every network and delete its data volumes, in reverse creation order. Terminal — for
+     * environment teardown only.
+     *
+     * <p>Each network is isolated: one that is already gone must not stop the rest from releasing
+     * their volumes, because nothing else reclaims them (Ryuk is disabled for this suite).
+     */
+    public void destroyAll() {
+        for (int i = networks.size() - 1; i >= 0; i--) {
+            try {
+                networks.get(i).destroy();
+            } catch (final RuntimeException e) {
+                // best-effort
+            }
+        }
+    }
+
     private void assertChainIdUnique(final BesuNetworkSpec candidate) {
         final Optional<BesuNetwork> clash = networks.stream()
                 .filter(n -> n.chainId() == candidate.chainId())

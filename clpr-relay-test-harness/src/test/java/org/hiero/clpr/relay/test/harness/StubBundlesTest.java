@@ -8,24 +8,24 @@ import com.hedera.hapi.node.state.clpr.ClprLedgerConfiguration;
 import com.hedera.hapi.node.state.clpr.ClprMessageReplyStatus;
 import com.hedera.pbj.runtime.io.buffer.Bytes;
 import org.hiero.clpr.relay.core.BundlePayloadCodec;
-import org.hiero.clpr.relay.core.HieroProofCodec;
 import org.hiero.clpr.relay.core.ParsedBundle;
+import org.hiero.clpr.relay.core.StubProofCodec;
 import org.junit.jupiter.api.Test;
 
 /**
- * No-Docker checks that {@link StubBundles} emits Hiero {@code StateProof} bytes the production
- * {@code CompositeProofParser} accepts, and that the {@code ClprChannel} leaf maps to the intended
- * {@code ClprQueueMetadata}. Contract-acceptance (running-hash/replay/ack against the live ledger) is
- * exercised separately by the Anvil-backed pilot.
+ * No-Docker checks that {@link StubBundles} emits stub-proof ({@code "CLPRSTUB" ||
+ * protobuf(ClprBundleContent)}) bytes the production {@link StubProofCodec} accepts, and that the fields
+ * map to the intended {@code ClprQueueMetadata}. Contract-acceptance (running-hash/replay/ack against the
+ * live ledger) is exercised separately by the Anvil-backed pilot.
  */
 class StubBundlesTest {
 
-    private final BundlePayloadCodec codec = new HieroProofCodec();
+    private final BundlePayloadCodec codec = new StubProofCodec();
     private final Bytes channelId = Bytes.wrap(new byte[32]);
 
     @Test
     void craftsDataBundleWithIntendedMetadata() {
-        final Bytes bundle = StubBundles.hieroStateProof()
+        final Bytes bundle = StubBundles.stubProof()
                 .ackedMessageId(0)
                 .receivedMessageId(3)
                 .status(ClprChannelStatus.ACTIVE)
@@ -45,7 +45,7 @@ class StubBundlesTest {
     @Test
     void statusOnlyEmptyBundleDecodes() {
         final Bytes bundle =
-                StubBundles.hieroStateProof().status(ClprChannelStatus.DRAINED).build();
+                StubBundles.stubProof().status(ClprChannelStatus.DRAINED).build();
 
         final ParsedBundle vb = codec.decodeBundle(bundle);
 
@@ -57,7 +57,7 @@ class StubBundlesTest {
 
     @Test
     void replyBundleDecodesAsReply() {
-        final Bytes bundle = StubBundles.hieroStateProof()
+        final Bytes bundle = StubBundles.stubProof()
                 .ackedMessageId(0)
                 .reply(1L, ClprMessageReplyStatus.SUCCESS, "ok".getBytes())
                 .build();
@@ -75,7 +75,7 @@ class StubBundlesTest {
                 .protocolVersion(1)
                 .chainId("eip155:1337")
                 .build();
-        final Bytes bundle = StubBundles.hieroStateProof()
+        final Bytes bundle = StubBundles.stubProof()
                 .ackedMessageId(0)
                 .controlConfigUpdate(config)
                 .build();
@@ -92,10 +92,10 @@ class StubBundlesTest {
     void runningHashChainsDeterministicallyFromBase() {
         // Same inputs → identical bytes (the running-hash chain is deterministic), so a re-crafted
         // bundle is byte-identical — the property the dedup test relies on.
-        final Bytes a = StubBundles.hieroStateProof()
+        final Bytes a = StubBundles.stubProof()
                 .message(new byte[32], new byte[20], new byte[20], "x".getBytes())
                 .build();
-        final Bytes b = StubBundles.hieroStateProof()
+        final Bytes b = StubBundles.stubProof()
                 .message(new byte[32], new byte[20], new byte[20], "x".getBytes())
                 .build();
         assertThat(a).isEqualTo(b);

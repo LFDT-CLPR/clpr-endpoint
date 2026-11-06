@@ -3,6 +3,7 @@ package org.hiero.clpr.relay.integration.channelLifecycle;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+import com.hedera.hapi.node.state.clpr.BundleRequest;
 import com.hedera.hapi.node.state.clpr.ClprSyncPayload;
 import com.hedera.pbj.runtime.io.buffer.Bytes;
 import java.math.BigInteger;
@@ -111,9 +112,14 @@ class PendingChannelWasteStubPeerTest {
                 relay.grpcPort(),
                 ClprSyncPayload.newBuilder()
                         .channelId(Bytes.wrap(channelId))
-                        .bundlePayload(Bytes.EMPTY)
+                        .bundleRequest(BundleRequest.newBuilder()
+                                .currentReceivedMessageId(0L)
+                                .build())
                         .build());
-        assertThat(reply.bundlePayload().length())
+        final long replyPayloadLength = reply.hasBundleResponse()
+                ? reply.bundleResponse().bundlePayload().length()
+                : 0L;
+        assertThat(replyPayloadLength)
                 .as("a PENDING channel must reject inbound sync with an empty-proof response (spec §3.1.3)")
                 .isZero();
     }

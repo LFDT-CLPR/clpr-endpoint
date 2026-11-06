@@ -60,7 +60,7 @@ RUN chmod +x /app/docker-entrypoint.sh && chown -R clpr:clpr /app
 
 USER clpr
 
-# gRPC sync port (9545), gRPC info port (9546), and Prometheus metrics port (9547).
-EXPOSE 9545 9546 9547
+# gRPC port (9545) and Prometheus metrics port (9547).
+EXPOSE 9545 9547
 
 ENTRYPOINT ["/app/docker-entrypoint.sh"]

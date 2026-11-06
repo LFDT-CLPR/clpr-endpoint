@@ -2,12 +2,13 @@
 package org.hiero.clpr.relay.sync;
 
 import com.hedera.hapi.node.state.clpr.ClprEndpoint;
-import com.hedera.pbj.runtime.io.buffer.Bytes;
+import com.hedera.hapi.node.state.clpr.ClprServiceEndpoint;
 import java.util.List;
 import java.util.Optional;
 import java.util.Random;
 import java.util.concurrent.ConcurrentHashMap;
 import org.hiero.clpr.relay.core.PeerEndpointCache;
+import org.hiero.clpr.relay.core.Peers;
 import org.jspecify.annotations.NonNull;
 
 /**
@@ -16,11 +17,14 @@ import org.jspecify.annotations.NonNull;
  * <p>Peers with more recorded successes receive proportionally higher weight. Peers currently in
  * an exponential back-off window are excluded from selection; if all peers are backed off, the
  * selector falls back to uniform random selection from the full peer list.
+ *
+ * <p>Statistics are tracked per advertised service endpoint {@code (host, port)} (see
+ * {@link Peers#peerKey(ClprEndpoint)}), not per {@code account_id}.
  */
 public class PeerSelector {
 
     private final PeerEndpointCache cache;
-    private final ConcurrentHashMap<Bytes, PeerStats> stats = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<ClprServiceEndpoint, PeerStats> stats = new ConcurrentHashMap<>();
     private final Random random = new Random();
 
     /**
@@ -79,7 +83,7 @@ public class PeerSelector {
     // -------------------------------------------------------------------------
 
     private boolean isBackedOff(final ClprEndpoint peer) {
-        var s = stats.get(peer.accountId());
+        var s = stats.get(Peers.peerKey(peer));
         return s != null && s.isBackedOff();
     }
 
@@ -98,6 +102,6 @@ public class PeerSelector {
     }
 
     private PeerStats getStats(final ClprEndpoint peer) {
-        return stats.computeIfAbsent(peer.accountId(), k -> new PeerStats());
+        return stats.computeIfAbsent(Peers.peerKey(peer), k -> new PeerStats());
     }
 }

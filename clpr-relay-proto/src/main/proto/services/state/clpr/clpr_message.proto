@@ -265,22 +265,50 @@ message ClprQueueMetadata {
     uint64 endpoint_manifest_version = 7;
 }
 
-/**
- * Wire format for endpoint-to-endpoint sync. Each sync exchanges one
- * ClprSyncPayload in each direction. The bundle_payload is opaque to the
- * protocol and interpreted by the Channel's verifier contract.
- */
+// One message in the bidirectional sync stream, scoped to a single
+// Channel (see ClprEndpointService.sync).
 message ClprSyncPayload {
-    /**
-     * Channel ID identifying the Channel this sync belongs to.
-     * MUST be exactly 32 bytes.
-     */
+    // Channel ID identifying the Channel this message belongs to.
+    // MUST be exactly 32 bytes.
     bytes channel_id = 1;
 
-    /**
-     * Opaque payload from the source ledger's proof system. Contains the
-     * state proof, the message data it attests to, and any Merkle paths
-     * or signatures required by the verifier.
-     */
-    bytes bundle_payload = 2;
+    // A request describing the requestor's own current Channel state, used by
+    // the responder to shape a minimal, progress-making bundle. Absent when the
+    // requestor has no further request this cycle.
+    BundleRequest bundle_request = 2;
+
+    // A response to a previously received BundleRequest. Absent when this
+    // message carries no bundle this cycle.
+    BundleResponse bundle_response = 3;
+}
+
+// Unproven request describing the requestor's own current Channel
+// state, used by the responder to build a minimal, progress-making
+// bundle. It informs bundle creation only and MUST NOT cause a state
+// change: verifyBundle's replay defense, hash-chain check, and
+// trust-anchor update (§4.2) remain the sole authorities on state and
+// run when the requestor submits the returned bundle. Each field lets
+// the responder build against the requestor's current state (§2.1.2).
+message BundleRequest {
+    // The requestor's claimed current ChannelSyncData.received_message_id.
+    // This value +1 determines where to start the message sequence in the response bundle.
+    uint64 current_received_message_id = 1;
+
+    // The requestor's current ChannelSyncData.status.
+    ClprChannelStatus current_status = 2;
+
+    // The requestor's current Channel.trust_anchor_id.
+    bytes current_trust_anchor_id = 3;
+
+    // The requestor's current Channel.endpoint_manifest.version.
+    uint64 current_endpoint_manifest_version = 4;
+}
+
+// A bundle for the peer's verifier contract.
+message BundleResponse {
+    // Opaque payload for the receiving ledger's verifier contract. Contains
+    // the state proof, the message data it attests to, and whatever else
+    // the verifier needs to extract and verify sync data and messages
+    // (Merkle paths, ZK proofs, TSS signatures, BLS aggregate signatures, etc.).
+    bytes bundle_payload = 1;
 }

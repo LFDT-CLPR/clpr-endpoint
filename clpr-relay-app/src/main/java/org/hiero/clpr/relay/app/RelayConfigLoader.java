@@ -7,6 +7,8 @@ import com.swirlds.config.api.Configuration;
 import com.swirlds.config.api.ConfigurationBuilder;
 import com.swirlds.config.extensions.sources.SimpleConfigSource;
 import com.swirlds.config.extensions.sources.SystemPropertiesConfigSource;
+import com.swirlds.logging.api.Logger;
+import com.swirlds.logging.api.Loggers;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -18,8 +20,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Properties;
-import org.hiero.clpr.relay.app.RelayConfig.GrpcInfoConfig;
-import org.hiero.clpr.relay.app.RelayConfig.GrpcSyncConfig;
+import org.hiero.clpr.relay.evm.model.Address;
 import org.jspecify.annotations.Nullable;
 
 /**
@@ -61,6 +62,16 @@ import org.jspecify.annotations.Nullable;
  *       chainId: 1337
  *     qbft:
  *       epochLength: 30000
+ *   - id: eth-mainnet            # proofType EthereumPOS: an EVM execution node + a beacon (CL) node
+ *     proofType: EthereumPOS
+ *     evm:
+ *       jsonRpcUrl: "http://geth:8545"
+ *       chainId: 1
+ *     beacon:
+ *       beaconApiUrl: "http://lighthouse:5052"
+ *       maxMessagesPerBundle: 10
+ *       maxRetries: 3
+ *       requestTimeoutMs: 10000
  * clprServices:
  *   - serviceAddress: "0x..."
  *     localNetwork: besu-local
@@ -74,6 +85,8 @@ import org.jspecify.annotations.Nullable;
  * }</pre>
  */
 final class RelayConfigLoader {
+
+    private static final Logger log = Loggers.getLogger(RelayConfigLoader.class);
 
     /** System property naming the config file to load. */
     public static final String CONFIG_FILE_PROPERTY = "relay.configFile";
@@ -103,8 +116,6 @@ final class RelayConfigLoader {
         final FileConfig fileConfig = configPath == null ? FileConfig.EMPTY : readYaml(configPath);
         final Configuration config = ConfigurationBuilder.create()
                 .withConfigDataType(RelayConfig.GrpcConfig.class)
-                .withConfigDataType(GrpcInfoConfig.class)
-                .withConfigDataType(GrpcSyncConfig.class)
                 .withConfigDataType(RelayConfig.BackoffConfig.class)
                 .withSource(SystemPropertiesConfigSource.getInstance())
                 .withSource(buildFileSource(fileConfig))
@@ -130,8 +141,6 @@ final class RelayConfigLoader {
         overrides.forEach((k, v) -> overrideSource.withValue(k.toString(), v.toString()));
         final Configuration config = ConfigurationBuilder.create()
                 .withConfigDataType(RelayConfig.GrpcConfig.class)
-                .withConfigDataType(GrpcInfoConfig.class)
-                .withConfigDataType(GrpcSyncConfig.class)
                 .withConfigDataType(RelayConfig.BackoffConfig.class)
                 .withSource(overrideSource)
                 .withSource(buildFileSource(fileConfig))
@@ -148,15 +157,13 @@ final class RelayConfigLoader {
         // was null/missing, explicitly empty, or there was no config file at all.
         final var peerProofTypes =
                 fileConfig.peerProofTypes.isEmpty() ? RelayConfig.DEFAULT_PEER_PROOF_TYPES : fileConfig.peerProofTypes;
-        final var info = config.getConfigData(GrpcInfoConfig.class);
-        final var sync = config.getConfigData(GrpcSyncConfig.class);
-        validateTransport(info, sync);
-
         final var grpc = config.getConfigData(RelayConfig.GrpcConfig.class);
+        if (grpc.port() <= 0) {
+            throw new IllegalArgumentException("relay.grpc.port must be > 0");
+        }
+
         return new RelayConfig(
                 grpc,
-                info,
-                sync,
                 fileConfig.localNetworks,
                 fileConfig.clprServices,
                 config.getConfigData(RelayConfig.BackoffConfig.class),
@@ -207,49 +214,6 @@ final class RelayConfigLoader {
     }
 
     /**
-     * Fail-fast validation of the transport configuration. The info and sync listeners are always served
-     * (both ports must be {@code > 0}) and must use distinct ports. The sync listener is mandatory mTLS
-     * when {@code sync.tlsEnabled} is true, in which case {@code sync.tlsKeyPath} is required (and must be
-     * readable); when disabled the key is ignored.
-     *
-     * <p>The certificate/key presence-and-readability check here is structural only — a best-effort
-     * courtesy for a friendly early error. A file readable at load time may be gone or rotated by server
-     * start, so it is <em>not</em> the authoritative guard: the certificate and key are fully loaded, and
-     * the key matched to the certificate, when the {@code SSLContext} is built at server start.
-     */
-    private static void validateTransport(final GrpcInfoConfig info, final GrpcSyncConfig sync) {
-        if (sync.port() <= 0) {
-            throw new IllegalArgumentException("relay.grpc.sync.port must be > 0");
-        }
-        if (info.port() <= 0) {
-            throw new IllegalArgumentException("relay.grpc.info.port must be > 0");
-        }
-        requireDistinct(sync.port(), info.port());
-
-        // tlsKeyPath is mandatory when sync mTLS is enabled, and ignored otherwise.
-        if (sync.tlsEnabled()) {
-            if (sync.tlsKeyPath().isBlank()) {
-                throw new IllegalArgumentException(
-                        "relay.grpc.sync.tlsEnabled is true, so relay.grpc.sync.tlsKeyPath must be set");
-            }
-            if (!Files.isReadable(Path.of(sync.tlsKeyPath()))) {
-                throw new IllegalArgumentException("\"relay.grpc.sync.tlsKeyPath\" does not exist or is not readable");
-            }
-        }
-    }
-
-    /** Configured (non-zero) ports must be pairwise distinct; disabled ports ({@code 0}) never collide. */
-    private static void requireDistinct(final int... ports) {
-        final var seen = new HashSet<Integer>();
-        for (final int port : ports) {
-            if (port > 0 && !seen.add(port)) {
-                throw new IllegalArgumentException(
-                        "all configured gRPC ports must differ; got " + Arrays.toString(ports));
-            }
-        }
-    }
-
-    /**
      * Build a {@link SimpleConfigSource} at {@link #FILE_CONFIG_ORDINAL} from parsed YAML values.
      * Only non-null fields are added so that missing YAML entries naturally fall through to
      * lower-priority sources (i.e. the {@code @ConfigProperty} defaults).
@@ -257,10 +221,7 @@ final class RelayConfigLoader {
     private static SimpleConfigSource buildFileSource(final FileConfig fc) {
         final var src = new SimpleConfigSource().withOrdinal(FILE_CONFIG_ORDINAL);
         if (fc.grpcMaxMessageSize != null) src.withValue("relay.grpc.maxMessageSize", fc.grpcMaxMessageSize);
-        if (fc.infoPort != null) src.withValue("relay.grpc.info.port", fc.infoPort);
-        if (fc.syncPort != null) src.withValue("relay.grpc.sync.port", fc.syncPort);
-        if (fc.tlsEnabled != null) src.withValue("relay.grpc.sync.tlsEnabled", fc.tlsEnabled);
-        if (fc.tlsKeyPath != null) src.withValue("relay.grpc.sync.tlsKeyPath", fc.tlsKeyPath);
+        if (fc.grpcPort != null) src.withValue("relay.grpc.port", fc.grpcPort);
         if (fc.backoffBaseMs != null) src.withValue("relay.backoff.baseMs", fc.backoffBaseMs);
         if (fc.backoffCapMs != null) src.withValue("relay.backoff.capMs", fc.backoffCapMs);
         return src;
@@ -327,19 +288,10 @@ final class RelayConfigLoader {
         static final FileConfig EMPTY = new FileConfig();
 
         @Nullable
+        Integer grpcPort;
+
+        @Nullable
         Integer grpcMaxMessageSize;
-
-        @Nullable
-        Integer infoPort;
-
-        @Nullable
-        Integer syncPort;
-
-        @Nullable
-        Boolean tlsEnabled;
-
-        @Nullable
-        String tlsKeyPath;
 
         @Nullable
         Long backoffBaseMs;
@@ -356,17 +308,8 @@ final class RelayConfigLoader {
 
             final var grpc = asMap(root.get("grpc"));
             if (grpc != null) {
+                fc.grpcPort = asInt(grpc.get("port"));
                 fc.grpcMaxMessageSize = asInt(grpc.get("maxMessageSize"));
-                final var info = asMap(grpc.get("info"));
-                if (info != null) {
-                    fc.infoPort = asInt(info.get("port"));
-                }
-                final var sync = asMap(grpc.get("sync"));
-                if (sync != null) {
-                    fc.syncPort = asInt(sync.get("port"));
-                    fc.tlsEnabled = asBool(sync.get("tlsEnabled"));
-                    fc.tlsKeyPath = asString(sync.get("tlsKeyPath"));
-                }
             }
 
             final var backoff = asMap(root.get("backoff"));
@@ -443,18 +386,48 @@ final class RelayConfigLoader {
                             proofType,
                             parseRequiredEvm(netMap, id),
                             null,
-                            parseQbftConfig(asMap(netMap.get("qbft"))));
+                            parseQbftConfig(asMap(netMap.get("qbft"))),
+                            null,
+                            null);
+                case QBFTContractMode ->
+                    new RelayConfig.LocalNetworkConfig(
+                            id,
+                            proofType,
+                            parseRequiredEvm(netMap, id),
+                            null,
+                            null,
+                            null,
+                            parseQbftContractModeConfig(asMap(netMap.get("qbftContractMode")), id));
                 case CometBFT ->
                     new RelayConfig.LocalNetworkConfig(
                             id,
                             proofType,
                             parseRequiredEvm(netMap, id),
                             parseCometBftConfig(asMap(netMap.get("cometBft"))),
+                            null,
+                            null,
+                            null);
+                case EthereumPOS ->
+                    new RelayConfig.LocalNetworkConfig(
+                            id,
+                            proofType,
+                            parseRequiredEvm(netMap, id),
+                            null,
+                            null,
+                            parseBeaconConfig(asMap(netMap.get("beacon"))),
                             null);
                 case Hiero ->
                     throw new IllegalArgumentException("localNetworks['" + id
                             + "'].proofType=Hiero is not supported for a local network; the EVM relay only submits to"
-                            + " QBFT or CometBFT chains (Hiero may still be used as a channel's peerProofType)");
+                            + " QBFT, QBFTContractMode, CometBFT or EthereumPOS chains (Hiero may still be used as a"
+                            + " channel's peerProofType)");
+                case Stub ->
+                    // Test-only: a Stub local network builds CLPRSTUB bundles from real channel state
+                    // for the StubClprVerifier (integration tests), so it needs only the EVM block —
+                    // no qbft/qbftContractMode/cometBft/beacon proof parameters. Never valid against a real
+                    // production chain.
+                    new RelayConfig.LocalNetworkConfig(
+                            id, proofType, parseRequiredEvm(netMap, id), null, null, null, null);
             };
         }
 
@@ -549,18 +522,63 @@ final class RelayConfigLoader {
         }
 
         /**
-         * Parse the optional per-network {@code qbft} block (present for QBFT networks). Missing
-         * fields fall back to their defaults; {@code null} input yields an all-defaults block.
+         * Parse the optional per-network {@code qbft} block (present for QBFT header-mode networks).
+         * Missing fields fall back to their defaults; {@code null} input yields an all-defaults block.
          */
         private static RelayConfig.QbftConfig parseQbftConfig(@Nullable final Map<String, Object> qbft) {
             final Map<String, Object> q = qbft != null ? qbft : Map.of();
             final Long epochLength = asLong(q.get("epochLength"));
             final Integer maxEpochBlockHeadersPerBundle = asInt(q.get("maxEpochBlockHeadersPerBundle"));
             final Integer maxMessagesPerBundle = asInt(q.get("maxMessagesPerBundle"));
+            final Long maxBundleSize = asLong(q.get("maxBundleSize"));
             return new RelayConfig.QbftConfig(
                     epochLength != null ? epochLength : 30_000L,
                     maxEpochBlockHeadersPerBundle != null ? maxEpochBlockHeadersPerBundle : 5,
-                    maxMessagesPerBundle != null ? maxMessagesPerBundle : 10);
+                    maxMessagesPerBundle != null ? maxMessagesPerBundle : 10,
+                    maxBundleSize != null ? maxBundleSize : 1_048_576L);
+        }
+
+        /**
+         * Parse the required per-network {@code qbftContractMode} block (present for
+         * {@code QBFTContractMode} networks). {@code validatorContractAddress} and
+         * {@code arraySlotHex} have no sensible default and fail fast when absent or malformed;
+         * {@code maxMessagesPerBundle} falls back to its default when omitted.
+         */
+        private static RelayConfig.QbftContractModeConfig parseQbftContractModeConfig(
+                @Nullable final Map<String, Object> qbftContractMode, final String id) {
+            if (qbftContractMode == null) {
+                throw new IllegalArgumentException("localNetworks['" + id + "'] requires a 'qbftContractMode' block");
+            }
+            final var validatorContractAddress = asString(qbftContractMode.get("validatorContractAddress"));
+            if (validatorContractAddress == null || validatorContractAddress.isBlank()) {
+                throw new IllegalArgumentException(
+                        "localNetworks['" + id + "'].qbftContractMode.validatorContractAddress is required");
+            }
+            try {
+                Address.fromHexString(validatorContractAddress);
+            } catch (final IllegalArgumentException e) {
+                throw new IllegalArgumentException(
+                        "localNetworks['" + id + "'].qbftContractMode.validatorContractAddress='"
+                                + validatorContractAddress + "' is not a valid EVM address",
+                        e);
+            }
+            final var arraySlotHex = asString(qbftContractMode.get("arraySlotHex"));
+            if (arraySlotHex == null || arraySlotHex.isBlank()) {
+                throw new IllegalArgumentException(
+                        "localNetworks['" + id + "'].qbftContractMode.arraySlotHex is required");
+            }
+            final Integer maxMessagesPerBundle = asInt(qbftContractMode.get("maxMessagesPerBundle"));
+            final var config = new RelayConfig.QbftContractModeConfig(
+                    validatorContractAddress, arraySlotHex, maxMessagesPerBundle != null ? maxMessagesPerBundle : 10);
+            try {
+                config.arraySlot();
+            } catch (final IllegalArgumentException e) {
+                throw new IllegalArgumentException(
+                        "localNetworks['" + id + "'].qbftContractMode.arraySlotHex='" + arraySlotHex
+                                + "' is not a valid storage slot",
+                        e);
+            }
+            return config;
         }
 
         /**
@@ -574,12 +592,27 @@ final class RelayConfigLoader {
             final Integer maxPriorValidatorSetUpdates = asInt(c.get("maxPriorValidatorSetUpdates"));
             final Integer maxRetries = asInt(c.get("maxRetries"));
             final Long requestTimeoutMs = asLong(c.get("requestTimeoutMs"));
+            final Long maxBundleSize = asLong(c.get("maxBundleSize"));
             return new RelayConfig.CometBftConfig(
                     cometBftRpcUrl != null ? cometBftRpcUrl : "http://localhost:26657",
                     maxMessagesPerBundle != null ? maxMessagesPerBundle : 10,
                     maxPriorValidatorSetUpdates != null ? maxPriorValidatorSetUpdates : 10,
                     maxRetries != null ? maxRetries : 3,
-                    requestTimeoutMs != null ? requestTimeoutMs : 5_000L);
+                    requestTimeoutMs != null ? requestTimeoutMs : 5_000L,
+                    maxBundleSize != null ? maxBundleSize : 1_048_576L);
+        }
+
+        private static RelayConfig.BeaconConfig parseBeaconConfig(@Nullable final Map<String, Object> beacon) {
+            final Map<String, Object> b = beacon != null ? beacon : Map.of();
+            final String beaconApiUrl = asString(b.get("beaconApiUrl"));
+            final Integer maxMessagesPerBundle = asInt(b.get("maxMessagesPerBundle"));
+            final Integer maxRetries = asInt(b.get("maxRetries"));
+            final Long requestTimeoutMs = asLong(b.get("requestTimeoutMs"));
+            return new RelayConfig.BeaconConfig(
+                    beaconApiUrl != null ? beaconApiUrl : "http://localhost:5052",
+                    maxMessagesPerBundle != null ? maxMessagesPerBundle : 10,
+                    maxRetries != null ? maxRetries : 3,
+                    requestTimeoutMs != null ? requestTimeoutMs : 30_000L);
         }
 
         /**

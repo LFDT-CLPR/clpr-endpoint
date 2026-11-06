@@ -3,6 +3,7 @@ package org.hiero.clpr.relay.integration;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+import com.hedera.hapi.node.state.clpr.BundleRequest;
 import com.hedera.hapi.node.state.clpr.ClprChannel;
 import com.hedera.hapi.node.state.clpr.ClprChannelStatus;
 import com.hedera.hapi.node.state.clpr.ClprMessagePayload;
@@ -10,10 +11,11 @@ import com.hedera.hapi.node.state.clpr.ClprMessageValue;
 import com.hedera.pbj.runtime.io.buffer.Bytes;
 import java.math.BigInteger;
 import java.util.List;
+import org.hiero.clpr.relay.core.CommitmentLevel;
 import org.hiero.clpr.relay.core.ContractStateReader;
-import org.hiero.clpr.relay.evm.QbftBundleConstructor;
 import org.hiero.clpr.relay.evm.jsonrpc.EvmJsonRpcClient;
 import org.hiero.clpr.relay.evm.model.Address;
+import org.hiero.clpr.relay.evm.qbft.QbftBundleConstructor;
 import org.hiero.clpr.relay.evm.testfixtures.TestEvmJsonRpcClient;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.condition.EnabledIfEnvironmentVariable;
@@ -50,16 +52,18 @@ class QbftBundleConstructorTest {
         final var runningHashAfterProcessing =
                 Bytes.fromHex("2fb88ac06bd872a82e3338db1e6b58c3b517bf8329538dc836b53e69d626c11c");
 
-        final var blockNumber = rpc.ethGetBlockHeaderByNumber("latest").number();
-        final var qbftProofConstructor = new QbftBundleConstructor(accountAddress, 30_000L, 10, 10, rpc);
         final var clprChannel = minimalChannel(channelId);
-        qbftProofConstructor.onStateChanged(
-                blockNumber,
-                clprChannel.channelId(),
-                clprChannel,
-                List.of(minimalMessage(messageId, runningHashAfterProcessing)));
-        final var constructedBundle = qbftProofConstructor.getLatestBundlePayload(clprChannel.channelId());
-        assertThat(constructedBundle).isNotEmpty();
+        final ContractStateReader stateReader =
+                new FixedStateReader(clprChannel, List.of(minimalMessage(messageId, runningHashAfterProcessing)));
+        final var qbftProofConstructor =
+                new QbftBundleConstructor(accountAddress, 30_000L, 10, 10, rpc, stateReader, CommitmentLevel.LATEST);
+
+        // Ad-hoc construction: ask for the channel's messages from id 1 (the peer's request). createBundle
+        // reads the fixture channel/message from the state reader and fetches the proof from Besu at head.
+        final var request =
+                BundleRequest.newBuilder().currentReceivedMessageId(0L).build();
+        final var response = qbftProofConstructor.createBundle(clprChannel.channelId(), request);
+        assertThat(response.bundlePayload().length()).isGreaterThan(0);
     }
 
     private static ContractStateReader.QueuedMessage minimalMessage(long id, Bytes runningHashAfterProcessing) {
@@ -74,7 +78,7 @@ class QbftBundleConstructorTest {
     private static ClprChannel minimalChannel(long channelId) {
         return ClprChannel.newBuilder()
                 .channelId(Bytes.wrap(BigInteger.valueOf(channelId).toByteArray()))
-                .nextMessageId(1L)
+                .nextMessageId(2L) // message 1 has been sent, so createBundle serves it for a from-1 request
                 .sentRunningHash(Bytes.wrap(new byte[32]))
                 .receivedMessageId(0L)
                 .receivedRunningHash(Bytes.wrap(new byte[32]))

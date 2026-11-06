@@ -16,7 +16,7 @@ import java.util.List;
  * <pre>
  *   StateProof { paths(1) = [ MerklePath { state_item_leaf(4) =
  *       StateItem { value(3) = StateValue { ClprChannel=60 | ClprMessageValue=62 } } } ... ],
- *                signed_block_proof(2) = &lt;opaque&gt; }
+ *                signed_block_proof(2) = TssSignedBlockProof { block_signature(1) = &lt;opaque&gt; } }
  * </pre>
  *
  * <p>Only the leaf values are real protobuf ({@link ClprChannel} / {@link ClprMessageValue}); the
@@ -35,6 +35,7 @@ public final class StateProofTestSupport {
     private static final int STATE_ITEM_VALUE_FIELD = 3;
     private static final int STATE_VALUE_CLPR_CHANNEL_FIELD = 60;
     private static final int STATE_VALUE_CLPR_MESSAGE_VALUE_FIELD = 62;
+    private static final int SIGNED_BLOCK_PROOF_BLOCK_SIGNATURE_FIELD = 1;
 
     private StateProofTestSupport() {}
 
@@ -45,9 +46,13 @@ public final class StateProofTestSupport {
         for (final ClprMessagePayload payload : payloads) {
             parts.add(messagePath(payload));
         }
-        // A real StateProof also carries a signed_block_proof (field 2); include an opaque one to
-        // prove the decoder skips it rather than tripping on it.
-        parts.add(lengthDelimited(STATE_PROOF_SIGNED_BLOCK_PROOF_FIELD, new byte[] {0x01, 0x02, 0x03}));
+        // A real StateProof also carries a signed_block_proof (field 2), a TssSignedBlockProof whose
+        // block_signature (field 1) is opaque to us. It must be well-formed protobuf: the on-chain
+        // decoder descends into signed_block_proof, so a bare byte string trips its "unsupported wire
+        // type" guard (a leading 0x01 byte decodes as wire type 1). Wrap the dummy signature in field 1.
+        final byte[] signedBlockProof =
+                lengthDelimited(SIGNED_BLOCK_PROOF_BLOCK_SIGNATURE_FIELD, new byte[] {0x01, 0x02, 0x03});
+        parts.add(lengthDelimited(STATE_PROOF_SIGNED_BLOCK_PROOF_FIELD, signedBlockProof));
         return Bytes.wrap(concat(parts));
     }
 

@@ -1,0 +1,72 @@
+syntax = "proto3";
+
+package com.hedera.hapi.node.state.clpr;
+
+// SPDX-License-Identifier: Apache-2.0
+option java_package = "com.hederahashgraph.api.proto.java";
+// <<<pbj.java_package = "com.hedera.hapi.node.state.clpr">>> This comment is special code for setting PBJ Compiler java package
+option java_multiple_files = true;
+
+import "services/state/clpr/clpr_ledger_configuration.proto";
+
+/**
+ * An Ethereum beacon-chain sync committee: the 512 member BLS public keys plus their precomputed
+ * aggregate. This is the trust-anchor seed a peer's Ethereum-PoS verifier uses (alongside the
+ * genesis validators root and fork version) to authenticate sync-committee signatures.
+ */
+message EthereumPosSyncCommittee {
+    /**
+     * The 512 sync-committee member public keys, 48 bytes each (BLS12-381 G1, compressed).
+     */
+    repeated bytes pubkeys = 1;
+
+    /**
+     * The precomputed aggregate public key of all 512 members (48 bytes).
+     */
+    bytes aggregate_pubkey = 2;
+}
+
+/**
+ * Ethereum-PoS-specific wire payload returned by getLedgerConfiguration on Ethereum-mainnet
+ * (post-Merge) endpoints and L2s anchoring to Ethereum L1 — the sync-committee analog of
+ * ClprSeiLedgerConfigurationPayload. Wraps the platform-neutral ClprLedgerConfiguration with the
+ * sync-committee light-client material a peer's Ethereum-PoS verifier needs to seed the initial
+ * trust anchor.
+ *
+ * The peer's verifier derives the initial trust anchor (RLP of
+ * [sync_committee, genesis_validators_root, fork_version]) from these fields. Carrying the raw
+ * committee plus the chain-pinning fields — rather than a pre-computed anchor — lets the verifier
+ * check the derivation rather than trusting the source.
+ */
+message EthereumPosLedgerConfigurationPayload {
+    /**
+     * The current sync committee the peer's Ethereum-PoS verifier uses to seed the initial trust
+     * anchor for this connection.
+     */
+    EthereumPosSyncCommittee sync_committee = 1;
+
+    /**
+     * The platform-neutral CLPR configuration of the source ledger, read from contract storage at
+     * the resolved state height.
+     */
+    ClprLedgerConfiguration ledger_configuration = 2;
+
+    /**
+     * The 32-byte beacon-chain genesis validators root — pins the chain in the sync-committee
+     * signing domain and is part of the trust anchor.
+     */
+    bytes genesis_validators_root = 3;
+
+    /**
+     * The 4-byte consensus fork version in effect for the carried sync committee — the other
+     * component of the sync-committee signing domain and the trust anchor.
+     */
+    bytes fork_version = 4;
+
+    /**
+     * The beacon slot the carried sync_committee is current for. Its sync-committee period
+     * (slot / 8192) pins the initial trust anchor and lets the peer's verifier track committee
+     * rotation from a known starting period.
+     */
+    uint64 slot = 5;
+}

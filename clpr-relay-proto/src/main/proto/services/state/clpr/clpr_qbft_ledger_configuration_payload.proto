@@ -105,7 +105,47 @@ message QbftLedgerConfigurationPayload {
     repeated StorageProofEntry clpr_service_storage_proofs = 5;
 
     /**
-     * QBFT epoch length.
+     * QBFT epoch length. Meaningful only in the default header-based validator-selection mode;
+     * ignored when contract_mode_validator_source is set.
      */
     uint64 epoch_length = 6;
+
+    /**
+     * Present only when the source ledger's QBFT validator set is managed by a validator smart
+     * contract (Besu's "contract" validator-selection mode) rather than encoded in each block
+     * header's extra_data. Absent (the default) means the header-based mode: the receiver derives
+     * the validator set from latest_epoch_block_header.extra_data as usual.
+     */
+    QbftContractModeValidatorSource contract_mode_validator_source = 7;
+}
+
+/**
+ * The QBFT "contract" validator-selection mode data a peer needs to build its own config proof
+ * against this source ledger — a proof of the validator contract's `address[]` array (its length
+ * slot plus every element slot) under current_block_header.state_root, alongside the contract's
+ * address and array slot (not otherwise derivable). See clpr-smart-contracts's
+ * src/verifiers/evm/qbft/qbft-contract-mode.md for the receiving verifier's wire format.
+ */
+message QbftContractModeValidatorSource {
+    /**
+     * The 20-byte address of the deployed validator contract.
+     */
+    bytes validator_contract_address = 1;
+
+    /**
+     * Storage slot of the validator contract's address[] array (32 bytes).
+     */
+    bytes array_slot = 2;
+
+    /**
+     * EIP-1186 account proof for the validator contract under current_block_header.state_root.
+     */
+    repeated bytes validator_contract_account_proof = 3;
+
+    /**
+     * EIP-1186 storage proofs for the array's length slot and every element slot, in contract
+     * storage order. Unlike clpr_service_storage_proofs above, StorageProofEntry.value is left
+     * empty here (only key and proof are set) — the value is read from the proof's leaf.
+     */
+    repeated StorageProofEntry validator_contract_storage_proofs = 4;
 }

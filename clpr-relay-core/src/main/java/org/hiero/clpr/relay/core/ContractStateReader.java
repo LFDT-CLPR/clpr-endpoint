@@ -1,23 +1,22 @@
 // SPDX-License-Identifier: Apache-2.0
 package org.hiero.clpr.relay.core;
 
+import com.hedera.hapi.node.state.clpr.ClprChannel;
 import com.hedera.hapi.node.state.clpr.ClprEndpointManifest;
 import com.hedera.hapi.node.state.clpr.ClprLedgerConfiguration;
 import com.hedera.hapi.node.state.clpr.ClprMessageValue;
 import com.hedera.pbj.runtime.io.buffer.Bytes;
 import java.math.BigInteger;
 import java.util.List;
+import java.util.Optional;
 
 /**
  * Reads CLPR-related state from the EVM smart contract.
  *
  * <p>All reads are performed at a specified {@link CommitmentLevel} to allow callers to
  * trade off between data recency and finality guarantees.
- *
- * <p>Extends the narrow {@link ChannelLookup} role: channel lookup is used on its own by
- * consumers that need nothing else, so it lives in that interface and is inherited here.
  */
-public interface ContractStateReader extends ChannelLookup {
+public interface ContractStateReader {
 
     record QueuedMessage(BigInteger messageId, ClprMessageValue value) {}
 
@@ -103,4 +102,6 @@ public interface ContractStateReader extends ChannelLookup {
     default ClprEndpointManifest readEndpointManifest(final String blockTag) {
         return ClprEndpointManifest.DEFAULT;
     }
+
+    Optional<ClprChannel> readChannelState(final Bytes channelId, final String blockTag);
 }

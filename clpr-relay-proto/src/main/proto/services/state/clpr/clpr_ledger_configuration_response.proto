@@ -8,6 +8,7 @@ option java_package = "com.hederahashgraph.api.proto.java";
 option java_multiple_files = true;
 
 import "services/state/clpr/clpr_qbft_ledger_configuration_payload.proto";
+import "services/state/clpr/clpr_ethereum_pos_ledger_configuration_payload.proto";
 
 /**
  * Wire response for the getLedgerConfiguration gRPC. Carries the
@@ -29,5 +30,11 @@ message ClprLedgerConfigurationResponse {
          * Populated when the source ledger uses Sei.
          */
         ClprSeiLedgerConfigurationPayload sei = 2;
+
+        /**
+         * Populated when the source ledger is secured by Ethereum's proof-of-stake consensus
+         * (Ethereum mainnet and L2s anchoring to L1).
+         */
+        EthereumPosLedgerConfigurationPayload ethereum_pos = 3;
     }
 }

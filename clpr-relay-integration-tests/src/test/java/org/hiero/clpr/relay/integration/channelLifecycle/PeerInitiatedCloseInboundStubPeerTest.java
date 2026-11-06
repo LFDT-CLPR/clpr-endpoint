@@ -38,7 +38,7 @@ class PeerInitiatedCloseInboundStubPeerTest extends OneSidedStubPeerTestBase {
         // One peer bundle: ack DATA 1 + reply (keeps response ordering valid on the way to DRAINED) +
         // status=CLOSING. The contract flips ACTIVE → CLOSING off the peer's declared status, then drains
         // the channel once the ack covers all outbound.
-        poke(StubBundles.hieroStateProof()
+        poke(StubBundles.stubProof()
                 .ackedMessageId(state.receivedMessageId())
                 .receivedMessageId(state.nextMessageId() - 1)
                 .reply(1L, ClprMessageReplyStatus.SUCCESS, new byte[] {1})
@@ -50,7 +50,7 @@ class PeerInitiatedCloseInboundStubPeerTest extends OneSidedStubPeerTestBase {
         // The peer, now also drained, sends a status-only DRAINED bundle. With every outbound already acked
         // and the peer reporting DRAINED, the channel completes the handshake: DRAINED → CLOSED.
         final ContractInteractor.ChannelState drained = interactor.requireChannelState(channelId);
-        poke(StubBundles.hieroStateProof()
+        poke(StubBundles.stubProof()
                 .ackedMessageId(drained.receivedMessageId())
                 .receivedMessageId(drained.ackedMessageId())
                 .chainFrom(Bytes.wrap(drained.receivedRunningHash()))

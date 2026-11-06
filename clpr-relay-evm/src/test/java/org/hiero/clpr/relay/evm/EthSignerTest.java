@@ -5,6 +5,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import java.math.BigInteger;
+import java.util.HexFormat;
 import org.junit.jupiter.api.Test;
 
 /**
@@ -50,6 +51,22 @@ class EthSignerTest {
         // N = curve order — just above the valid range
         final String nHex = EthSigner.N.toString(16);
         assertThatThrownBy(() -> new EthSigner(nHex)).isInstanceOf(IllegalArgumentException.class);
+    }
+
+    @Test
+    void derivePublicKey_matchesKnownKeyPair() {
+        // Known-answer vector: reference public key generated independently with Foundry
+        // `cast wallet public-key --private-key 0x<DEV_PRIVATE_KEY>` (alloy/k256).
+        final byte[] pub = EthSigner.derivePublicKey(DEV_PRIVATE_KEY);
+        assertThat(pub).hasSize(64);
+        assertThat(HexFormat.of().formatHex(pub))
+                .isEqualTo("09b02f8a5fddd222ade4ea4528faefc399623af3f736be3c44f03e2df22fb792"
+                        + "f3931a4d9573d333ca74343305762a753388c3422a86d98b713fc91c1ea04842");
+        // The 0x prefix is accepted and yields the same key; and the address is the low 20 bytes
+        // of keccak256(pubKey), tying this vector back to DEV_ADDRESS.
+        assertThat(EthSigner.derivePublicKey("0x" + DEV_PRIVATE_KEY)).isEqualTo(pub);
+        final byte[] hash = AbiCodec.Keccak256.keccak256(pub);
+        assertThat("0x" + HexFormat.of().formatHex(hash, 12, 32)).isEqualTo(DEV_ADDRESS);
     }
 
     // -------------------------------------------------------------------------

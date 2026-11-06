@@ -24,7 +24,7 @@ import org.jspecify.annotations.Nullable;
  *       decoded.</li>
  * </ul>
  *
- * <p>The wire payload, the cached proof package, and {@link ParsedBundle#rawProofBytes()} are
+ * <p>The wire payload, the cached proof package, and {@link ParsedBundle#rawBundleBytes()} are
  * byte-identical for a given bundle, so tagging any of them yields the same id. The keccak digest
  * is only computed when a statement is actually emitted (callers gate on log level), so the cost stays
  * off the hot path.
@@ -37,7 +37,7 @@ public final class BundleLog {
      * Short, stable content tag for a wire bundle payload: {@code len=<n> bundle=<8hex>}.
      *
      * @param payload the bundle payload bytes (the wire payload, the cached proof package, or
-     *                {@link ParsedBundle#rawProofBytes()} — all equivalent)
+     *                {@link ParsedBundle#rawBundleBytes()} — all equivalent)
      * @return a {@code len=… bundle=…} fragment; {@code len=0 bundle=empty} for an empty/null payload
      */
     public static String tag(@Nullable final Bytes payload) {

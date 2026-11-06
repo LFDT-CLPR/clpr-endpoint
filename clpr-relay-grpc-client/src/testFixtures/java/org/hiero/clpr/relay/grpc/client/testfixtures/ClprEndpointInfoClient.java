@@ -22,11 +22,8 @@ import java.util.concurrent.TimeUnit;
 import java.util.function.Supplier;
 
 /**
- * Test-fixture gRPC client for the always-plaintext CLPR endpoint <b>info plane</b>.
- *
- * <p>Drives the {@code getLedgerConfiguration} RPC, which returns chain-verifiable data and therefore
- * needs no transport authentication. Endpoints serve it on their open info listener, so this client
- * dials plaintext only — it holds no CA key, no leaf certificate, and never negotiates TLS.
+ * Test-fixture gRPC client for the CLPR endpoint's {@code getLedgerConfiguration} RPC, which returns
+ * chain-verifiable data.
  *
  * <p>Uses {@code grpc-netty-shaded}'s {@code NettyChannelBuilder} for outbound HTTP/2 transport and
  * standard grpc-java {@link ClientCalls} for the unary calls.
@@ -127,8 +124,7 @@ public class ClprEndpointInfoClient implements AutoCloseable {
     /**
      * Per-peer channel cache keyed by {@code "host:port"}.
      *
-     * <p>Every info-plane channel is plaintext, so the key needs no TLS fingerprint component.
-     * Each {@link ManagedChannel} owns a Netty event-loop group and an HTTP/2 connection; caching
+     * <p>Each {@link ManagedChannel} owns a Netty event-loop group and an HTTP/2 connection; caching
      * gives us a single long-lived connection per peer that is reused across calls. On
      * {@code DEADLINE_EXCEEDED} the stale channel is evicted so the next call opens a fresh one.
      */
@@ -150,10 +146,10 @@ public class ClprEndpointInfoClient implements AutoCloseable {
                     .build();
 
     /**
-     * Retrieves the ledger configuration from a peer over the peer's always-plaintext info listener.
+     * Retrieves the ledger configuration from a peer.
      *
      * @param host    the peer's hostname or IP address
-     * @param port    the peer's info gRPC port
+     * @param port    the peer's gRPC port
      * @param request the ledger configuration request
      * @return the peer's QBFT ledger configuration payload
      * @throws Exception if the call fails
@@ -182,7 +178,7 @@ public class ClprEndpointInfoClient implements AutoCloseable {
         }
     }
 
-    /** Cache key for a plaintext info-plane channel. */
+    /** Cache key for a peer channel. */
     private static String cacheKey(final String host, final int port) {
         return host + ":" + port;
     }
@@ -209,7 +205,7 @@ public class ClprEndpointInfoClient implements AutoCloseable {
         return channel;
     }
 
-    /** Build a plaintext channel to the peer's info listener. */
+    /** Build a channel to the peer's gRPC port. */
     private ManagedChannel buildChannel(final String host, final int port) {
         return NettyChannelBuilder.forAddress(host, port)
                 .maxInboundMessageSize(maxInboundMessageSize)

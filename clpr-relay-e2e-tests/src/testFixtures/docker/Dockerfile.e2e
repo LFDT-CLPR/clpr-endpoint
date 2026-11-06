@@ -15,8 +15,8 @@ COPY docker-entrypoint.sh /app/docker-entrypoint.sh
 
 RUN chmod +x /app/docker-entrypoint.sh
 
-# gRPC sync (9545), gRPC info (9546), Prometheus + /healthz (9547).
-EXPOSE 9545 9546 9547
+# gRPC (9545), Prometheus + /healthz (9547).
+EXPOSE 9545 9547
 
 # Runs as root, unlike the production image. The E2E harness copies a generated
 # relay.yaml into /app at container create time; staying root keeps that write

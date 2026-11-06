@@ -11,10 +11,7 @@ import java.util.Map;
 import org.hiero.clpr.relay.app.ProofType;
 import org.hiero.clpr.relay.app.RelayConfig;
 import org.hiero.clpr.relay.app.RelayConfig.BackoffConfig;
-import org.hiero.clpr.relay.app.RelayConfig.GrpcInfoConfig;
-import org.hiero.clpr.relay.app.RelayConfig.GrpcSyncConfig;
 import org.hiero.clpr.relay.app.RelayInstance;
-import org.hiero.clpr.relay.core.StubReencodingTransactionSubmitter;
 import org.hiero.clpr.relay.evm.jsonrpc.EvmJsonRpcClient;
 import org.testcontainers.shaded.org.apache.commons.lang3.tuple.Triple;
 
@@ -32,17 +29,17 @@ public final class RelayTestSupport {
     private RelayTestSupport() {}
 
     /**
-     * Build a relay for integration tests, injecting the CLPRSTUB re-encoder so each verified bundle
-     * is re-encoded to the stub format before submission. The integration suite deploys
-     * {@code StubClprVerifier}, which only accepts CLPRSTUB-prefixed proofs, while the relay keeps
-     * constructing and parsing real proofs on the wire.
+     * Build a relay for integration tests. The suite deploys {@code StubClprVerifier}, which accepts
+     * only CLPRSTUB-prefixed proofs, so integration relays run with {@code ProofType.Stub} on both the
+     * local network (build via {@code StubBundleConstructor}) and the peer side (parse via
+     * {@code StubProofCodec}) — see {@link #relayConfig(String, int, String, List, ProofType)}.
      *
      * @param config       the relay configuration
      * @param instanceName worker-loop log-context label
      * @return a not-yet-started relay instance
      */
     public static RelayInstance buildRelay(final RelayConfig config, final String instanceName) {
-        return RelayInstance.build(config, instanceName, StubReencodingTransactionSubmitter::new);
+        return RelayInstance.build(config, instanceName);
     }
 
     /**
@@ -58,16 +55,19 @@ public final class RelayTestSupport {
     }
 
     /**
-     * Read the {@code sync.outbound.attempts} counter from a relay's metrics registry, or 0 if
-     * absent. Tests use this to assert whether a relay initiated any outbound sync.
+     * Sum the {@code sync.exchanges.started{role=initiator}} counters across all channels of a relay,
+     * or 0 if absent. Tests use this to assert whether a relay initiated any outbound sync.
      *
      * @param relay the relay to query
      * @return the counter value, or {@code 0}
      */
     public static long outboundAttempts(final RelayInstance relay) {
-        // outbound.attempts is a LabeledCounter registered lazily per channel_id — sum all.
+        // sync.exchanges.started{role=initiator,...} is registered lazily per channel_id — sum the
+        // initiator-side entries. The encoded metric name carries labels as a [k=v,...] suffix, so
+        // filtering on "role=initiator" isolates outbound (dialed) exchanges from inbound (responder) ones.
         return relay.metrics().findMetricsByCategory("sync").stream()
-                .filter(m -> m.getName().startsWith("outbound.attempts"))
+                .filter(m -> m.getName().startsWith("exchanges.started")
+                        && m.getName().contains("role=initiator"))
                 .filter(Counter.class::isInstance)
                 .mapToLong(m -> ((Counter) m).get())
                 .sum();
@@ -88,98 +88,70 @@ public final class RelayTestSupport {
             final int port,
             final String privateKey,
             final List<Triple<String, String, ProofType>> channelParams) {
-        final int infoPort;
-        try {
-            infoPort = findFreePort(); // distinct per relay (two run in-process)
-        } catch (final Exception e) {
-            throw new RuntimeException("failed to allocate an info port", e);
-        }
+        return relayConfig(jsonRpcUrl, port, privateKey, channelParams, ProofType.QBFT);
+    }
+
+    /**
+     * The {@link #relayConfig} variant that lets the caller pick the <em>local</em> network's proof
+     * type. Two real relays exchanging messages over the {@code StubClprVerifier} must both build
+     * {@code ProofType.Stub} (CLPRSTUB) bundles; single-side stub-peer tests keep the QBFT default.
+     *
+     * @param localProofType the local network's own proof type ({@code QBFT} or {@code Stub})
+     */
+    public static RelayConfig relayConfig(
+            final String jsonRpcUrl,
+            final int port,
+            final String privateKey,
+            final List<Triple<String, String, ProofType>> channelParams,
+            final ProofType localProofType) {
         return new RelayConfig(
-                new RelayConfig.GrpcConfig(1_048_576),
-                new GrpcInfoConfig(infoPort),
-                new GrpcSyncConfig(port, false, "", 86400),
-                List.of(localNetwork(jsonRpcUrl)),
+                new RelayConfig.GrpcConfig(port, 1_048_576),
+                List.of(localNetwork(jsonRpcUrl, localProofType)),
                 channels(privateKey, channelParams),
                 DEFAULT_BACKOFF,
                 peerProofTypes(channelParams));
     }
 
-    /**
-     * The <b>secure</b>-sync variant of {@link #relayConfig}: the sync listener is mandatory mTLS on
-     * {@code secureSyncPort}, presenting a leaf signed by the CA key at {@code keyPath} and validating
-     * dialers against the on-chain roster. The info listener stays plaintext. Peers dial
-     * {@code secureSyncPort} (published in each chain's peer roster) over mutual TLS.
-     *
-     * @param jsonRpcUrl              the Anvil JSON-RPC URL
-     * @param secureSyncPort          the mandatory-mTLS sync port to bind (published to the peer as its target)
-     * @param keyPath                 path to this relay's CA PKCS#8 private key (DER/PEM)
-     * @param leafCertValiditySeconds seconds between leaf re-mints (0 disables rotation)
-     * @param privateKey              the signing key
-     * @param channelParams           the reduced ChannelConfig
-     * @return a secure-sync relay configuration ready for {@link RelayInstance#build(RelayConfig)}
-     */
-    public static RelayConfig secureRelayConfig(
-            final String jsonRpcUrl,
-            final int secureSyncPort,
-            final String keyPath,
-            final long leafCertValiditySeconds,
-            final String privateKey,
-            final List<Triple<String, String, ProofType>> channelParams) {
-        final int infoPort;
-        try {
-            infoPort = findFreePort(); // distinct per relay (two run in-process)
-        } catch (final Exception e) {
-            throw new RuntimeException("failed to allocate an info port", e);
-        }
-        return new RelayConfig(
-                new RelayConfig.GrpcConfig(1_048_576),
-                new GrpcInfoConfig(infoPort),
-                new GrpcSyncConfig(secureSyncPort, true, keyPath, leafCertValiditySeconds),
-                List.of(localNetwork(jsonRpcUrl)),
-                channels(privateKey, channelParams),
-                DEFAULT_BACKOFF,
-                peerProofTypes(channelParams));
-    }
-
-    /**
-     * The <b>secure</b>-sync variant of {@link #relayConfig} with the default 86400-second leaf
-     * validity. Delegates to {@link #secureRelayConfig(String, int, String, long, String, List)}.
-     *
-     * @param jsonRpcUrl       the Anvil JSON-RPC URL
-     * @param secureSyncPort   the mandatory-mTLS sync port to bind (published to the peer as its target)
-     * @param keyPath          path to this relay's CA PKCS#8 private key (DER/PEM)
-     * @param privateKey       the signing key
-     * @param channelParams the reduced ChannelConfig
-     * @return a secure-sync relay configuration ready for {@link RelayInstance#build(RelayConfig)}
-     */
-    public static RelayConfig secureRelayConfig(
-            final String jsonRpcUrl,
-            final int secureSyncPort,
-            final String keyPath,
-            final String privateKey,
-            final List<Triple<String, String, ProofType>> channelParams) {
-        return secureRelayConfig(jsonRpcUrl, secureSyncPort, keyPath, 86400L, privateKey, channelParams);
-    }
-
-    /** The single QBFT local network targeting the Anvil chain, shared by both config variants. */
+    /** The QBFT local network targeting the Anvil chain. */
     private static RelayConfig.LocalNetworkConfig localNetwork(final String jsonRpcUrl) {
-        return new RelayConfig.LocalNetworkConfig(
-                "local",
-                ProofType.QBFT,
-                new RelayConfig.CommonEvmParams(
-                        jsonRpcUrl,
-                        AnvilContainer.CHAIN_ID,
-                        Long.MAX_VALUE,
-                        0L,
-                        1.2,
-                        1000L,
-                        // Short request timeout + single retry so a node outage surfaces as a
-                        // channel-level failure in seconds rather than the ~2 min the production
-                        // defaults (30 s × 4 attempts) would take — see TransientNodeOutageRecoveryTest.
-                        2000L,
-                        1),
-                null,
-                new RelayConfig.QbftConfig(30_000L, 5, 10));
+        return localNetwork(jsonRpcUrl, ProofType.QBFT);
+    }
+
+    /**
+     * The local network targeting the Anvil chain with the given proof type. {@code QBFT} builds real
+     * QBFT bundles; {@code Stub} builds CLPRSTUB bundles from real channel state for the
+     * {@code StubClprVerifier} — the format two real relays must use to exchange messages end-to-end
+     * over the stub verifier.
+     */
+    private static RelayConfig.LocalNetworkConfig localNetwork(
+            final String jsonRpcUrl, final ProofType localProofType) {
+        final var evm = new RelayConfig.CommonEvmParams(
+                jsonRpcUrl,
+                AnvilContainer.CHAIN_ID,
+                Long.MAX_VALUE,
+                0L,
+                1.2,
+                1000L,
+                // Short request timeout + single retry so a node outage surfaces as a
+                // channel-level failure in seconds rather than the ~2 min the production
+                // defaults (30 s × 4 attempts) would take — see TransientNodeOutageRecoveryTest.
+                2000L,
+                1);
+        return switch (localProofType) {
+            case QBFT ->
+                new RelayConfig.LocalNetworkConfig(
+                        "local",
+                        ProofType.QBFT,
+                        evm,
+                        null,
+                        new RelayConfig.QbftConfig(30_000L, 5, 10, 1_048_576L),
+                        null,
+                        null);
+            case Stub -> new RelayConfig.LocalNetworkConfig("local", ProofType.Stub, evm, null, null, null, null);
+            default ->
+                throw new IllegalArgumentException(
+                        "unsupported local proof type for integration tests: " + localProofType);
+        };
     }
 
     private static List<RelayConfig.ClprServiceConfig> channels(

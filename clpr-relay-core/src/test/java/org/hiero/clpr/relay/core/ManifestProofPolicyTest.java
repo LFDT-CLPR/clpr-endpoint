@@ -14,10 +14,12 @@ import org.junit.jupiter.api.Test;
 /**
  * Unit tests for {@link ManifestProofPolicy} — the shared decision (issue #292) for whether an
  * outbound bundle should carry a fresh local endpoint-manifest proof.
+ *
+ * <p>Since the two-phase sync migration the peer states the version it holds of our manifest directly
+ * in its {@code BundleRequest.current_endpoint_manifest_version}, so the policy takes that version as a
+ * plain {@code long} — there is no {@code PeerManifestVersionCache} anymore.
  */
 class ManifestProofPolicyTest {
-
-    private static final Bytes CONN = Bytes.wrap(new byte[32]);
 
     private static ClprEndpointManifest manifest(final long version, final int serviceAddressLen) {
         return ClprEndpointManifest.newBuilder()
@@ -53,28 +55,23 @@ class ManifestProofPolicyTest {
         assertThat(ManifestProofPolicy.shouldAttach(manifest(0L, 20), 0L)).isFalse();
     }
 
-    // ── manifestToAttach (reader/cache resolution) ──────────────────────────────
+    // ── manifestToAttach (reader + peer-known-version resolution) ────────────────
 
     @Test
     void manifestToAttach_nullReaderReturnsEmpty() {
-        assertThat(ManifestProofPolicy.manifestToAttach(null, new PeerManifestVersionCache(), CONN, "latest"))
-                .isEmpty();
+        assertThat(ManifestProofPolicy.manifestToAttach(null, 0L, "latest")).isEmpty();
     }
 
     @Test
-    void manifestToAttach_nullCacheTreatsPeerAsVersionZero() {
+    void manifestToAttach_peerAtVersionZeroReceivesManifest() {
         final var reader = new StubManifestReader(manifest(1L, 20));
-        assertThat(ManifestProofPolicy.manifestToAttach(reader, null, CONN, "latest"))
-                .contains(manifest(1L, 20));
+        assertThat(ManifestProofPolicy.manifestToAttach(reader, 0L, "latest")).contains(manifest(1L, 20));
     }
 
     @Test
-    void manifestToAttach_skipsWhenCacheReportsPeerCurrent() {
+    void manifestToAttach_skipsWhenPeerReportsCurrent() {
         final var reader = new StubManifestReader(manifest(1L, 20));
-        final var cache = new PeerManifestVersionCache();
-        cache.record(CONN, 1L);
-        assertThat(ManifestProofPolicy.manifestToAttach(reader, cache, CONN, "latest"))
-                .isEmpty();
+        assertThat(ManifestProofPolicy.manifestToAttach(reader, 1L, "latest")).isEmpty();
     }
 
     /** Minimal reader that only answers {@code readEndpointManifest(String)}. */

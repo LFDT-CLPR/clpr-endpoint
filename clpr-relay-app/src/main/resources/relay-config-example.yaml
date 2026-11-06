@@ -6,44 +6,15 @@
 # environment variable.
 #
 # Only the scalar `grpc` and `backoff` blocks are system-property overridable (with a "relay."
-# prefix, e.g. relay.grpc.sync.port=9545). The `localNetworks`, `clprServices`, and `peerProofTypes`
+# prefix, e.g. relay.grpc.port=9545). The `localNetworks`, `clprServices`, and `peerProofTypes`
 # sections are YAML-only — they cannot be overridden via system properties.
 
-# gRPC server settings. The inbound transport is two listeners:
-#
-#   info : ALWAYS plaintext. Serves discoverEndpoints / getLedgerConfiguration, which return
-#          chain-verifiable public data, so they are never put behind TLS.
-#   sync : the data plane. Plaintext by default; mandatory mTLS when sync.tlsEnabled is true (then
-#          tlsKeyPath is required), in which case the sync listener requires the dialer's client leaf to
-#          chain to a CA in the on-chain roster at the TLS handshake.
-#
-# Both ports are always served and must differ. Outbound dialing is NOT configured here — it is driven
-# by each peer's on-chain tls_certificate.
+# gRPC server settings. One port serves the sync RPC and getLedgerConfiguration.
 grpc:
-  info:
-    # TCP port for the always-plaintext info listener (default: 9546).
-    port: 9546
-  sync:
-    # TCP port for the sync (data-plane) listener (default: 9545).
-    port: 9545
-    # Turn the sync listener into mandatory mTLS. When true, tlsKeyPath is REQUIRED; when false (the
-    # default) it is ignored and the sync listener is plaintext.
-    tlsEnabled: false
-    # This endpoint's ECDSA P-384 CA PRIVATE KEY (PKCS#8 PEM/DER) — the private half of the CA whose
-    # certificate is published on-chain as tls_certificate. Required (and only used) when tlsEnabled is
-    # true. The relay does NOT read the CA certificate from disk: it mints an Ed25519 leaf signed by this
-    # key and presents the leaf at every handshake; peers accept a leaf that chains to the on-chain CA.
-    # The on-chain CA cert MUST be self-signed by this key and carry subject CN=x (the JVM rejects an
-    # empty DN, so this minimal single-character CN is used). Keep it small — it is ledger state cached
-    # in every peer roster — though the relay no longer enforces a byte ceiling on read.
-    tlsKeyPath: ""
-    # How often the in-memory Ed25519 leaf certificate is re-minted, in seconds. The leaf is
-    # regenerated on demand the first time a TLS handshake occurs after the window elapses.
-    # Set to 0 to disable rotation (the leaf is then valid for 10 years). Required only when
-    # tlsEnabled is true; ignored otherwise. (default: 86400 = 24 h)
-    leafCertValiditySeconds: 86400
+  # TCP port the gRPC server listens on (default: 9545).
+  port: 9545
   # Maximum gRPC message size in bytes (default: 1048576 = 1 MiB).
-  # Applied symmetrically: inbound on every PBJ Helidon listener AND outbound channels in
+  # Applied symmetrically: inbound on the PBJ Helidon server AND outbound channels in
   # ClprEndpointClient (via grpc-netty maxInboundMessageSize). Raise this if bundles or
   # proofs grow large; the PBJ default of 10 KiB is too small for production payloads.
   maxMessageSize: 1048576
@@ -58,6 +29,8 @@ grpc:
 #              (epoch block header + EIP-1186 proofs).
 #   CometBFT — EVM chain using CometBFT consensus (Sei). getLedgerConfiguration returns a
 #              ClprSeiLedgerConfigurationPayload (validator set + ledger configuration).
+#   EthereumPOS — EVM chain using Ethereum POS consensus. getLedgerConfiguration returns a
+#               EthereumPosLedgerConfigurationPayload (light-client update + sync committee).
 #
 # (The Hiero proof type is valid only as a channel's peerProofType, not for a local network.)
 localNetworks:
@@ -97,6 +70,41 @@ localNetworks:
       # Maximum messages to include in a single bundle (default: 10).
       maxMessagesPerBundle: 10
 
+      # Maximum assembled bundle-proof size in bytes; a larger bundle is not emitted, guarding
+      # against a gas/size blowup on the peer's submitBundle (default: 1048576 = 1 MiB).
+      maxBundleSize: 1048576
+
+  # ── Local Besu QBFT chain, "contract" validator-selection mode ──
+  # Uncomment for a Besu QBFT chain whose validator set is managed by a validator smart contract
+  # (Besu's qbft.validatorselectionmode: contract) rather than encoded in each block header's
+  # extra_data. This is a DISTINCT network type from besu-local above, not an optional variant of
+  # it — proofType: QBFTContractMode selects it, and a channel keeps its network's mode for its
+  # full life; there is no in-place migration between the two. See docs/configuration.md's
+  # "localNetworks[].qbftContractMode" section for the full requirements (peer-chain gas sizing,
+  # archive-node access).
+  # - id: besu-local-contract-mode
+  #   proofType: QBFTContractMode
+  #   evm:
+  #     jsonRpcUrl: http://localhost:8545
+  #     chainId: 1337
+  #     maxGasPriceCap: 9223372036854775807
+  #     gasPriorityFee: 2000000000
+  #     gasBufferMultiplier: 1.2
+  #     pollIntervalMs: 1000
+  #   qbftContractMode:
+  #     # Hex address of the deployed validator contract. Placeholder — a real deployment
+  #     # never leaves this at the zero address.
+  #     validatorContractAddress: "0x0000000000000000000000000000000000000000"
+  #
+  #     # Storage slot of the validator contract's `address[]` array. Depends on the deployed
+  #     # contract's storage layout — the default proof source assumes a plain Solidity
+  #     # `address[]` state variable (length at the slot, elements at keccak256(slot) + i),
+  #     # matching the Consensys validator-smart-contracts reference implementation.
+  #     arraySlotHex: "0x02"
+  #
+  #     # Maximum messages to include in a single bundle (default: 10).
+  #     maxMessagesPerBundle: 10
+
   # ── Local Sei (CometBFT) chain ──
   # Sei is EVM-compatible, so it reuses the evm: block for the EVM side (contract reads + submitBundle).
   # The CometBFT proof path is configured in the separate `cometBft:` block below.
@@ -121,6 +129,32 @@ localNetworks:
       maxRetries: 3
       # Per-request CometBFT RPC response timeout in ms (default: 5000).
       requestTimeoutMs: 5000
+      # Maximum assembled bundle-proof size in bytes; a larger bundle is not emitted, guarding
+      # against a gas/size blowup on the peer's submitBundle (default: 1048576 = 1 MiB).
+      maxBundleSize: 1048576
+
+  # ── Local Ethereum (PoS) chain ──
+  # Ethereum mainnet is EVM, so it reuses the evm: block for the EVM side (contract reads +
+  # submitBundle). The sync-committee light-client proof path is configured in the separate
+  # `beacon:` block, which points at a consensus-layer (beacon node) REST endpoint.
+  - id: ethereum-local
+    proofType: EthereumPOS
+    evm:
+      # Execution-layer JSON-RPC endpoint (contract reads + submitBundle transactions).
+      jsonRpcUrl: http://localhost:8545
+      # EIP-155 chain id (1 = Ethereum mainnet).
+      chainId: 1
+    # Ethereum-PoS beacon (consensus-layer) proof parameters (only used for EthereumPOS networks).
+    beacon:
+      # Beacon node REST API base URL for sync-committee light-client data — attested header,
+      # sync aggregate, execution payload header, and SSZ branches (default: http://localhost:5052).
+      beaconApiUrl: http://localhost:5052
+      # Maximum messages to include in an Ethereum-PoS bundle (default: 10).
+      maxMessagesPerBundle: 10
+      # Max retry attempts for a beacon REST call on transient failure (default: 3).
+      maxRetries: 3
+      # Per-request beacon REST response timeout in ms (default: 30000).
+      requestTimeoutMs: 30000
 
 # ClprService contract deployments the relay operates against. Each entry pins one on-chain
 # ClprService contract on one localNetwork, carries the signing key(s) for its channels, and

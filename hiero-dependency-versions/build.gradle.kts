@@ -9,13 +9,13 @@ plugins {
 dependencies.constraints {
     val pbjVersion = pluginVersions.version("com.hedera.pbj.pbj-compiler")
     val helidonVersion = "4.4.1"
+    val hieroCryptoVersion = "3.14.0"
     val jacksonVersion = "2.18.3"
     val swirldsVersion = "0.56.5"
     val log4jVersion = "2.24.3"
     val mockitoVersion = "5.15.2"
     val grpcIoVersion = "1.73.0"
     val protobufVersion = "4.31.1"
-    val bouncyCastleVersion = "1.78.1"
 
     api("com.hedera.pbj:pbj-runtime:${pbjVersion}") { because("com.hedera.pbj.runtime") }
     api("com.hedera.pbj:pbj-grpc-helidon:${pbjVersion}") { because("com.hedera.pbj.grpc.helidon") }
@@ -97,12 +97,13 @@ dependencies.constraints {
     }
     api("org.jspecify:jspecify:1.0.0") { because("org.jspecify") }
 
-    // BouncyCastle — X.509 leaf-certificate construction for the two-tier mTLS trust model.
-    api("org.bouncycastle:bcprov-jdk18on:$bouncyCastleVersion") {
-        because("org.bouncycastle.provider")
+    // hiero-cryptography — native BLS12-381 G1/G2 decompression
+    api("com.hedera.cryptography:hedera-cryptography-hints:$hieroCryptoVersion") {
+        because("com.hedera.cryptography.hints")
     }
-    api("org.bouncycastle:bcutil-jdk18on:$bouncyCastleVersion") { because("org.bouncycastle.util") }
-    api("org.bouncycastle:bcpkix-jdk18on:$bouncyCastleVersion") { because("org.bouncycastle.pkix") }
+    api("com.hedera.common:hedera-common-nativesupport:$hieroCryptoVersion") {
+        because("com.hedera.common.nativesupport")
+    }
 
     // Testing
     api("org.junit.jupiter:junit-jupiter-api:5.14.0") { because("org.junit.jupiter.api") }

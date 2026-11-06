@@ -13,8 +13,6 @@ dependencies {
     api("com.hedera.pbj:pbj-runtime")
     // Used internally only → implementation.
     implementation(project(":clpr-relay-grpc-client"))
-    // StubBundles builds Hiero StateProof wire bytes via the promoted core test fixture.
-    implementation(testFixtures(project(":clpr-relay-core")))
     implementation("com.hedera.pbj:pbj-grpc-helidon")
     implementation("io.helidon.webserver:helidon-webserver")
     runtimeOnly("com.hedera.pbj:pbj-grpc-helidon-config")

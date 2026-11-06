@@ -1,0 +1,34 @@
+# SPDX-License-Identifier: Apache-2.0
+name: "200: [FLOW] PR Formatting"
+on:
+  pull_request_target:
+    types:
+      - opened
+      - reopened
+      - edited
+      - synchronize
+
+defaults:
+  run:
+    shell: bash
+
+permissions:
+  # The action calls GET /repos/{owner}/{repo}/pulls/{pr} to fetch the title.
+  pull-requests: read
+  # The action publishes the check result as a commit status on the PR head.
+  statuses: write
+
+jobs:
+  title-check:
+    name: Title Check
+    runs-on: ubuntu-latest
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@ccd8616d44fd3846e67624a50d5aad6d37bf2d25 # v2.22.1
+        with:
+          egress-policy: audit
+
+      - name: Check PR Title
+        uses: step-security/action-semantic-pull-request@75d2dd5deafa3e9fccc1626ecd58d076ed1d2c79 # v6.1.2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

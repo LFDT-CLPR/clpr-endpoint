@@ -6,8 +6,6 @@ module org.hiero.clpr.relay.core {
     requires transitive com.swirlds.metrics.api;
     requires transitive org.hiero.clpr.relay.proto;
     requires com.swirlds.metrics.impl;
-    requires org.bouncycastle.pkix;
-    requires org.bouncycastle.provider;
     requires static org.jspecify;
 
     exports org.hiero.clpr.relay.core;

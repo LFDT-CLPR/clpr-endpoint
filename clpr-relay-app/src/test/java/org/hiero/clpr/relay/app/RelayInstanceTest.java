@@ -23,7 +23,9 @@ class RelayInstanceTest {
                 ProofType.QBFT,
                 new RelayConfig.CommonEvmParams(jsonRpcUrl, 1L, Long.MAX_VALUE, 0L, 1.2, 1000L, 30_000L, 3),
                 null,
-                new RelayConfig.QbftConfig(30_000L, 5, 10));
+                new RelayConfig.QbftConfig(30_000L, 5, 10, 1_048_576L),
+                null,
+                null);
     }
 
     @Test

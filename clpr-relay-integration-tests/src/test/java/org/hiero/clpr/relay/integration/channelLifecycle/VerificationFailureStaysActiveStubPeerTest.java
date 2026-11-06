@@ -37,7 +37,7 @@ class VerificationFailureStaysActiveStubPeerTest extends OneSidedStubPeerTestBas
         // bundle's sent_running_hash → ClprRunningHashMismatch revert (Step 4, before any dispatch).
         final byte[] wrongBase = new byte[32];
         Arrays.fill(wrongBase, (byte) 0xff);
-        final Bytes badHash = StubBundles.hieroStateProof()
+        final Bytes badHash = StubBundles.stubProof()
                 .ackedMessageId(0)
                 .chainFrom(Bytes.wrap(wrongBase))
                 .message(connectorId, targetApp(), new byte[20], "x".getBytes())

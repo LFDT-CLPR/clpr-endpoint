@@ -32,6 +32,9 @@ public final class ContractDeployer {
     private static final int DEPLOYMENT_POLL_ATTEMPTS = 60;
     private static final long DEPLOYMENT_POLL_INTERVAL_MS = 500L;
 
+    /** The 20-byte zero address, passed as {@code ClprService}'s {@code feeToken} to select native fee mode. */
+    private static final String ZERO_ADDRESS = "0x0000000000000000000000000000000000000000";
+
     private final EvmJsonRpcClient rpcClient;
     private final AnvilTxSubmitter txSubmitter;
     private final String deployerAddress;
@@ -118,18 +121,25 @@ public final class ContractDeployer {
 
         // Deploy ClprService(address owner, uint32 protocolVersion, string chainId,
         //                    address channelLogic, address messagingLogic, address bundleLogic,
-        //                    address connectorLogic, address adminLogic, address bundleDecodeHelper).
-        // ABI encoding head layout (9 slots × 32 bytes = 288 bytes):
+        //                    address connectorLogic, address adminLogic, address bundleDecodeHelper,
+        //                    address feeToken).
+        // ABI encoding head layout (10 slots × 32 bytes = 320 bytes):
         //   [0] owner (address, inline)
         //   [1] protocolVersion (uint32, inline)
-        //   [2] offset to chainId string = 288
+        //   [2] offset to chainId string = 320
         //   [3] channelLogic (address, inline)
         //   [4] messagingLogic (address, inline)
         //   [5] bundleLogic (address, inline)
         //   [6] connectorLogic (address, inline)
         //   [7] adminLogic (address, inline)
         //   [8] bundleDecodeHelper (address, inline)
+        //   [9] feeToken (address, inline) = address(0) → native fee mode
         //   tail: length of chainId bytes, then padded chainId bytes
+        // feeToken is a tenth constructor parameter added in clpr-smart-contracts. A non-zero value
+        // makes the constructor probe it as an ERC-20 (SafeERC20.tryGetDecimals) and revert with
+        // ClprInvalidFeeToken on a codeless address, so the head MUST carry the zero-address slot — and
+        // the chainId offset MUST therefore be 320, not 288 — or the whole service deploy reverts.
+        // address(0) ("native value") matches the contracts' own ClprDeployHelper default.
         // Must match every test-fixture peerChainId (verifier mock + channel commitments) so channelId
         // derivation stays consistent across both sides, and so GetLedgerConfigurationTest's chainId
         // assertion matches the deployed _config.chainId.
@@ -137,13 +147,14 @@ public final class ContractDeployer {
         final byte[] serviceArgs = concat(
                 AbiCodec.encodeAddress(deployerAddress),
                 AbiCodec.encodeUint(1L),
-                AbiCodec.encodeUint(288L),
+                AbiCodec.encodeUint(320L),
                 AbiCodec.encodeAddress(channelLogicAddr),
                 AbiCodec.encodeAddress(messagingLogicAddr),
                 AbiCodec.encodeAddress(bundleLogicAddr),
                 AbiCodec.encodeAddress(connectorLogicAddr),
                 AbiCodec.encodeAddress(adminLogicAddr),
                 AbiCodec.encodeAddress(bundleDecodeHelperAddr),
+                AbiCodec.encodeAddress(ZERO_ADDRESS),
                 AbiCodec.encodeUint(chainIdBytes.length),
                 AbiCodec.padRight32(chainIdBytes));
         final String serviceAddr = deployContract(service.bytecode(), serviceArgs);
